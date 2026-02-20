@@ -66,29 +66,35 @@ jobs:
           | ssh secondbrain "docker exec -i $CONTAINER tar -xzf - -C /root/agent-api/"
 
           # Install deps and restart (all inside the container)
-          ssh secondbrain << ENDSSH
+          ssh secondbrain "
             set -e
             CONTAINER=secondbrain-agent-api
 
-            echo "=== Installing dependencies ==="
-            docker exec \$CONTAINER bash -c "pip install --break-system-packages -q \
-              fastapi uvicorn uvloop httptools httpx sse-starlette 'PyJWT[crypto]'"
+            echo '=== Installing dependencies ==='
+            docker exec \$CONTAINER bash -c 'pip install --break-system-packages -q \
+              fastapi uvicorn uvloop httptools httpx sse-starlette PyJWT[crypto]'
 
-            echo "=== Restarting container ==="
+            echo '=== Restarting container ==='
             docker restart \$CONTAINER
 
-            echo "=== Health check (waiting up to 30s) ==="
-            for i in \$(seq 1 6); do
+            echo '=== Health check (waiting up to 30s) ==='
+            HEALTHY=false
+            for i in 1 2 3 4 5 6; do
               sleep 5
-              if docker exec \$CONTAINER python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" 2>/dev/null; then
-                echo "Agent API is healthy!"
-                docker exec \$CONTAINER python -c "import urllib.request, sys; sys.stdout.write(urllib.request.urlopen('http://localhost:8000/health').read().decode())"
-                echo ""
-                exit 0
+              if docker exec \$CONTAINER python -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:8000/health\")' 2>/dev/null; then
+                HEALTHY=true
+                break
               fi
-              echo "Attempt \$i/6 — not ready yet"
+              echo \"Attempt \$i/6 — not ready yet\"
             done
-            echo "Health check failed after 30s!"
-            docker logs --tail 50 \$CONTAINER
-            exit 1
-          ENDSSH
+
+            if \$HEALTHY; then
+              echo 'Agent API is healthy!'
+              docker exec \$CONTAINER python -c 'import urllib.request, sys; sys.stdout.write(urllib.request.urlopen(\"http://localhost:8000/health\").read().decode())'
+              echo ''
+            else
+              echo 'Health check failed after 30s!'
+              docker logs --tail 50 \$CONTAINER
+              exit 1
+            fi
+          "
