@@ -1,7 +1,7 @@
 # iOS AI Assistant — Build Guide v3
 
 **Start date:** _______________
-**Target completion:** 12 weeks from start
+**Target completion:** 13 tasks
 
 ---
 
@@ -61,7 +61,7 @@ Every interaction follows this flow:
 
 ---
 
-# Phase 1 — Server Infrastructure (Week 1–2)(done)
+# Phase 1 — Server Infrastructure (Task 1–5) (done)
 
 **Goal:** Containers running 24/7, Cloudflare Tunnel for SSH access, GitHub Actions auto-deploys code changes.
 **End state:** Push code to GitHub → CI pipeline deploys into running container → test via Cloudflare.
@@ -80,7 +80,7 @@ Local machine                    GitHub                     Server (beast)
 
 ---
 
-## Week 1, Day 1: Get Containers Running(done)
+## Task 1: Get Containers Running (done)
 
 Everything else depends on this. Get the LLM and agent-api containers up first.
 
@@ -208,7 +208,7 @@ cd ~/data/SecondBrain
 cat <<EOF > .env
 API_SECRET_KEY=$(openssl rand -hex 32)
 SESSION_SECRET=$(openssl rand -hex 32)
-CF_TUNNEL_TOKEN=           # Fill after Cloudflare setup (Day 2)
+CF_TUNNEL_TOKEN=           # Fill after Cloudflare setup (Task 2)
 EOF
 chmod 600 .env
 
@@ -264,11 +264,34 @@ docker restart secondbrain-agent-api
 curl http://localhost:8000/health
 ```
 
-**✅ Day 1 checkpoint:** Both containers running 24/7. LLM responds to curl. Agent API returns health OK.
+### Success criteria
+- [x] `secondbrain-llm` container running with GPU detected (compute capability 12.0)
+- [x] `secondbrain-agent-api` container running
+- [x] `secondbrain-cloudflared` container running
+- [x] LLM responds to direct curl
+- [x] Agent API `/health` returns OK
+
+### Test cases
+```bash
+# TC1.1: All 3 containers are running
+docker ps --filter "name=secondbrain" --format "{{.Names}}" | sort
+# Expected: secondbrain-agent-api, secondbrain-cloudflared, secondbrain-llm
+
+# TC1.2: LLM responds
+curl -s http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"qwen3-14b","messages":[{"role":"user","content":"Say hello"}],"stream":false}' \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['choices'][0]['message']['content'][:50])"
+# Expected: Non-empty text response
+
+# TC1.3: Agent API health
+curl -s http://localhost:8000/health
+# Expected: {"status": "ok"}
+```
 
 ---
 
-## Week 1, Day 2: Cloudflare Tunnel + SSH Access
+## Task 2: Cloudflare Tunnel + SSH Access (done)
 
 ### Step 1: Create tunnel in Cloudflare dashboard (done)
 
@@ -300,7 +323,7 @@ Connection settings:
   Proxy read timeout: 120s
 ```
 
-### Step 3: Cloudflare Access (protect both hostnames)
+### Step 3: Cloudflare Access (protect both hostnames) (done)
 
 ```
 1. Zero Trust → Access → Applications → Add application
@@ -347,11 +370,36 @@ Host secondbrain-ssh
 ssh secondbrain-ssh "echo 'SSH OK via Cloudflare'"
 ```
 
-**✅ Day 2 checkpoint:** Tunnel connected. API reachable from anywhere. SSH works through Cloudflare.
+### Success criteria
+- [x] Cloudflare Tunnel connected (logs show "Connection registered")
+- [x] API reachable from outside your network via `secondbrain.yingliu.site`
+- [x] SSH works through `secondbrain-ssh.yingliu.site`
+- [x] Cloudflare Access policies protect both hostnames
+
+### Test cases
+```bash
+# TC2.1: Tunnel is connected
+docker logs secondbrain-cloudflared 2>&1 | grep -i "registered"
+# Expected: "Connection ... registered"
+
+# TC2.2: API reachable via Cloudflare (from any network)
+curl -s "https://secondbrain.yingliu.site/health" \
+  -H "CF-Access-Client-Id: $CF_CLIENT_ID" \
+  -H "CF-Access-Client-Secret: $CF_CLIENT_SECRET"
+# Expected: {"status": "ok", ...}
+
+# TC2.3: SSH via Cloudflare
+ssh secondbrain-ssh "echo 'SSH OK'"
+# Expected: "SSH OK"
+
+# TC2.4: Unauthenticated request is blocked
+curl -s -o /dev/null -w "%{http_code}" "https://secondbrain.yingliu.site/health"
+# Expected: 403
+```
 
 ---
 
-## Week 1, Day 3: GitHub Actions CI/CD Pipeline (done)
+## Task 3: GitHub Actions CI/CD Pipeline (done)
 
 Same pattern as your Pose Spatial Studio: push to `main` → GitHub Actions SSHs into beast via Cloudflare → deploys code into the running container.
 
@@ -365,7 +413,7 @@ CF_ACCESS_CLIENT_ID   # Cloudflare Access service token (for CI)
 CF_ACCESS_CLIENT_SECRET
 ```
 
-### Create the deploy workflow
+### Create the deploy workflow (done)
 
 ```yaml
 # ~/data/SecondBrain/.github/workflows/deploy_agent_api.yml
@@ -468,19 +516,47 @@ git push origin main
 # Watch the GitHub Actions run in your repo's Actions tab
 ```
 
-**✅ Day 3 checkpoint:** Push to `agent-api/` on main → GitHub Actions deploys into container → health check passes.
+### Success criteria
+- [x] GitHub secrets configured (SSH_PRIVATE_KEY, SSH_HOSTNAME, SSH_USER, CF_ACCESS_CLIENT_ID, CF_ACCESS_CLIENT_SECRET)
+- [x] Push to `agent-api/` on `main` triggers the workflow
+- [x] Workflow SSHs into server via Cloudflare tunnel
+- [x] Code is deployed directly into the container (no VM filesystem changes)
+- [x] Container restarts and passes health check
+
+### Test cases
+```bash
+# TC3.1: Trigger workflow manually
+gh workflow run deploy_agent_api.yml
+gh run watch  # wait for completion
+# Expected: Run completes with green checkmark
+
+# TC3.2: Push triggers workflow
+echo "# test" >> agent-api/main.py && git add agent-api/main.py
+git commit -m "test: trigger CI" && git push origin main
+gh run list --workflow=deploy_agent_api.yml --limit 1
+# Expected: New run triggered, status "completed/success"
+
+# TC3.3: Health check passes after deploy
+curl -s http://localhost:8000/health
+# Expected: {"status": "ok"}
+```
 
 ---
 
-## Week 1, Day 4–7: Build the Agent API (develop locally, deploy via CI)
+## Task 4: Build the Agent API (develop locally, deploy via CI)
+
+> **Note:** Docker containers run on the remote server (beast), not on your local machine.
+> - `localhost` URLs and `docker` commands only work on the server (via SSH)
+> - From your local machine, test via Cloudflare tunnel URLs or SSH
 
 From now on, your workflow is:
 1. **Edit** `agent-api/main.py` (and other files) locally
 2. **Push** to GitHub
 3. **CI pipeline** auto-deploys into the running container
-4. **Test** via `curl https://ai.yourdomain.com/...`
+4. **Test** via `curl https://secondbrain.yingliu.site/...` (Cloudflare) or `ssh secondbrain-ssh "curl ..."` (direct)
 
 ### main.py — Full agent loop
+
 
 Write this locally, then push to deploy:
 
@@ -501,7 +577,7 @@ MAX_TOOLS = int(os.environ.get("MAX_TOOL_CALLS_PER_TURN", 5))
 # Persistent async client with connection pooling to llama-server
 llm_client = httpx.AsyncClient(base_url=LLM_URL, timeout=httpx.Timeout(120.0))
 
-# Session storage (upgrade to SQLite in Phase 6)
+# Session storage (upgrade to SQLite in Task 12)
 sessions: dict[str, list] = {}
 tool_result_events: dict[str, asyncio.Event] = {}
 tool_results: dict[str, str] = {}
@@ -517,7 +593,7 @@ SSE_HEADERS = {
 # ── Security logging ────────────────────────────────────────
 sec_log = logging.getLogger("security")
 sec_log.setLevel(logging.WARNING)
-_h = logging.FileHandler("/app/data/security.log")
+_h = logging.FileHandler("data/security.log")
 _h.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
 sec_log.addHandler(_h)
 
@@ -698,11 +774,72 @@ curl -N "https://ai.yourdomain.com/health" \
   -H "CF-Access-Client-Secret: YOUR_SECRET"
 ```
 
-**✅ Day 4–7 checkpoint:** Push code → CI deploys → agent API responds via Cloudflare with streamed LLM tokens.
+### Success criteria
+- [ ] `/chat` endpoint accepts POST with auth headers and returns SSE stream
+- [ ] LLM generates text responses streamed as `event: token` events
+- [ ] Tool calls are emitted as `event: tool_call` events
+- [ ] `/tool_result` endpoint accepts tool results and resumes the agent loop
+- [ ] Auth middleware rejects requests with bad token, stale timestamp, or invalid HMAC
+- [ ] Prompt injection patterns in tool results are flagged
+- [ ] Session history is maintained across messages in the same session
+
+### Test cases
+
+All tests run from your **local machine** via Cloudflare tunnel or SSH.
+
+```bash
+# TC4.1: Health check shows LLM connected (via SSH to server)
+ssh secondbrain-ssh "curl -s http://localhost:8000/health"
+# Expected: {"status": "ok", "llm": {...}}
+
+# TC4.1b: Health check via Cloudflare (from anywhere)
+curl -s "https://secondbrain.yingliu.site/health" \
+  -H "CF-Access-Client-Id: $CF_CLIENT_ID" \
+  -H "CF-Access-Client-Secret: $CF_CLIENT_SECRET"
+# Expected: {"status": "ok", "llm": {...}}
+
+# TC4.2: Authenticated chat returns streamed tokens (via SSH)
+ssh secondbrain-ssh 'bash -s' << 'EOF'
+  TIMESTAMP=$(date +%s)
+  BODY='{"message":"Hello, what can you do?","session_id":"test1"}'
+  SECRET=$(grep API_SECRET_KEY ~/data/SecondBrain/.env | cut -d= -f2)
+  SIG=$(echo -n "${TIMESTAMP}${BODY}" | openssl dgst -sha256 -hmac "$SECRET" | awk '{print $2}')
+  curl -N http://localhost:8000/chat \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $SECRET" \
+    -H "X-Timestamp: $TIMESTAMP" \
+    -H "X-Signature: $SIG" \
+    -d "$BODY"
+EOF
+# Expected: event: token lines followed by event: done
+
+# TC4.3: Unauthenticated request is rejected (via SSH)
+ssh secondbrain-ssh 'curl -s -o /dev/null -w "%{http_code}" -X POST http://localhost:8000/chat \
+  -H "Content-Type: application/json" -d '"'"'{"message":"test"}'"'"''
+# Expected: 401
+
+# TC4.4: Bad HMAC is rejected (via SSH)
+ssh secondbrain-ssh 'bash -s' << 'EOF'
+  TIMESTAMP=$(date +%s)
+  BODY='{"message":"test","session_id":"test1"}'
+  SECRET=$(grep API_SECRET_KEY ~/data/SecondBrain/.env | cut -d= -f2)
+  curl -s -o /dev/null -w "%{http_code}" -X POST http://localhost:8000/chat \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $SECRET" \
+    -H "X-Timestamp: $TIMESTAMP" \
+    -H "X-Signature: bad_signature" \
+    -d "$BODY"
+EOF
+# Expected: 401
+
+# TC4.5: Container health after deploy (via SSH)
+ssh secondbrain-ssh "docker ps --filter name=secondbrain-agent-api --format '{{.Status}}'"
+# Expected: Up ... (healthy) or similar
+```
 
 ---
 
-## Week 2: WAF, Rate Limiting & Security
+## Task 5: WAF, Rate Limiting & Security
 
 ### WAF rules (Cloudflare dashboard)
 
@@ -764,18 +901,53 @@ SECRETS (.env)
   [ ] .env chmod 600, in .gitignore
 ```
 
-**✅ Week 2 checkpoint:** Full stack running. CI/CD deploys on push. Reachable via Cloudflare. WAF + rate limiting active.
+### Success criteria
+- [ ] WAF blocks requests to non-API paths
+- [ ] WAF blocks oversized requests (>64 KB body)
+- [ ] WAF blocks requests without service token
+- [ ] WAF enforces JSON content type on POST
+- [ ] Rate limiting active: `/chat` at 10 req/min, global at 60 req/min
+- [ ] OWASP managed rules enabled (log mode)
+
+### Test cases
+```bash
+# TC5.1: Non-API path is blocked
+curl -s -o /dev/null -w "%{http_code}" "https://secondbrain.yingliu.site/admin" \
+  -H "CF-Access-Client-Id: $CF_CLIENT_ID" \
+  -H "CF-Access-Client-Secret: $CF_CLIENT_SECRET"
+# Expected: 403
+
+# TC5.2: Oversized body is blocked
+python3 -c "print('x'*70000)" | curl -s -o /dev/null -w "%{http_code}" \
+  -X POST "https://secondbrain.yingliu.site/chat" \
+  -H "CF-Access-Client-Id: $CF_CLIENT_ID" \
+  -H "CF-Access-Client-Secret: $CF_CLIENT_SECRET" \
+  -H "Content-Type: application/json" -d @-
+# Expected: 403
+
+# TC5.3: Missing service token is blocked
+curl -s -o /dev/null -w "%{http_code}" "https://secondbrain.yingliu.site/health"
+# Expected: 403
+
+# TC5.4: Rate limiting kicks in
+for i in $(seq 1 15); do
+  curl -s -o /dev/null -w "%{http_code} " "https://secondbrain.yingliu.site/health" \
+    -H "CF-Access-Client-Id: $CF_CLIENT_ID" \
+    -H "CF-Access-Client-Secret: $CF_CLIENT_SECRET"
+done
+# Expected: 200s followed by 429s
+```
 
 ---
 
-# Phase 2 — iPhone App Core (Week 3–4)
+# Phase 2 — iPhone App Core (Task 6–7)
 
 **Goal:** Minimal SwiftUI app that sends text, receives streamed responses, and executes tool calls.
 **End state:** Type on iPhone → see streaming tokens → LLM can read your calendar.
 
 ---
 
-## Week 3: Build the Client
+## Task 6: Build the Client
 
 ### Create Xcode project
 
@@ -988,11 +1160,27 @@ struct MessageBubble: View {
 }
 ```
 
-**✅ Week 3 checkpoint:** iPhone app sends messages to your server, tokens stream back in real-time, chat UI works.
+### Success criteria
+- [ ] App builds and runs on iPhone 15 Pro (iOS 26)
+- [ ] Text input sends message to server via HTTPS through Cloudflare
+- [ ] SSE tokens stream back and appear word-by-word in chat UI
+- [ ] Chat history displays user and assistant messages with distinct bubbles
+- [ ] HMAC auth headers are sent with every request
+- [ ] Cloudflare Access headers are included
+
+### Test cases
+```
+TC6.1: Type "Hello" → message appears in user bubble → streamed response
+       appears word-by-word in assistant bubble
+TC6.2: Type "What is 2+2?" → correct answer streams back
+TC6.3: Kill server → type message → error message displays gracefully
+TC6.4: Send 3 messages in a row → all appear in scroll view with correct order
+TC6.5: Airplane mode → type message → connection error shown (no crash)
+```
 
 ---
 
-## Week 4: On-Device Tool Executors
+## Task 7: On-Device Tool Executors
 
 ### CalendarTool.swift
 
@@ -1086,18 +1274,36 @@ enum ContactsTool {
 | `set_timer` | UserNotifications | Phase 4 |
 | `run_shortcut` | Shortcuts/Intents | Phase 4 |
 
-**✅ Week 4 checkpoint:** "What's on my calendar?" → tool call → iPhone reads EventKit → sends result → LLM summarizes events. Full loop working.
+### Success criteria
+- [ ] Calendar permission requested and events returned via EventKit
+- [ ] Calendar event creation works via EventKit
+- [ ] Reminders permission requested and pending items returned
+- [ ] Contacts permission requested and search returns results
+- [ ] Clipboard read works via UIPasteboard
+- [ ] Tool call → iPhone executes → result sent back → LLM summarizes — full loop
+
+### Test cases
+```
+TC7.1: "What's on my calendar this week?" → tool_call event → iPhone reads
+       EventKit → result sent back → LLM summarizes events in chat
+TC7.2: "Create a meeting called Test at 3pm tomorrow" → tool_call →
+       event created → confirmation in chat → verify in Calendar app
+TC7.3: "What are my reminders?" → tool_call → pending reminders listed
+TC7.4: "Find John in my contacts" → tool_call → contact info returned
+TC7.5: "What's on my clipboard?" → tool_call → clipboard text shown
+TC7.6: Deny calendar permission → tool returns error → LLM explains gracefully
+```
 
 ---
 
-# Phase 3 — Voice (Week 5–6)
+# Phase 3 — Voice (Task 8–9)
 
 **Goal:** Talk to your phone, hear the answer back.
 **End state:** Tap mic → speak → streaming text response → spoken aloud.
 
 ---
 
-## Week 5: Speech-to-Text & TTS
+## Task 8: Speech-to-Text & TTS
 
 ### SpeechManager.swift
 
@@ -1162,7 +1368,7 @@ class TTSManager {
 }
 ```
 
-## Week 6: Voice Mode UI
+## Task 9: Voice Mode UI
 
 Build a `VoiceModeView` with a pulsing mic button, live transcript, and waveform animation. Wire it together:
 
@@ -1173,18 +1379,43 @@ Tap mic → SpeechManager.startListening → transcript text
     → TTSManager.speak(response)
 ```
 
-**✅ Phase 3 checkpoint:** Tap mic, speak "What's on my calendar tomorrow?", see streaming response, hear it spoken back.
+### Task 8 success criteria
+- [ ] Microphone permission requested
+- [ ] Speech recognition runs on-device (no data sent to Apple)
+- [ ] Spoken words transcribed to text in real-time
+- [ ] Final transcript sent to server as a chat message
+
+### Task 8 test cases
+```
+TC8.1: Tap mic → speak "Hello" → transcript shows "Hello" → sent to server
+TC8.2: Tap mic → speak a long sentence → words appear incrementally
+TC8.3: Deny microphone permission → graceful error shown
+```
+
+### Task 9 success criteria
+- [ ] TTS speaks the assistant's response aloud after streaming completes
+- [ ] Voice mode UI has pulsing mic button and live transcript display
+- [ ] Full voice loop works: speak → transcribe → send → stream → speak response
+
+### Task 9 test cases
+```
+TC9.1: Tap mic → "What's on my calendar tomorrow?" → streaming text appears
+       → response spoken aloud via TTS
+TC9.2: Tap mic during TTS playback → TTS stops → new recording starts
+TC9.3: Long response → TTS speaks entire response without cutting off
+TC9.4: Voice speed slider changes TTS rate
+```
 
 ---
 
-# Phase 4 — Wake Word & Background (Week 7–8)
+# Phase 4 — Wake Word & Background (Task 10–11)
 
 **Goal:** "Hey Jarvis" activates from background.
 **End state:** Phone in pocket → say "Hey Jarvis, set a reminder to buy milk" → reminder created, confirmation spoken.
 
 ---
 
-## Week 7: Wake Word Integration
+## Task 10: Wake Word Integration
 
 ```
 1. Sign up at https://console.picovoice.ai
@@ -1212,7 +1443,7 @@ class WakeWordManager: ObservableObject {
 }
 ```
 
-## Week 8: Background Audio Mode
+## Task 11: Background Audio Mode
 
 Enable "Audio, AirPlay, and Picture in Picture" background mode in Xcode capabilities. This lets Porcupine keep running when the app is backgrounded.
 
@@ -1225,17 +1456,43 @@ App backgrounded → Porcupine runs (~1 MB RAM, <4% CPU)
   → Speak response via TTS
 ```
 
-**✅ Phase 4 checkpoint:** Phone on table, say "Hey Jarvis, what time is it?" — assistant responds with current time.
+### Task 10 success criteria
+- [ ] Picovoice Porcupine SDK integrated via SPM
+- [ ] Custom "Hey Jarvis" wake word trained and `.ppn` file bundled
+- [ ] Wake word detected reliably in foreground
+- [ ] Detection triggers speech recognition flow
+
+### Task 10 test cases
+```
+TC10.1: App in foreground → say "Hey Jarvis" → chime plays → mic activates
+TC10.2: Say "Hey Jarvis, what time is it?" → full voice loop completes
+TC10.3: Say unrelated phrase → no false activation
+TC10.4: Say wake word from 2 meters away → still detected
+```
+
+### Task 11 success criteria
+- [ ] Background audio mode enabled in Xcode capabilities
+- [ ] Porcupine keeps running when app is backgrounded (~1 MB RAM, <4% CPU)
+- [ ] Wake word triggers full flow from background (chime → STT → server → TTS)
+
+### Task 11 test cases
+```
+TC11.1: Background app → "Hey Jarvis, set a reminder to buy milk" →
+        reminder created → confirmation spoken
+TC11.2: Lock phone → say wake word → assistant responds via TTS
+TC11.3: Background for 1 hour → wake word still detected
+TC11.4: Check battery usage → Porcupine <4% CPU over 8 hours
+```
 
 ---
 
-# Phase 5 — Polish (Week 9–12)
+# Phase 5 — Polish (Task 12–13)
 
 **Goal:** Production-ready app with settings, persistence, error handling, and monitoring.
 
 ---
 
-## Week 9–10: Settings & Persistence
+## Task 12: Settings & Persistence
 
 **Settings screen:**
 - Server URL (editable)
@@ -1261,7 +1518,26 @@ func send(message: String) async {
 }
 ```
 
-## Week 11–12: Monitoring, Error Handling & Final QA
+### Success criteria
+- [ ] Settings screen with server URL, connection test, wake word toggle, voice speed, API key
+- [ ] API key stored in iOS Keychain (not UserDefaults)
+- [ ] Server-side sessions stored in SQLite (survives container restart)
+- [ ] "New chat" and "Delete history" actions work
+- [ ] Offline: server unreachable → graceful error message (no crash)
+
+### Test cases
+```
+TC12.1: Change server URL in settings → connection test button → shows success/failure
+TC12.2: Enter API key → force quit app → reopen → key is still there (Keychain)
+TC12.3: Send 5 messages → restart agent-api container → send message →
+        history still includes previous 5 messages
+TC12.4: "New chat" → previous messages cleared → new session ID
+TC12.5: "Delete history" → server confirms deletion → chat is empty
+TC12.6: Airplane mode → send message → "Server unreachable" error → no crash
+TC12.7: Toggle wake word off → say "Hey Jarvis" → no activation
+```
+
+## Task 13: Monitoring, Error Handling & Final QA
 
 **Server monitoring (optional but recommended):**
 
@@ -1293,7 +1569,25 @@ func send(message: String) async {
 - Battery life test (8h background listening)
 - Load test (rapid-fire 20 messages)
 
-**✅ Phase 5 checkpoint:** App is daily-driveable. Settings work, conversations persist, errors handled gracefully.
+### Success criteria
+- [ ] Retry logic with exponential backoff on network errors
+- [ ] 120s timeout for inference, 60s for tool results
+- [ ] Graceful degradation when LLM container is restarting
+- [ ] GPU monitoring via dcgm-exporter (optional)
+- [ ] App works reliably on WiFi, cellular, and VPN
+
+### Test cases
+```
+TC13.1: WiFi → send message → response streams correctly
+TC13.2: Cellular → send message → response streams correctly
+TC13.3: VPN → send message → response streams correctly
+TC13.4: Toggle airplane mode mid-response → error shown → retry succeeds after reconnect
+TC13.5: Restart secondbrain-llm → send message during restart →
+        "degraded" status → retry after LLM is back → succeeds
+TC13.6: Rapid-fire 20 messages → all get responses → no crashes or hangs
+TC13.7: Background wake word listening for 8 hours → battery drain <15%
+TC13.8: Noisy room → say wake word → still activates reliably
+```
 
 ---
 

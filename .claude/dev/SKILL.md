@@ -154,106 +154,58 @@ cd agent-api && python -m py_compile main.py
 ## Step 4: Validate
 
 > **MANDATORY — BLOCKING STEP — DO NOT SKIP**
+>
+> **Note:** Docker containers run on the remote server (beast), not locally.
+> All `docker` and `localhost` commands must be run via SSH, or test via Cloudflare tunnel URLs.
+> Deploying code to the container is done exclusively through git push → CI/CD pipeline.
 
-### Step 4.0: Pre-flight
-
-Verify the development environment:
-```bash
-# Check all containers are running
-docker ps --filter "name=secondbrain" --format "table {{.Names}}\t{{.Status}}"
-
-# Verify LLM is healthy
-curl -s http://localhost:8080/health
-
-# Verify agent-api is healthy
-curl -s http://localhost:8000/health
-```
-
-All three containers (`secondbrain-llm`, `secondbrain-agent-api`, `secondbrain-cloudflared`) must be running.
-
-### Step 4.1: Local deploy test
-
-Simulate what CI will do — deploy code into the running container:
-```bash
-CONTAINER=secondbrain-agent-api
-
-# Copy code into container
-docker cp agent-api/. $CONTAINER:/root/agent-api/
-
-# Install any new dependencies
-docker exec $CONTAINER bash -c "pip install --break-system-packages -q \
-  fastapi uvicorn uvloop httptools httpx sse-starlette 'PyJWT[crypto]'"
-
-# Restart to pick up changes
-docker restart $CONTAINER
-sleep 5
-
-# Health check
-curl -s http://localhost:8000/health
-```
-
-### Step 4.2: API testing
-
-Test each affected endpoint. At minimum, always test:
+### Step 4.0: Pre-flight (local)
 
 ```bash
-# Health check
-curl -s http://localhost:8000/health
-
-# Chat endpoint (if auth is implemented)
-TIMESTAMP=$(date +%s)
-BODY='{"message":"Hello, what can you do?","session_id":"test1"}'
-SECRET=$(grep API_SECRET_KEY ~/data/SecondBrain/.env | cut -d= -f2)
-SIG=$(echo -n "${TIMESTAMP}${BODY}" | openssl dgst -sha256 -hmac "$SECRET" | awk '{print $2}')
-
-curl -N http://localhost:8000/chat \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $SECRET" \
-  -H "X-Timestamp: $TIMESTAMP" \
-  -H "X-Signature: $SIG" \
-  -d "$BODY"
+# Compile-check all modified Python files
+cd agent-api && python -m py_compile main.py
 ```
 
-If the change involves tool calls, test the tool call flow:
+### Step 4.1: Deploy via CI/CD
+
+> **STOP — Ask user for approval before pushing**
+
+Push branch and merge to `main` to trigger CI/CD deployment:
 ```bash
-# Send a message that triggers a tool call
-BODY='{"message":"What is on my calendar?","session_id":"test2"}'
-# ... (same auth pattern as above)
-# Verify the response contains event: tool_call
+git push -u origin <branch-name>
+# Create PR, merge to main → CI auto-deploys into container
 ```
 
-### Step 4.3: Remote deploy test
+### Step 4.2: API testing (via Cloudflare tunnel)
 
-> **STOP — Ask user for approval before deploying to staging**
-
-Push to staging branch and verify CI deploys successfully:
-```bash
-git push origin HEAD:staging
-```
-
-After CI completes:
-```bash
-# Verify via Cloudflare (from any network)
-curl -s "https://ai.yourdomain.com/health" \
-  -H "CF-Access-Client-Id: YOUR_CLIENT_ID" \
-  -H "CF-Access-Client-Secret: YOUR_SECRET"
-```
-
-### Step 4.4: Container health
+After CI completes, test from your local machine:
 
 ```bash
-# Check container logs for errors
-docker logs --tail 50 secondbrain-agent-api
-docker logs --tail 20 secondbrain-llm
+# Health check via Cloudflare
+curl -s "https://secondbrain.yingliu.site/health" \
+  -H "CF-Access-Client-Id: $CF_CLIENT_ID" \
+  -H "CF-Access-Client-Secret: $CF_CLIENT_SECRET"
+# Expected: {"status": "ok", "llm": {...}}
 
-# Verify GPU is still detected
-docker exec secondbrain-llm nvidia-smi 2>/dev/null || echo "nvidia-smi not in container — check host: nvidia-smi"
-
-# Verify no containers crashed
-docker ps --filter "name=secondbrain" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+# Unauthenticated request is blocked
+curl -s -o /dev/null -w "%{http_code}" "https://secondbrain.yingliu.site/health"
+# Expected: 403
 ```
 
-**After ALL test steps pass and the user explicitly approves**, continue to Step 5.
+### Step 4.3: Container health (via CI logs)
+
+Check the GitHub Actions run output for:
+- Health check passed after deploy
+- No container crash logs
+- Container restarted successfully
+
+```bash
+# View latest CI run status
+gh run list --workflow=deploy_agent_api.yml --limit 1
+gh run view --log <run-id>
+```
+
+**After CI deploy succeeds and health check passes**, continue to Step 5.
 
 ---
 
