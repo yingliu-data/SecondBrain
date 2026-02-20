@@ -50,6 +50,20 @@ jobs:
           EOF
           chmod 600 ~/.ssh/config
 
+      - name: Debug Cloudflare Access
+        env:
+          SSH_HOSTNAME: ${{ secrets.SSH_HOSTNAME }}
+        run: |
+          echo "=== Test Access endpoint with curl ==="
+          curl -sv \
+            -H "CF-Access-Client-Id: ${CF_ACCESS_CLIENT_ID}" \
+            -H "CF-Access-Client-Secret: ${CF_ACCESS_CLIENT_SECRET}" \
+            "https://${SSH_HOSTNAME}" 2>&1 | head -40
+
+          echo ""
+          echo "=== Test cloudflared access token ==="
+          cloudflared access token --hostname "${SSH_HOSTNAME}" --id "${CF_ACCESS_CLIENT_ID}" --secret "${CF_ACCESS_CLIENT_SECRET}" 2>&1 || true
+
       - name: Test SSH
         run: ssh -vvv -o StrictHostKeyChecking=accept-new secondbrain "echo 'SSH OK'"
 
