@@ -31,11 +31,21 @@ SecondBrain/
 
 ## Endpoints
 
-| Endpoint | Method | Purpose |
-|---|---|---|
-| `/health` | GET | Health check (also checks LLM connectivity) |
-| `/chat` | POST | Main conversation endpoint (SSE streaming) |
-| `/tool_result` | POST | iPhone sends tool execution results back |
+| Endpoint | Method | Auth | Purpose |
+|---|---|---|---|
+| `/health` | GET | None | Health check (also checks LLM connectivity) |
+| `/chat` | POST | Bearer + Timestamp + HMAC | Main conversation endpoint (SSE streaming) |
+| `/tool_result` | POST | Bearer + Timestamp + HMAC | iPhone sends tool execution results back |
+
+## Auth Middleware (3-layer)
+
+1. **Bearer token** — `Authorization: Bearer <API_SECRET_KEY>`
+2. **Timestamp freshness** — `X-Timestamp` must be within 300s of server time
+3. **HMAC signature** — `X-Signature` = HMAC-SHA256(API_SECRET_KEY, timestamp + body)
+
+## Tool Definitions
+
+Tools defined in agent-api, executed on iPhone: `get_calendar_events`, `create_calendar_event`, `get_reminders`, `create_reminder`, `search_contacts`, `read_clipboard`, `web_search`
 
 ## GitHub Secrets Required
 
