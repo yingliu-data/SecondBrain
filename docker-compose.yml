@@ -81,6 +81,8 @@ services:
       - TUNNEL_TOKEN=${CF_TUNNEL_TOKEN}
     networks:
       - tunnel_network
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
 networks:
   llm_internal:
