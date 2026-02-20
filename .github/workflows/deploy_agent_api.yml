@@ -54,15 +54,22 @@ jobs:
         env:
           SSH_HOSTNAME: ${{ secrets.SSH_HOSTNAME }}
         run: |
-          echo "=== Test Access endpoint with curl ==="
-          curl -sv \
+          echo "=== HTTP status from Access endpoint ==="
+          HTTP_CODE=$(curl -s -o /tmp/cf-body.txt -w '%{http_code}' \
             -H "CF-Access-Client-Id: ${CF_ACCESS_CLIENT_ID}" \
             -H "CF-Access-Client-Secret: ${CF_ACCESS_CLIENT_SECRET}" \
-            "https://${SSH_HOSTNAME}" 2>&1 | head -40
+            "https://${SSH_HOSTNAME}")
+          echo "HTTP status: ${HTTP_CODE}"
+          echo "Response body:"
+          head -20 /tmp/cf-body.txt
 
           echo ""
-          echo "=== Test cloudflared access token ==="
-          cloudflared access token --hostname "${SSH_HOSTNAME}" --id "${CF_ACCESS_CLIENT_ID}" --secret "${CF_ACCESS_CLIENT_SECRET}" 2>&1 || true
+          echo "=== cloudflared version ==="
+          cloudflared --version
+
+          echo ""
+          echo "=== cloudflared access ssh direct test (5s timeout) ==="
+          timeout 5 cloudflared access ssh --hostname "${SSH_HOSTNAME}" --id "${CF_ACCESS_CLIENT_ID}" --secret "${CF_ACCESS_CLIENT_SECRET}" 2>&1 || echo "Exit code: $?"
 
       - name: Test SSH
         run: ssh -vvv -o StrictHostKeyChecking=accept-new secondbrain "echo 'SSH OK'"
