@@ -31,9 +31,10 @@ jobs:
       # The CI runner needs it to SSH through your existing Cloudflare tunnel.
       - name: Install cloudflared on CI runner
         run: |
-          curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
+          curl -L https://github.com/cloudflare/cloudflared/releases/download/2025.4.2/cloudflared-linux-amd64 -o cloudflared
           sudo mv cloudflared /usr/local/bin/cloudflared
           sudo chmod +x /usr/local/bin/cloudflared
+          cloudflared --version
 
       - name: Configure SSH to use Cloudflare tunnel
         env:
@@ -45,12 +46,12 @@ jobs:
           Host secondbrain
             HostName ${SSH_HOSTNAME}
             User ${SSH_USER}
-            ProxyCommand cloudflared access ssh --hostname %h
+            ProxyCommand cloudflared access ssh --hostname %h --id ${CF_ACCESS_CLIENT_ID} --secret ${CF_ACCESS_CLIENT_SECRET}
           EOF
           chmod 600 ~/.ssh/config
 
       - name: Test SSH
-        run: ssh -o StrictHostKeyChecking=accept-new secondbrain "echo 'SSH OK'"
+        run: ssh -vvv -o StrictHostKeyChecking=accept-new secondbrain "echo 'SSH OK'"
 
       - name: Deploy directly into container
         run: |
