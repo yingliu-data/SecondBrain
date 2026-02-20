@@ -1,0 +1,89 @@
+name: Deploy Agent API
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - 'agent-api/**'
+      - '.github/workflows/deploy_agent_api.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+      CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      # Install cloudflared on the CI runner (NOT on your server).
+      # The CI runner needs it to SSH through your existing Cloudflare tunnel.
+      - name: Install cloudflared on CI runner
+        run: |
+          curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
+          sudo mv cloudflared /usr/local/bin/cloudflared
+          sudo chmod +x /usr/local/bin/cloudflared
+
+      - name: Configure SSH to use Cloudflare tunnel
+        env:
+          SSH_HOSTNAME: ${{ secrets.SSH_HOSTNAME }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        run: |
+          mkdir -p ~/.ssh
+          cat << EOF >> ~/.ssh/config
+          Host secondbrain
+            HostName ${SSH_HOSTNAME}
+            User ${SSH_USER}
+            ProxyCommand cloudflared access ssh --hostname %h
+          EOF
+          chmod 600 ~/.ssh/config
+
+      - name: Test SSH
+        run: ssh -o StrictHostKeyChecking=accept-new secondbrain "echo 'SSH OK'"
+
+      - name: Deploy directly into container
+        run: |
+          CONTAINER=secondbrain-agent-api
+
+          # Pipe code straight into the container — nothing touches the VM filesystem
+          tar -czf - -C agent-api \
+            --exclude='__pycache__' \
+            --exclude='*.pyc' \
+            --exclude='data' \
+            . \
+          | ssh secondbrain "docker exec -i $CONTAINER tar -xzf - -C /root/agent-api/"
+
+          # Install deps and restart (all inside the container)
+          ssh secondbrain << ENDSSH
+            set -e
+            CONTAINER=secondbrain-agent-api
+
+            echo "=== Installing dependencies ==="
+            docker exec \$CONTAINER bash -c "pip install --break-system-packages -q \
+              fastapi uvicorn uvloop httptools httpx sse-starlette 'PyJWT[crypto]'"
+
+            echo "=== Restarting container ==="
+            docker restart \$CONTAINER
+            sleep 5
+
+            echo "=== Health check ==="
+            if docker exec \$CONTAINER curl -sf http://localhost:8000/health > /dev/null; then
+              echo "Agent API is healthy!"
+              docker exec \$CONTAINER curl -s http://localhost:8000/health
+            else
+              echo "Health check failed!"
+              docker logs --tail 50 \$CONTAINER
+              exit 1
+            fi
+          ENDSSH
