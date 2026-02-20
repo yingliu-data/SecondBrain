@@ -50,29 +50,8 @@ jobs:
           EOF
           chmod 600 ~/.ssh/config
 
-      - name: Debug Cloudflare Access
-        env:
-          SSH_HOSTNAME: ${{ secrets.SSH_HOSTNAME }}
-        run: |
-          echo "=== HTTP status from Access endpoint ==="
-          HTTP_CODE=$(curl -s -o /tmp/cf-body.txt -w '%{http_code}' \
-            -H "CF-Access-Client-Id: ${CF_ACCESS_CLIENT_ID}" \
-            -H "CF-Access-Client-Secret: ${CF_ACCESS_CLIENT_SECRET}" \
-            "https://${SSH_HOSTNAME}")
-          echo "HTTP status: ${HTTP_CODE}"
-          echo "Response body:"
-          head -20 /tmp/cf-body.txt
-
-          echo ""
-          echo "=== cloudflared version ==="
-          cloudflared --version
-
-          echo ""
-          echo "=== cloudflared access ssh direct test (5s timeout) ==="
-          timeout 5 cloudflared access ssh --hostname "${SSH_HOSTNAME}" --id "${CF_ACCESS_CLIENT_ID}" --secret "${CF_ACCESS_CLIENT_SECRET}" 2>&1 || echo "Exit code: $?"
-
       - name: Test SSH
-        run: ssh -vvv -o StrictHostKeyChecking=accept-new secondbrain "echo 'SSH OK'"
+        run: ssh -o StrictHostKeyChecking=accept-new secondbrain "echo 'SSH OK'"
 
       - name: Deploy directly into container
         run: |
@@ -97,15 +76,19 @@ jobs:
 
             echo "=== Restarting container ==="
             docker restart \$CONTAINER
-            sleep 5
 
-            echo "=== Health check ==="
-            if docker exec \$CONTAINER curl -sf http://localhost:8000/health > /dev/null; then
-              echo "Agent API is healthy!"
-              docker exec \$CONTAINER curl -s http://localhost:8000/health
-            else
-              echo "Health check failed!"
-              docker logs --tail 50 \$CONTAINER
-              exit 1
-            fi
+            echo "=== Health check (waiting up to 30s) ==="
+            for i in \$(seq 1 6); do
+              sleep 5
+              if docker exec \$CONTAINER python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" 2>/dev/null; then
+                echo "Agent API is healthy!"
+                docker exec \$CONTAINER python -c "import urllib.request, sys; sys.stdout.write(urllib.request.urlopen('http://localhost:8000/health').read().decode())"
+                echo ""
+                exit 0
+              fi
+              echo "Attempt \$i/6 — not ready yet"
+            done
+            echo "Health check failed after 30s!"
+            docker logs --tail 50 \$CONTAINER
+            exit 1
           ENDSSH
