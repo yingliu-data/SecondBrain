@@ -62,14 +62,13 @@ jobs:
           scp docker-compose.yml secondbrain:~/data/SecondBrain/docker-compose.yml
 
           # 2. Stop the container (handles restart loops gracefully)
-          ssh secondbrain "cd ~/data/SecondBrain && docker compose stop agent-api" || true
+          ssh secondbrain "docker stop $CONTAINER" || true
 
-          # 3. Recreate container with updated config
-          #    This creates a fresh container with the correct startup command.
-          #    The named volume (agent-api-code) persists across recreations.
-          ssh secondbrain "cd ~/data/SecondBrain && docker compose up -d agent-api"
+          # 3. Recreate agent-api ONLY with updated config (--no-deps avoids
+          #    recreating the LLM container which takes minutes to reload)
+          ssh secondbrain "cd ~/data/SecondBrain && docker compose up -d --no-deps agent-api"
 
-          # 4. Wait for container to enter running state
+          # 4. Wait for container to enter running state (pip install runs on startup)
           sleep 10
 
           # 5. Deploy latest code into the running container
@@ -84,7 +83,7 @@ jobs:
           ssh secondbrain "docker exec $CONTAINER rm -f /root/agent-api/main.py"
 
           # 7. Restart to pick up the deployed code
-          ssh secondbrain "cd ~/data/SecondBrain && docker compose restart agent-api"
+          ssh secondbrain "docker restart $CONTAINER"
 
           # 8. Health check (wait up to 60s for pip install + uvicorn startup)
           ssh secondbrain "
