@@ -95,15 +95,15 @@ jobs:
             # Cleanup
             rm -rf /tmp/sb-deploy
 
-            echo '=== Health check (waiting up to 60s) ==='
+            echo '=== Health check (waiting up to 5m for pip install + startup) ==='
             HEALTHY=false
-            for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            for i in \$(seq 1 60); do
               sleep 5
               if docker exec \$CONTAINER python -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:8000/health\")' 2>/dev/null; then
                 HEALTHY=true
                 break
               fi
-              echo \"Attempt \$i/12 — not ready yet\"
+              echo \"Attempt \$i/60 — not ready yet\"
             done
 
             if \$HEALTHY; then
@@ -111,7 +111,7 @@ jobs:
               docker exec \$CONTAINER python -c 'import urllib.request, sys; sys.stdout.write(urllib.request.urlopen(\"http://localhost:8000/health\").read().decode())'
               echo ''
             else
-              echo 'Health check failed after 60s!'
+              echo 'Health check failed after 5m!'
               docker logs --tail 50 \$CONTAINER
               exit 1
             fi
