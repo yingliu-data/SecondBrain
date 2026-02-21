@@ -58,7 +58,21 @@ jobs:
         run: |
           CONTAINER=secondbrain-agent-api
 
-          # 1. Deploy code into the container volume
+          # 1. Sync docker-compose.yml first (startup command may have changed)
+          scp docker-compose.yml secondbrain:~/data/SecondBrain/docker-compose.yml
+
+          # 2. Stop the container (handles restart loops gracefully)
+          ssh secondbrain "cd ~/data/SecondBrain && docker compose stop agent-api" || true
+
+          # 3. Recreate container with updated config
+          #    This creates a fresh container with the correct startup command.
+          #    The named volume (agent-api-code) persists across recreations.
+          ssh secondbrain "cd ~/data/SecondBrain && docker compose up -d agent-api"
+
+          # 4. Wait for container to enter running state
+          sleep 10
+
+          # 5. Deploy latest code into the running container
           tar -czf - -C agent-api \
             --exclude='__pycache__' \
             --exclude='*.pyc' \
@@ -66,18 +80,13 @@ jobs:
             . \
           | ssh secondbrain "docker exec -i $CONTAINER tar -xzf - -C /root/agent-api/"
 
-          # 2. Clean up stale files from previous architecture
+          # 6. Clean up stale files from previous architecture
           ssh secondbrain "docker exec $CONTAINER rm -f /root/agent-api/main.py"
 
-          # 3. Sync docker-compose.yml (startup command may have changed)
-          scp docker-compose.yml secondbrain:~/data/SecondBrain/docker-compose.yml
+          # 7. Restart to pick up the deployed code
+          ssh secondbrain "cd ~/data/SecondBrain && docker compose restart agent-api"
 
-          # 4. Recreate container with updated config + restart
-          #    docker compose up -d re-reads docker-compose.yml and applies changes.
-          #    The startup command installs deps automatically.
-          ssh secondbrain "cd ~/data/SecondBrain && docker compose up -d agent-api"
-
-          # 5. Health check (wait up to 60s for pip install + uvicorn startup)
+          # 8. Health check (wait up to 60s for pip install + uvicorn startup)
           ssh secondbrain "
             set -e
             CONTAINER=secondbrain-agent-api
