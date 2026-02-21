@@ -61,33 +61,39 @@ jobs:
           # 1. Sync docker-compose.yml (startup command may have changed)
           scp docker-compose.yml secondbrain:~/data/SecondBrain/docker-compose.yml
 
-          # 2. Upload code to server temp dir (not directly into container)
+          # 2. Upload code to server temp dir
           tar -czf - -C agent-api \
             --exclude='__pycache__' \
             --exclude='*.pyc' \
             --exclude='data' \
             . \
-          | ssh secondbrain "mkdir -p /tmp/sb-deploy && tar -xzf - -C /tmp/sb-deploy/"
+          | ssh secondbrain "rm -rf /tmp/sb-deploy && mkdir -p /tmp/sb-deploy && tar -xzf - -C /tmp/sb-deploy/"
 
-          # 3. Stop and remove old container (handles restart loops)
-          ssh secondbrain "docker stop $CONTAINER 2>/dev/null; docker rm -f $CONTAINER 2>/dev/null" || true
-
-          # 4. Create new container WITHOUT starting it (--no-deps skips LLM)
-          ssh secondbrain "cd ~/data/SecondBrain && docker compose create --no-deps agent-api"
-
-          # 5. Deploy code into the stopped container (docker cp works on stopped containers)
-          ssh secondbrain "docker cp /tmp/sb-deploy/. $CONTAINER:/root/agent-api/"
-
-          # 6. Start the container (code is already in place)
-          ssh secondbrain "cd ~/data/SecondBrain && docker compose start agent-api"
-
-          # 7. Cleanup
-          ssh secondbrain "rm -rf /tmp/sb-deploy"
-
-          # 8. Health check (wait up to 60s for pip install + uvicorn startup)
+          # 3. Stop and remove old container, deploy code into volume, start fresh
           ssh secondbrain "
             set -e
+            cd ~/data/SecondBrain
             CONTAINER=secondbrain-agent-api
+
+            # Stop the container (handles restart loops)
+            docker stop \$CONTAINER 2>/dev/null || true
+            docker rm -f \$CONTAINER 2>/dev/null || true
+
+            # Write code into the named volume via a temporary container.
+            # This ensures code exists BEFORE the real container starts.
+            VOLUME=\$(docker volume ls -q | grep agent-api-code | head -1)
+            echo \"Volume: \$VOLUME\"
+            docker run --rm \
+              -v \$VOLUME:/data \
+              -v /tmp/sb-deploy:/src:ro \
+              python:3.12-slim \
+              bash -c 'rm -rf /data/app /data/main.py && cp -r /src/. /data/'
+
+            # Start the container (code is already in the volume)
+            docker compose up -d --no-deps agent-api
+
+            # Cleanup
+            rm -rf /tmp/sb-deploy
 
             echo '=== Health check (waiting up to 60s) ==='
             HEALTHY=false
