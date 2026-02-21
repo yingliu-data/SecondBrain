@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import UIKit
 
 @Observable
 class AssistantClient {
@@ -100,15 +101,30 @@ class AssistantClient {
         await MainActor.run { isProcessing = false }
     }
 
-    // MARK: - Tool Execution (stubs — full implementation in Task 7)
+    // MARK: - Tool Execution
 
     func executeToolLocally(_ call: ToolCallRequest) async {
         let result: String
         switch call.name {
-        case "get_calendar_events", "create_calendar_event",
-             "get_reminders", "create_reminder",
-             "search_contacts", "read_clipboard":
-            result = "Tool '\(call.name)' not yet implemented on device."
+        case "get_calendar_events":
+            result = await CalendarTool.getEvents(daysAhead: call.arguments["days_ahead"] as? Int ?? 7)
+        case "create_calendar_event":
+            result = await CalendarTool.createEvent(
+                title: call.arguments["title"] as? String ?? "Untitled",
+                startDate: call.arguments["start_date"] as? String ?? "",
+                duration: call.arguments["duration_minutes"] as? Int ?? 60
+            )
+        case "get_reminders":
+            result = await RemindersTool.getPending()
+        case "create_reminder":
+            result = await RemindersTool.create(
+                title: call.arguments["title"] as? String ?? "Untitled",
+                dueDate: call.arguments["due_date"] as? String
+            )
+        case "search_contacts":
+            result = await ContactsTool.search(name: call.arguments["name"] as? String ?? "")
+        case "read_clipboard":
+            result = await MainActor.run { UIPasteboard.general.string ?? "Clipboard is empty." }
         default:
             result = "Unknown tool: \(call.name)"
         }

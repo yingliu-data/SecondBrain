@@ -44,6 +44,10 @@ SecondBrain/
 │   ├── FingerApp.swift              # App entry point
 │   ├── Network/
 │   │   └── AssistantClient.swift    # HMAC auth, SSE parsing, tool call routing
+│   ├── Tools/
+│   │   ├── CalendarTool.swift       # EventKit: get/create calendar events
+│   │   ├── RemindersTool.swift      # EventKit: get/create reminders
+│   │   └── ContactsTool.swift       # Contacts: search by name
 │   └── Views/
 │       └── ChatView.swift           # Chat UI with streaming message bubbles
 ├── docker-compose.yml              # Defines llm, agent-api, cloudflared containers
