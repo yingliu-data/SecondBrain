@@ -215,7 +215,7 @@ gh run view --log <run-id>
 
 ### 1. CHANGELOG.md
 
-Add an entry at the top:
+Add an entry at the top, feature and fix version updates by 0.0.1:
 ```markdown
 ## <version> - <Day Month Year>
 
