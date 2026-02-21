@@ -7,6 +7,7 @@ on:
       - main
     paths:
       - 'agent-api/**'
+      - 'docker-compose.yml'
       - '.github/workflows/deploy_agent_api.yml'
 
 permissions:
@@ -53,11 +54,11 @@ jobs:
       - name: Test SSH
         run: ssh -o StrictHostKeyChecking=accept-new secondbrain "echo 'SSH OK'"
 
-      - name: Deploy directly into container
+      - name: Deploy and restart
         run: |
           CONTAINER=secondbrain-agent-api
 
-          # Pipe code straight into the container — nothing touches the VM filesystem
+          # 1. Deploy code into the container volume
           tar -czf - -C agent-api \
             --exclude='__pycache__' \
             --exclude='*.pyc' \
@@ -65,30 +66,31 @@ jobs:
             . \
           | ssh secondbrain "docker exec -i $CONTAINER tar -xzf - -C /root/agent-api/"
 
-          # Install deps and restart (all inside the container)
+          # 2. Clean up stale files from previous architecture
+          ssh secondbrain "docker exec $CONTAINER rm -f /root/agent-api/main.py"
+
+          # 3. Sync docker-compose.yml (startup command may have changed)
+          scp docker-compose.yml secondbrain:~/data/SecondBrain/docker-compose.yml
+
+          # 4. Recreate container with updated config + restart
+          #    docker compose up -d re-reads docker-compose.yml and applies changes.
+          #    The startup command installs deps automatically.
+          ssh secondbrain "cd ~/data/SecondBrain && docker compose up -d agent-api"
+
+          # 5. Health check (wait up to 60s for pip install + uvicorn startup)
           ssh secondbrain "
             set -e
             CONTAINER=secondbrain-agent-api
 
-            echo '=== Installing dependencies ==='
-            echo '=== Cleaning old monolithic main.py ==='
-            docker exec \$CONTAINER rm -f /root/agent-api/main.py
-
-            docker exec \$CONTAINER bash -c 'pip install --break-system-packages -q \
-              fastapi uvicorn uvloop httptools httpx sse-starlette pydantic'
-
-            echo '=== Restarting container ==='
-            docker restart \$CONTAINER
-
-            echo '=== Health check (waiting up to 30s) ==='
+            echo '=== Health check (waiting up to 60s) ==='
             HEALTHY=false
-            for i in 1 2 3 4 5 6; do
+            for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
               sleep 5
               if docker exec \$CONTAINER python -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:8000/health\")' 2>/dev/null; then
                 HEALTHY=true
                 break
               fi
-              echo \"Attempt \$i/6 — not ready yet\"
+              echo \"Attempt \$i/12 — not ready yet\"
             done
 
             if \$HEALTHY; then
@@ -96,7 +98,7 @@ jobs:
               docker exec \$CONTAINER python -c 'import urllib.request, sys; sys.stdout.write(urllib.request.urlopen(\"http://localhost:8000/health\").read().decode())'
               echo ''
             else
-              echo 'Health check failed after 30s!'
+              echo 'Health check failed after 60s!'
               docker logs --tail 50 \$CONTAINER
               exit 1
             fi
