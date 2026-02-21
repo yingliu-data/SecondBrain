@@ -40,6 +40,12 @@ SecondBrain/
 │   ├── requirements.txt            # Python dependencies
 │   └── data/                       # Persistent data — gitignored (logs, db, skills.json)
 ├── models/                         # LLM model files — gitignored (~9 GB)
+├── Finger/                          # iOS SwiftUI app (temporary — moves to own repo)
+│   ├── FingerApp.swift              # App entry point
+│   ├── Network/
+│   │   └── AssistantClient.swift    # HMAC auth, SSE parsing, tool call routing
+│   └── Views/
+│       └── ChatView.swift           # Chat UI with streaming message bubbles
 ├── docker-compose.yml              # Defines llm, agent-api, cloudflared containers
 ├── .env.example                    # Template for required secrets
 ├── .gitignore
