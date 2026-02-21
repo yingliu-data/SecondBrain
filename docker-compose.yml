@@ -49,8 +49,8 @@ services:
     command: >
       bash -c "
         pip install --break-system-packages -q
-          fastapi uvicorn uvloop httptools httpx sse-starlette 'PyJWT[crypto]' &&
-        uvicorn main:app --host 0.0.0.0 --port 8000
+          fastapi uvicorn uvloop httptools httpx sse-starlette pydantic &&
+        uvicorn app.main:app --host 0.0.0.0 --port 8000
           --loop uvloop --http httptools --workers 1
       "
     environment:

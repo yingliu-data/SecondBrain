@@ -71,8 +71,11 @@ jobs:
             CONTAINER=secondbrain-agent-api
 
             echo '=== Installing dependencies ==='
+            echo '=== Cleaning old monolithic main.py ==='
+            docker exec \$CONTAINER rm -f /root/agent-api/main.py
+
             docker exec \$CONTAINER bash -c 'pip install --break-system-packages -q \
-              fastapi uvicorn uvloop httptools httpx sse-starlette PyJWT[crypto]'
+              fastapi uvicorn uvloop httptools httpx sse-starlette pydantic'
 
             echo '=== Restarting container ==='
             docker restart \$CONTAINER
