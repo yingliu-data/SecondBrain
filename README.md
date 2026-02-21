@@ -9,13 +9,27 @@ iPhone 15 Pro                          Server (RTX 5080)
 ┌──────────────────┐                   ┌──────────────────────────┐
 │ SwiftUI App      │  ── HTTPS ──►     │ Cloudflare Tunnel        │
 │ • Chat UI        │  (Cloudflare)     │   ↓                      │
-│ • Voice (STT/TTS)│  ◄── SSE ──      │ FastAPI (agent loop)     │
-│ • Tool Executors │                   │   ↓                      │
-│   (Calendar,     │                   │ llama-server             │
-│    Reminders,    │                   │   Qwen3 14B + 0.5B draft │
-│    Contacts...)  │                   │   ~50-80 tok/s           │
+│ • Voice (STT/TTS)│  ◄── SSE ──      │ Agent API (MCP Host)     │
+│ • Tool Executors │                   │   ├── Skills system      │
+│   (Calendar,     │                   │   │   (auto-discovery,   │
+│    Reminders,    │                   │   │    CRUD management)   │
+│    Contacts...)  │                   │   ├── Native fn calling   │
+│                  │                   │   └── LLM provider       │
+│                  │                   │       ↓                   │
+│                  │                   │ llama-server              │
+│                  │                   │   Qwen3 14B + 0.5B draft  │
 └──────────────────┘                   └──────────────────────────┘
 ```
+
+## API Endpoints
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/health` | GET | Health check + LLM connectivity |
+| `/api/v1/chat` | POST | Conversation with SSE streaming |
+| `/api/v1/tool-result` | POST | iPhone sends tool results back |
+| `/api/v1/skills` | GET | List all skills |
+| `/api/v1/skills/{name}` | PATCH | Enable/disable a skill |
 
 ## Deployment
 
@@ -37,4 +51,4 @@ See `.env.example` for the template. Generate secrets with `openssl rand -hex 32
 
 ## Development
 
-See [PLAN.md](PLAN.md) for the full 12-week build guide.
+See [PLAN.md](PLAN.md) for the full build guide.
