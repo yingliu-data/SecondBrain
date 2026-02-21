@@ -58,32 +58,31 @@ jobs:
         run: |
           CONTAINER=secondbrain-agent-api
 
-          # 1. Sync docker-compose.yml first (startup command may have changed)
+          # 1. Sync docker-compose.yml (startup command may have changed)
           scp docker-compose.yml secondbrain:~/data/SecondBrain/docker-compose.yml
 
-          # 2. Stop the container (handles restart loops gracefully)
-          ssh secondbrain "docker stop $CONTAINER" || true
-
-          # 3. Recreate agent-api ONLY with updated config (--no-deps avoids
-          #    recreating the LLM container which takes minutes to reload)
-          ssh secondbrain "cd ~/data/SecondBrain && docker compose up -d --no-deps agent-api"
-
-          # 4. Wait for container to enter running state (pip install runs on startup)
-          sleep 10
-
-          # 5. Deploy latest code into the running container
+          # 2. Upload code to server temp dir (not directly into container)
           tar -czf - -C agent-api \
             --exclude='__pycache__' \
             --exclude='*.pyc' \
             --exclude='data' \
             . \
-          | ssh secondbrain "docker exec -i $CONTAINER tar -xzf - -C /root/agent-api/"
+          | ssh secondbrain "mkdir -p /tmp/sb-deploy && tar -xzf - -C /tmp/sb-deploy/"
 
-          # 6. Clean up stale files from previous architecture
-          ssh secondbrain "docker exec $CONTAINER rm -f /root/agent-api/main.py"
+          # 3. Stop and remove old container (handles restart loops)
+          ssh secondbrain "docker stop $CONTAINER 2>/dev/null; docker rm -f $CONTAINER 2>/dev/null" || true
 
-          # 7. Restart to pick up the deployed code
-          ssh secondbrain "docker restart $CONTAINER"
+          # 4. Create new container WITHOUT starting it (--no-deps skips LLM)
+          ssh secondbrain "cd ~/data/SecondBrain && docker compose create --no-deps agent-api"
+
+          # 5. Deploy code into the stopped container (docker cp works on stopped containers)
+          ssh secondbrain "docker cp /tmp/sb-deploy/. $CONTAINER:/root/agent-api/"
+
+          # 6. Start the container (code is already in place)
+          ssh secondbrain "cd ~/data/SecondBrain && docker compose start agent-api"
+
+          # 7. Cleanup
+          ssh secondbrain "rm -rf /tmp/sb-deploy"
 
           # 8. Health check (wait up to 60s for pip install + uvicorn startup)
           ssh secondbrain "
