@@ -44,13 +44,7 @@ services:
     container_name: secondbrain-agent-api
     restart: unless-stopped
     working_dir: /root/agent-api
-    command: >
-      bash -c "
-        pip install --break-system-packages -q
-          fastapi uvicorn uvloop httptools httpx sse-starlette pydantic &&
-        uvicorn app.main:app --host 0.0.0.0 --port 8000
-          --loop uvloop --http httptools --workers 1
-      "
+    command: bash -c "pip install --break-system-packages -q -r requirements.txt && uvicorn app.main:app --host 0.0.0.0 --port 8000 --loop uvloop --http httptools --workers 1"
     environment:
       - LLM_URL=http://secondbrain-llm:8080
       - API_SECRET_KEY=${API_SECRET_KEY}
