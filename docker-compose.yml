@@ -7,8 +7,8 @@ services:
     container_name: secondbrain-llm
     restart: unless-stopped
     environment:
-      - LLAMA_ARG_MODEL=/models/Qwen3-14B-Q4_K_M.gguf
-      - LLAMA_ARG_MODEL_DRAFT=/models/Qwen3-0.5B-Q6_K.gguf
+      - LLAMA_ARG_MODEL=/models/qwen3-14b-q4_k_m.gguf
+      - LLAMA_ARG_MODEL_DRAFT=/models/qwen3-0.6b-q6_k.gguf
       - LLAMA_ARG_DRAFT_MAX=8
       - LLAMA_ARG_N_GPU_LAYERS=99
       - LLAMA_ARG_CTX_SIZE=8192
