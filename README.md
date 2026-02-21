@@ -49,12 +49,12 @@ Push to `main` triggers GitHub Actions which SSHs into the server via Cloudflare
 
 See `.env.example` for the template. Generate secrets with `openssl rand -hex 32`.
 
-## iOS Client
+## iOS Client (Finger)
 
-SwiftUI app source files are in `MyAssistant/`. To use:
+SwiftUI app source files are in `Finger/`. To use:
 
-1. Create a new Xcode project (SwiftUI, iOS 26, name: "MyAssistant")
-2. Add the Swift files from `MyAssistant/` into the project
+1. Create a new Xcode project (SwiftUI, iOS 26, name: "Finger")
+2. Add the Swift files from `Finger/` into the project
 3. Add Info.plist entries for Calendar, Reminders, and Contacts usage descriptions
 4. Replace placeholder credentials in `AssistantClient.swift` with your actual keys
 

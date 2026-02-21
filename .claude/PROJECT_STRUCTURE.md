@@ -40,8 +40,8 @@ SecondBrain/
 │   ├── requirements.txt            # Python dependencies
 │   └── data/                       # Persistent data — gitignored (logs, db, skills.json)
 ├── models/                         # LLM model files — gitignored (~9 GB)
-├── MyAssistant/                     # iOS SwiftUI app (temporary — moves to own repo)
-│   ├── MyAssistantApp.swift         # App entry point
+├── Finger/                          # iOS SwiftUI app (temporary — moves to own repo)
+│   ├── FingerApp.swift              # App entry point
 │   ├── Network/
 │   │   └── AssistantClient.swift    # HMAC auth, SSE parsing, tool call routing
 │   └── Views/

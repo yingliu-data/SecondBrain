@@ -2,7 +2,7 @@
 
 ## 0.3.0 - 21 February 2026
 
-- iOS Client: SwiftUI chat app with HMAC auth, SSE streaming, and Cloudflare Access headers
+- Finger iOS client: SwiftUI chat app with HMAC auth, SSE streaming, and Cloudflare Access headers
 
 ## 0.2.0 - 21 February 2026
 
