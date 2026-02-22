@@ -7,25 +7,11 @@ class AssistantClient {
     var isProcessing = false
     var currentResponse = ""
 
-    private let serverURL: String
     private let sessionID = UUID().uuidString
-
-    // TODO: Move to Keychain in Task 12
-    private let apiKey: String
-    private let cfClientId: String
-    private let cfClientSecret: String
-
-    init(
-        serverURL: String = "https://secondbrain.yingliu.site",
-        apiKey: String = "YOUR_API_SECRET_KEY",
-        cfClientId: String = "YOUR_CF_ACCESS_CLIENT_ID",
-        cfClientSecret: String = "YOUR_CF_ACCESS_CLIENT_SECRET"
-    ) {
-        self.serverURL = serverURL
-        self.apiKey = apiKey
-        self.cfClientId = cfClientId
-        self.cfClientSecret = cfClientSecret
-    }
+    private let serverURL = "https://secondbrain.yingliu.site"
+    private let apiKey = "YOUR_API_SECRET_KEY"
+    private let cfClientId = "YOUR_CF_ACCESS_CLIENT_ID.access"
+    private let cfClientSecret = "YOUR_CF_ACCESS_CLIENT_SECRET"
 
     // MARK: - Chat
 

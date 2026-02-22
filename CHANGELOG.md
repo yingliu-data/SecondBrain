@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.7.0 - 22 February 2026
+
+- Finger: iOS 26 Liquid Glass effect on all surfaces (native .glassEffect API)
+- Finger: Native TabView with auto Liquid Glass tab bar
+- Finger: Add New Skill chatbot connected to real LLM
+- Finger: Hardcoded credentials, removed server config from Settings UI
+- Finger: Code cleanup across all views
+
+## 0.6.0 - 22 February 2026
+
+- Finger: Glass effect on all surfaces, Add New Skill chat flow, configurable server URL and API key
+- Finger: Voice input via long-press mic button with on-device speech recognition
+
 ## 0.5.0 - 22 February 2026
 
 - Finger: Dark-first UI with glass-morphism, emerald accents, tab bar, Skills and Settings views
