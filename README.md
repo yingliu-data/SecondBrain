@@ -2,34 +2,67 @@
 
 Personal AI assistant — a home server runs the brain (LLM + agent logic) and an iPhone app acts as a thin client handling voice, text, and on-device tools (Calendar, Reminders, Contacts).
 
+## Repos
+
+| Repo | Contents |
+|---|---|
+| [SecondBrain](https://github.com/yingliu-data/SecondBrain) | Backend: FastAPI agent API, Docker orchestration, CI/CD |
+| [FingerApp](https://github.com/yingliu-data/FingerApp) | iOS client: SwiftUI app (iOS 26, Liquid Glass) |
+
 ## Architecture
 
 ```
-iPhone 15 Pro                          Server (RTX 5080)
-┌──────────────────┐                   ┌──────────────────────────┐
-│ SwiftUI App      │  ── HTTPS ──►     │ Cloudflare Tunnel        │
-│ • Chat UI        │  (Cloudflare)     │   ↓                      │
-│ • Voice (STT/TTS)│  ◄── SSE ──      │ Agent API (MCP Host)     │
-│ • Tool Executors │                   │   ├── Skills system      │
-│   (Calendar,     │                   │   │   (auto-discovery,   │
-│    Reminders,    │                   │   │    CRUD management)   │
-│    Contacts...)  │                   │   ├── Native fn calling   │
-│                  │                   │   └── LLM provider       │
-│                  │                   │       ↓                   │
-│                  │                   │ llama-server              │
-│                  │                   │   Qwen3 14B + 0.5B draft  │
-└──────────────────┘                   └──────────────────────────┘
+FingerApp (iPhone)                    SecondBrain (Server, RTX 5080)
+┌──────────────────┐                  ┌──────────────────────────┐
+│ SwiftUI App      │  ── HTTPS ──►    │ Cloudflare Tunnel        │
+│ • Chat UI        │  (Cloudflare)    │   ↓                      │
+│ • Voice (STT)    │  ◄── SSE ──     │ Agent API (FastAPI)      │
+│ • Markdown render│                  │   ├── Skills system      │
+│ • Tool Executors │                  │   │   (auto-discovery,   │
+│   (Calendar,     │                  │   │    CRUD management)   │
+│    Reminders,    │                  │   ├── Native fn calling   │
+│    Contacts,     │                  │   └── LLM provider       │
+│    Clipboard)    │                  │       ↓                   │
+│ • SwiftData      │                  │ llama-server              │
+│   (conversations)│                  │   Qwen3 14B + 0.5B draft │
+└──────────────────┘                  └──────────────────────────┘
 ```
+
+## Tech Stack
+
+| Layer | Technology |
+|---|---|
+| LLM Inference | llama.cpp (CUDA), Qwen3 14B q4_k_m + 0.5B draft |
+| Backend | Python 3.12, FastAPI, Uvicorn, SSE-Starlette |
+| iOS Client | Swift, SwiftUI, SwiftData, Speech framework |
+| Auth | HMAC-SHA256 + Bearer token + Timestamp verification |
+| Networking | Cloudflare Tunnel (Zero Trust) |
+| Infrastructure | Docker Compose (3 containers), GitHub Actions CI/CD |
 
 ## API Endpoints
 
-| Endpoint | Method | Purpose |
+| Endpoint | Method | Auth | Purpose |
+|---|---|---|---|
+| `/health` | GET | None | Health check + LLM connectivity |
+| `/api/v1/chat` | POST | Bearer + HMAC | Conversation with SSE streaming |
+| `/api/v1/tool-result` | POST | Bearer + HMAC | iPhone sends tool results back |
+| `/api/v1/skills` | GET | Bearer + HMAC | List all skills with metadata |
+| `/api/v1/skills/{name}` | GET | Bearer + HMAC | Get details for a specific skill |
+| `/api/v1/skills/{name}` | PATCH | Bearer + HMAC | Enable/disable a skill |
+
+## Skills
+
+Skills are modular capabilities under `agent-api/app/skills/`. Each extends `BaseSkill` and is auto-discovered at startup.
+
+| Skill | Execution | Description |
 |---|---|---|
-| `/health` | GET | Health check + LLM connectivity |
-| `/api/v1/chat` | POST | Conversation with SSE streaming |
-| `/api/v1/tool-result` | POST | iPhone sends tool results back |
-| `/api/v1/skills` | GET | List all skills |
-| `/api/v1/skills/{name}` | PATCH | Enable/disable a skill |
+| `web_search` | Server | DuckDuckGo web search |
+| `github_cli` | Server | GitHub CLI operations |
+| `gitlab_cli` | Server | GitLab CLI operations |
+| `calendar` | Device | Get/create calendar events (EventKit) |
+| `reminders` | Device | Get/create reminders (EventKit) |
+| `contacts` | Device | Search contacts by name |
+| `clipboard` | Device | Read iPhone clipboard |
 
 ## Deployment
 
@@ -51,16 +84,24 @@ See `.env.example` for the template. Generate secrets with `openssl rand -hex 32
 
 ## iOS Client (Finger)
 
-SwiftUI app source files are in `Finger/`. To use:
+The iOS app lives in the separate [FingerApp](https://github.com/yingliu-data/FingerApp) repo. Open `Finger.xcodeproj` in Xcode.
 
-1. Create a new Xcode project (SwiftUI, iOS 26, name: "Finger")
-2. Add the Swift files from `Finger/` into the project
-3. Add privacy descriptions to the target's build settings (required for tool executors):
-   - `INFOPLIST_KEY_NSCalendarsUsageDescription` = "Access your calendar to check and create events"
-   - `INFOPLIST_KEY_NSRemindersUsageDescription` = "Access reminders to read and create tasks"
-   - `INFOPLIST_KEY_NSContactsUsageDescription` = "Search your contacts when you ask about people"
-4. Replace placeholder credentials in `AssistantClient.swift` with your actual keys
+**Key features:**
+- Multi-conversation chat with streaming markdown rendering
+- On-device voice input (SFSpeechRecognizer + AVAudioEngine)
+- Device tool executors (Calendar, Reminders, Contacts, Clipboard)
+- Skill management with device/server badges and LLM-powered Add New Skill
+- Dark-first UI with glass-morphism / Liquid Glass aesthetic
+- SwiftData persistence for conversations and messages
+- Debug logs viewer in Settings
+
+**Privacy descriptions required** (in build settings):
+- `NSCalendarsUsageDescription`
+- `NSRemindersUsageDescription`
+- `NSContactsUsageDescription`
+- `NSSpeechRecognitionUsageDescription`
+- `NSMicrophoneUsageDescription`
 
 ## Development
 
-See [PLAN.md](PLAN.md) for the full build guide.
+See [PLAN.md](PLAN.md) for the full build guide and `.claude/PROJECT_STRUCTURE.md` for detailed file-level documentation.

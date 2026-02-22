@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.1 - 22 February 2026
+
+### iOS App
+- feat: text-to-speech (TTS) with AVSpeechSynthesizer for assistant responses
+- feat: speaker toggle in Settings with persistent @AppStorage
+- feat: TTS auto-speaks responses when speaker is enabled
+- feat: TTS stops when user starts voice recording
+- fix: audio session updated to .playAndRecord for STT/TTS compatibility
+- feat: markdown stripping for cleaner TTS output
+
 ## 0.8.0 - 22 February 2026
 
 ### iOS App
