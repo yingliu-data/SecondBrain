@@ -7,15 +7,15 @@ class AssistantClient {
     var isProcessing = false
     var currentResponse = ""
 
-    private let sessionID = UUID().uuidString
     private let serverURL = "https://secondbrain.yingliu.site"
-    private let apiKey = "YOUR_API_SECRET_KEY"
-    private let cfClientId = "YOUR_CF_ACCESS_CLIENT_ID.access"
-    private let cfClientSecret = "YOUR_CF_ACCESS_CLIENT_SECRET"
+    private let apiKey = "5af0bca7f3d77b4383b4d641264cdcb364a5386c7599dc0bdb3a9e779c2a368e"
+    private let cfClientId = "5ebfb44ae04fc56ec481d333aba90b29.access"
+    private let cfClientSecret = "6e98e4adb9ff94cc9d5c0942de1a6c3c52db1572db6e7dfa878f029c7aceca1c"
 
     // MARK: - Chat
 
-    func send(message: String) async {
+    func send(message: String, sessionID: String) async {
+        let debug = DebugLog.shared
         await MainActor.run {
             isProcessing = true
             currentResponse = ""
@@ -28,20 +28,30 @@ class AssistantClient {
         request.setValue(cfClientId, forHTTPHeaderField: "CF-Access-Client-Id")
         request.setValue(cfClientSecret, forHTTPHeaderField: "CF-Access-Client-Secret")
 
-        let body = try! JSONEncoder().encode(["message": message, "session_id": sessionID])
+        let body = try! JSONEncoder().encode(["message": message, "session_id": sessionID] as [String: String])
         request.httpBody = body
         signRequest(&request, body: body)
 
+        debug.log("POST \(url.absoluteString)")
+        debug.log("Headers: CF-Access-Client-Id=\(cfClientId.prefix(8))…, Authorization=Bearer \(apiKey.prefix(8))…")
+
         do {
             let (bytes, response) = try await URLSession.shared.bytes(for: request)
+            let http = response as? HTTPURLResponse
+            debug.log("Response status: \(http?.statusCode ?? -1)")
 
-            if let http = response as? HTTPURLResponse, http.statusCode != 200 {
+            if let http, http.statusCode != 200 {
+                var errorBody = ""
+                for try await line in bytes.lines { errorBody += line + "\n" }
+                let snippet = String(errorBody.prefix(500))
+                debug.log("Error body: \(snippet)")
                 await MainActor.run {
-                    currentResponse = "Server error (HTTP \(http.statusCode)). Check credentials."
+                    currentResponse = "HTTP \(http.statusCode): \(String(snippet.prefix(200)))"
                 }
                 return
             }
 
+            debug.log("SSE stream connected")
             var currentEvent = ""
 
             for try await line in bytes.lines {
@@ -69,16 +79,18 @@ class AssistantClient {
                         name: obj["name"] as? String ?? "",
                         arguments: obj["arguments"] as? [String: Any] ?? [:]
                     )
+                    debug.log("Tool call: \(tc.name)")
                     await executeToolLocally(tc)
 
                 case "done":
-                    break
+                    debug.log("Stream done")
 
                 default:
                     break
                 }
             }
         } catch {
+            debug.log("Connection error: \(error.localizedDescription)")
             await MainActor.run {
                 currentResponse = "Connection error: \(error.localizedDescription)"
             }
@@ -120,6 +132,7 @@ class AssistantClient {
     // MARK: - Tool Result
 
     func sendToolResult(callID: String, result: String) async {
+        let debug = DebugLog.shared
         let url = URL(string: "\(serverURL)/api/v1/tool-result")!
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -134,7 +147,11 @@ class AssistantClient {
         request.httpBody = body
         signRequest(&request, body: body)
 
-        _ = try? await URLSession.shared.data(for: request)
+        debug.log("POST tool-result id=\(callID)")
+        if let (_, response) = try? await URLSession.shared.data(for: request),
+           let http = response as? HTTPURLResponse {
+            debug.log("Tool result response: \(http.statusCode)")
+        }
     }
 
     // MARK: - Auth (HMAC-SHA256)

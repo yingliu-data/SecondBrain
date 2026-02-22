@@ -1,4 +1,5 @@
 import SwiftUI
+import SwiftData
 
 @main
 struct FingerApp: App {
@@ -6,5 +7,6 @@ struct FingerApp: App {
         WindowGroup {
             MainTabView()
         }
+        .modelContainer(for: Conversation.self)
     }
 }

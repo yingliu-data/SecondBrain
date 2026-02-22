@@ -6,26 +6,35 @@ struct SkillItem: Identifiable {
     let description: String
     let icon: String
     var enabled: Bool
+    let executionSide: String  // "device" or "server"
 }
 
 struct SkillsView: View {
     @State private var skills: [SkillItem] = [
-        SkillItem(name: "Calendar", description: "Check and create events", icon: "calendar", enabled: true),
-        SkillItem(name: "Reminders", description: "Read and create reminders", icon: "checklist", enabled: true),
-        SkillItem(name: "Contacts", description: "Search contacts by name", icon: "person.crop.circle", enabled: true),
-        SkillItem(name: "Clipboard", description: "Read clipboard contents", icon: "doc.on.clipboard", enabled: true),
-        SkillItem(name: "Web Search", description: "Search the web for info", icon: "globe", enabled: true),
+        SkillItem(name: "Calendar", description: "Check and create events", icon: "calendar", enabled: true, executionSide: "device"),
+        SkillItem(name: "Reminders", description: "Read and create reminders", icon: "checklist", enabled: true, executionSide: "device"),
+        SkillItem(name: "Contacts", description: "Search contacts by name", icon: "person.crop.circle", enabled: true, executionSide: "device"),
+        SkillItem(name: "Clipboard", description: "Read clipboard contents", icon: "doc.on.clipboard", enabled: true, executionSide: "device"),
+        SkillItem(name: "Web Search", description: "Search the web for info", icon: "globe", enabled: true, executionSide: "server"),
     ]
+
+    private var deviceSkills: [Int] {
+        skills.indices.filter { skills[$0].executionSide == "device" }
+    }
+    private var serverSkills: [Int] {
+        skills.indices.filter { skills[$0].executionSide == "server" }
+    }
     @State private var showingAddSkill = false
 
     var body: some View {
+        GlassEffectContainer {
         ScrollView {
             VStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 8) {
                         Image(systemName: "bolt.fill")
                             .font(.title2)
-                            .foregroundColor(AppTheme.emerald)
+                            .foregroundColor(AppTheme.accent)
                         Text("Skills")
                             .font(.title2.weight(.semibold))
                             .foregroundColor(.white)
@@ -64,12 +73,36 @@ struct SkillsView: View {
                 }
                 .buttonStyle(.plain)
 
-                ForEach(Array(skills.enumerated()), id: \.element.id) { index, _ in
-                    SkillCard(skill: $skills[index])
+                if !deviceSkills.isEmpty {
+                    Text("ON DEVICE")
+                        .font(.caption.weight(.medium))
+                        .foregroundColor(AppTheme.textTertiary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 4)
+                        .padding(.top, 4)
+
+                    ForEach(deviceSkills, id: \.self) { index in
+                        SkillCard(skill: $skills[index])
+                    }
+                }
+
+                if !serverSkills.isEmpty {
+                    Text("ON SERVER")
+                        .font(.caption.weight(.medium))
+                        .foregroundColor(AppTheme.textTertiary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 4)
+                        .padding(.top, 4)
+
+                    ForEach(serverSkills, id: \.self) { index in
+                        SkillCard(skill: $skills[index])
+                    }
                 }
             }
             .padding(16)
         }
+        .background { AppTheme.wallpaper.resizable().aspectRatio(contentMode: .fill).ignoresSafeArea() }
+        } // GlassEffectContainer
         .fullScreenCover(isPresented: $showingAddSkill) {
             AddSkillView()
         }
@@ -83,14 +116,26 @@ private struct SkillCard: View {
         HStack(spacing: 12) {
             Image(systemName: skill.icon)
                 .font(.title3)
-                .foregroundColor(AppTheme.emerald)
+                .foregroundColor(AppTheme.accent)
                 .frame(width: 48, height: 48)
                 .glassEffect(in: RoundedRectangle(cornerRadius: AppTheme.radiusMd))
 
-            VStack(alignment: .leading, spacing: 2) {
-                Text(skill.name)
-                    .font(.body.weight(.medium))
-                    .foregroundColor(.white)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 8) {
+                    Text(skill.name)
+                        .font(.body.weight(.medium))
+                        .foregroundColor(.white)
+                    Text(skill.executionSide == "device" ? "iPhone" : "Server")
+                        .font(.caption2.weight(.medium))
+                        .foregroundColor(skill.executionSide == "device" ? AppTheme.accent : .orange)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(
+                            (skill.executionSide == "device" ? AppTheme.accent : Color.orange)
+                                .opacity(0.15)
+                        )
+                        .clipShape(Capsule())
+                }
                 Text(skill.description)
                     .font(.caption)
                     .foregroundColor(AppTheme.textTertiary)
@@ -98,32 +143,20 @@ private struct SkillCard: View {
 
             Spacer()
 
-            EmeraldToggle(isOn: $skill.enabled)
+            AccentToggle(isOn: $skill.enabled)
         }
         .padding(16)
         .glassEffect(in: RoundedRectangle(cornerRadius: AppTheme.radiusLg))
     }
 }
 
-struct EmeraldToggle: View {
+struct AccentToggle: View {
     @Binding var isOn: Bool
 
     var body: some View {
-        Button {
-            withAnimation(.spring(duration: 0.25)) { isOn.toggle() }
-        } label: {
-            ZStack(alignment: isOn ? .trailing : .leading) {
-                Capsule()
-                    .fill(isOn ? AnyShapeStyle(AppTheme.accentGradient) : AnyShapeStyle(Color.white.opacity(0.1)))
-                    .frame(width: 52, height: 32)
-                Circle()
-                    .fill(.white)
-                    .shadow(color: .black.opacity(0.2), radius: 2)
-                    .frame(width: 24, height: 24)
-                    .padding(4)
-            }
-        }
-        .buttonStyle(.plain)
+        Toggle("", isOn: $isOn)
+            .labelsHidden()
+            .tint(AppTheme.accent)
     }
 }
 
@@ -131,6 +164,7 @@ struct AddSkillView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var client = AssistantClient()
     @State private var input = ""
+    private let sessionID = UUID().uuidString
     @State private var messages: [(id: UUID, text: String, isUser: Bool)] = [
         (id: UUID(), text: "Hi! I'll help you add a new skill. What would you like your AI assistant to be able to do?", isUser: false)
     ]
@@ -138,8 +172,9 @@ struct AddSkillView: View {
     @FocusState private var isFocused: Bool
 
     var body: some View {
+        GlassEffectContainer {
         ZStack {
-            AppTheme.backgroundGradient.ignoresSafeArea()
+            AppTheme.wallpaper.resizable().aspectRatio(contentMode: .fill).ignoresSafeArea()
 
             VStack(spacing: 0) {
                 HStack(spacing: 12) {
@@ -154,7 +189,7 @@ struct AddSkillView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         HStack(spacing: 6) {
                             Image(systemName: "sparkles")
-                                .foregroundColor(AppTheme.emerald)
+                                .foregroundColor(AppTheme.accent)
                             Text("Add New Skill")
                                 .font(.title3.weight(.semibold))
                                 .foregroundColor(.white)
@@ -230,7 +265,7 @@ struct AddSkillView: View {
                         .clipShape(RoundedRectangle(cornerRadius: 20))
                         .overlay(
                             RoundedRectangle(cornerRadius: 20)
-                                .stroke(isFocused ? AppTheme.emerald.opacity(0.5) : AppTheme.border, lineWidth: 1)
+                                .stroke(isFocused ? AppTheme.accent.opacity(0.5) : AppTheme.border, lineWidth: 1)
                         )
                         .submitLabel(.send)
                         .onSubmit { sendMessage() }
@@ -251,6 +286,7 @@ struct AddSkillView: View {
                 .glassEffect()
             }
         }
+        } // GlassEffectContainer
         .preferredColorScheme(.dark)
     }
 
@@ -263,7 +299,7 @@ struct AddSkillView: View {
         }
         let prompt = "[Skill Creation] Help me create a new custom skill for my AI assistant. Guide me step by step to define: name, description, tools, and parameters. User says: \(text)"
         Task {
-            await client.send(message: prompt)
+            await client.send(message: prompt, sessionID: sessionID)
             withAnimation(.spring(duration: 0.3)) {
                 messages.append((id: UUID(), text: client.currentResponse, isUser: false))
             }

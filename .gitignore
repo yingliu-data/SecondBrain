@@ -1,5 +1,5 @@
 # ── SecondBrain project-specific ─────────────────────────
-models/
+/models/
 agent-api/data/
 
 # ── Python ───────────────────────────────────────────────

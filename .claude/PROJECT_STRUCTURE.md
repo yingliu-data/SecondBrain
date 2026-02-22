@@ -40,12 +40,17 @@ SecondBrain/
 │   ├── requirements.txt            # Python dependencies
 │   └── data/                       # Persistent data — gitignored (logs, db, skills.json)
 ├── models/                         # LLM model files — gitignored (~9 GB)
-├── Finger/                          # iOS SwiftUI app (temporary — moves to own repo)
-│   ├── FingerApp.swift              # App entry point → MainTabView
+├── FingerApp/                       # iOS SwiftUI app (iOS 26, Liquid Glass)
+│   ├── FingerApp.swift              # App entry point → MainTabView + SwiftData container
+│   ├── Assets.xcassets/             # App icon, wallpaper image
+│   ├── Models/
+│   │   ├── Conversation.swift       # SwiftData @Model for chat conversations
+│   │   └── Message.swift            # SwiftData @Model for messages (relationship to Conversation)
 │   ├── Theme/
 │   │   └── Theme.swift              # AppTheme colors, gradients, radii
 │   ├── Network/
-│   │   └── AssistantClient.swift    # HMAC auth, SSE parsing, tool call routing
+│   │   ├── AssistantClient.swift    # HMAC auth, SSE parsing, tool call routing
+│   │   └── DebugLog.swift           # Timestamped request/response logging
 │   ├── Tools/
 │   │   ├── CalendarTool.swift       # EventKit: get/create calendar events
 │   │   ├── RemindersTool.swift      # EventKit: get/create reminders
@@ -53,9 +58,11 @@ SecondBrain/
 │   ├── Voice/
 │   │   └── SpeechManager.swift      # On-device speech recognition (SFSpeechRecognizer + AVAudioEngine)
 │   └── Views/
-│       ├── MainTabView.swift        # Native TabView with Liquid Glass tab bar
-│       ├── ChatView.swift           # Chat with Liquid Glass bubbles, mic input
-│       ├── SkillsView.swift         # Skill toggle cards, LLM-powered Add New Skill
+│       ├── MainTabView.swift        # Native TabView + NavigationStack for chat
+│       ├── ConversationListView.swift # Conversation list with create/delete/switch
+│       ├── ChatView.swift           # Chat with markdown, choice buttons, image upload
+│       ├── ChoiceButtonsView.swift  # Tappable Liquid Glass buttons for LLM options
+│       ├── SkillsView.swift         # Skill toggle cards with device/server badges
 │       └── SettingsView.swift       # Preferences and about
 ├── docker-compose.yml              # Defines llm, agent-api, cloudflared containers
 ├── .env.example                    # Template for required secrets

@@ -1,16 +1,13 @@
 import SwiftUI
 
 enum AppTheme {
-    static let backgroundGradient = LinearGradient(
-        colors: [Color(hex: "0f172a"), Color(hex: "1e293b"), Color(hex: "171717")],
-        startPoint: .top, endPoint: .bottom
-    )
+    static let wallpaper = Image("Wallpaper")
 
     static let accentGradient = LinearGradient(
-        colors: [Color(hex: "10b981"), Color(hex: "0d9488")],
+        colors: [Color(hex: "0A84FF"), Color(hex: "0066CC")],
         startPoint: .leading, endPoint: .trailing
     )
-    static let emerald = Color(hex: "10b981")
+    static let accent = Color.accentColor
 
     static let textPrimary = Color.white
     static let textSecondary = Color.white.opacity(0.6)

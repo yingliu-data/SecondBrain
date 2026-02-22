@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.8.0 - 22 February 2026
+
+### iOS App
+- fix: keyboard dismissal with interactive scroll and tap gesture
+- fix: multiline text input with auto-growing TextField(axis: .vertical)
+- feat: scroll fade effect at top using iOS 26 scrollEdgeEffectStyle
+- feat: multi-conversation support with SwiftData persistence
+- feat: conversation list with create/switch between chats
+- feat: NavigationStack with Liquid Glass back button
+- feat: markdown rendering in assistant message bubbles
+- feat: interactive choice buttons for LLM option responses
+- feat: image upload "+" button placeholder (Coming Soon)
+- feat: device vs server skill badges in Skills view
+
+### Server
+- fix: system prompt enforces shorter, plain-text responses
+- fix: reduce max response tokens from 1024 to 512
+
+## 0.7.1 - 22 February 2026
+
+- Finger: Fix push-to-talk mic gesture (view identity preservation)
+- Finger: Add debug log viewer in Settings → Developer
+- Finger: Backend request/response logging via DebugLog
+
 ## 0.7.0 - 22 February 2026
 
 - Finger: iOS 26 Liquid Glass effect on all surfaces (native .glassEffect API)

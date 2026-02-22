@@ -1,7 +1,11 @@
 import SwiftUI
 
 struct SettingsView: View {
+    @State private var showDebugLogs = false
+    private var debugLog = DebugLog.shared
+
     var body: some View {
+        GlassEffectContainer {
         ScrollView {
             VStack(spacing: 20) {
                 VStack(alignment: .leading, spacing: 4) {
@@ -30,9 +34,56 @@ struct SettingsView: View {
                     SettingsRow(icon: "info.circle", label: "Version", detail: "0.7.0")
                     SettingsRow(icon: "doc.text", label: "License", detail: "MIT")
                 }
+
+                SettingsSection(title: "Developer") {
+                    SettingsRow(
+                        icon: "ladybug",
+                        label: "Debug Logs",
+                        detail: showDebugLogs ? "On" : "Off"
+                    )
+                    .onTapGesture { withAnimation { showDebugLogs.toggle() } }
+                }
+
+                if showDebugLogs {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("LOGS")
+                                .font(.caption.weight(.medium))
+                                .foregroundColor(AppTheme.textTertiary)
+                            Spacer()
+                            Button("Clear") { debugLog.clear() }
+                                .font(.caption)
+                                .foregroundColor(AppTheme.accent)
+                        }
+                        .padding(.horizontal, 4)
+
+                        if debugLog.entries.isEmpty {
+                            Text("No logs yet. Send a message to see debug output.")
+                                .font(.caption)
+                                .foregroundColor(AppTheme.textTertiary)
+                                .padding(12)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .glassEffect(in: RoundedRectangle(cornerRadius: AppTheme.radiusMd))
+                        } else {
+                            VStack(alignment: .leading, spacing: 2) {
+                                ForEach(Array(debugLog.entries.reversed().enumerated()), id: \.offset) { _, entry in
+                                    Text(entry)
+                                        .font(.system(.caption2, design: .monospaced))
+                                        .foregroundColor(AppTheme.textSecondary)
+                                        .textSelection(.enabled)
+                                }
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(12)
+                            .glassEffect(in: RoundedRectangle(cornerRadius: AppTheme.radiusMd))
+                        }
+                    }
+                }
             }
             .padding(16)
         }
+        .background { AppTheme.wallpaper.resizable().aspectRatio(contentMode: .fill).ignoresSafeArea() }
+        } // GlassEffectContainer
     }
 }
 
@@ -64,7 +115,7 @@ private struct SettingsRow: View {
         HStack(spacing: 12) {
             Image(systemName: icon)
                 .font(.body)
-                .foregroundColor(AppTheme.emerald)
+                .foregroundColor(AppTheme.accent)
                 .frame(width: 36, height: 36)
                 .glassEffect(in: RoundedRectangle(cornerRadius: 10))
 
