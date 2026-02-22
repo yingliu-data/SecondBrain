@@ -4,7 +4,7 @@ import SwiftUI
 struct FingerApp: App {
     var body: some Scene {
         WindowGroup {
-            ChatView()
+            MainTabView()
         }
     }
 }

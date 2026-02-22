@@ -41,7 +41,9 @@ SecondBrain/
 │   └── data/                       # Persistent data — gitignored (logs, db, skills.json)
 ├── models/                         # LLM model files — gitignored (~9 GB)
 ├── Finger/                          # iOS SwiftUI app (temporary — moves to own repo)
-│   ├── FingerApp.swift              # App entry point
+│   ├── FingerApp.swift              # App entry point → MainTabView
+│   ├── Theme/
+│   │   └── Theme.swift              # AppTheme colors, gradients, radii, GlassHeader
 │   ├── Network/
 │   │   └── AssistantClient.swift    # HMAC auth, SSE parsing, tool call routing
 │   ├── Tools/
@@ -49,7 +51,10 @@ SecondBrain/
 │   │   ├── RemindersTool.swift      # EventKit: get/create reminders
 │   │   └── ContactsTool.swift       # Contacts: search by name
 │   └── Views/
-│       └── ChatView.swift           # Chat UI with streaming message bubbles
+│       ├── MainTabView.swift        # Root tab bar (frosted glass, 3 tabs)
+│       ├── ChatView.swift           # Dark chat with glass bubbles, styled input bar
+│       ├── SkillsView.swift         # Skill toggle cards with emerald accents
+│       └── SettingsView.swift       # Glass-morphism settings sections
 ├── docker-compose.yml              # Defines llm, agent-api, cloudflared containers
 ├── .env.example                    # Template for required secrets
 ├── .gitignore
