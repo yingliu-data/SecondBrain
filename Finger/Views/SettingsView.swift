@@ -1,6 +1,11 @@
 import SwiftUI
 
 struct SettingsView: View {
+    @AppStorage("serverURL") private var serverURL = ""
+    @AppStorage("apiKey") private var apiKey = ""
+    @AppStorage("cfClientId") private var cfClientId = ""
+    @AppStorage("cfClientSecret") private var cfClientSecret = ""
+
     var body: some View {
         ScrollView {
             VStack(spacing: 20) {
@@ -14,9 +19,32 @@ struct SettingsView: View {
 
                 // Server
                 SettingsSection(title: "Server") {
-                    SettingsRow(icon: "server.rack", label: "Server URL", detail: "secondbrain.yingliu.site")
-                    SettingsRow(icon: "wifi", label: "Connection", detail: "Connected", detailColor: AppTheme.emerald)
-                    SettingsRow(icon: "key.fill", label: "API Key", detail: "Configured")
+                    SettingsInputRow(
+                        icon: "server.rack",
+                        label: "Server URL",
+                        text: $serverURL,
+                        placeholder: "https://your-server.com"
+                    )
+                    SettingsInputRow(
+                        icon: "key.fill",
+                        label: "API Key",
+                        text: $apiKey,
+                        placeholder: "Enter API key",
+                        isSecure: true
+                    )
+                    SettingsInputRow(
+                        icon: "person.badge.key",
+                        label: "CF Client ID",
+                        text: $cfClientId,
+                        placeholder: "Enter client ID"
+                    )
+                    SettingsInputRow(
+                        icon: "lock.shield",
+                        label: "CF Client Secret",
+                        text: $cfClientSecret,
+                        placeholder: "Enter client secret",
+                        isSecure: true
+                    )
                 }
 
                 // Preferences
@@ -27,7 +55,7 @@ struct SettingsView: View {
 
                 // About
                 SettingsSection(title: "About") {
-                    SettingsRow(icon: "info.circle", label: "Version", detail: "0.5.0")
+                    SettingsRow(icon: "info.circle", label: "Version", detail: "0.6.0")
                     SettingsRow(icon: "doc.text", label: "License", detail: "MIT")
                 }
             }
@@ -63,7 +91,7 @@ private struct SettingsSection<Content: View>: View {
     }
 }
 
-// MARK: - Row
+// MARK: - Static Row
 
 private struct SettingsRow: View {
     let icon: String
@@ -73,16 +101,7 @@ private struct SettingsRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: icon)
-                .font(.body)
-                .foregroundColor(AppTheme.emerald)
-                .frame(width: 36, height: 36)
-                .background(Color.black.opacity(0.2))
-                .clipShape(RoundedRectangle(cornerRadius: 10))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10)
-                        .stroke(AppTheme.border, lineWidth: 1)
-                )
+            SettingsIconBadge(icon: icon)
 
             Text(label)
                 .font(.body)
@@ -108,6 +127,67 @@ private struct SettingsRow: View {
                 .frame(height: 0.5)
                 .padding(.leading, 60)
         }
+    }
+}
+
+// MARK: - Editable Row
+
+private struct SettingsInputRow: View {
+    let icon: String
+    let label: String
+    @Binding var text: String
+    var placeholder: String = ""
+    var isSecure: Bool = false
+
+    var body: some View {
+        HStack(spacing: 12) {
+            SettingsIconBadge(icon: icon)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(label)
+                    .font(.caption)
+                    .foregroundColor(AppTheme.textTertiary)
+
+                if isSecure {
+                    SecureField(placeholder, text: $text)
+                        .font(.body)
+                        .foregroundColor(.white)
+                } else {
+                    TextField(placeholder, text: $text)
+                        .font(.body)
+                        .foregroundColor(.white)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                }
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(AppTheme.border)
+                .frame(height: 0.5)
+                .padding(.leading, 60)
+        }
+    }
+}
+
+// MARK: - Icon Badge
+
+private struct SettingsIconBadge: View {
+    let icon: String
+
+    var body: some View {
+        Image(systemName: icon)
+            .font(.body)
+            .foregroundColor(AppTheme.emerald)
+            .frame(width: 36, height: 36)
+            .background(Color.black.opacity(0.2))
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(AppTheme.border, lineWidth: 1)
+            )
     }
 }
 

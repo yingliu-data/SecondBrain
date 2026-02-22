@@ -45,7 +45,7 @@ SecondBrain/
 │   ├── Theme/
 │   │   └── Theme.swift              # AppTheme colors, gradients, radii, GlassHeader
 │   ├── Network/
-│   │   └── AssistantClient.swift    # HMAC auth, SSE parsing, tool call routing
+│   │   └── AssistantClient.swift    # HMAC auth, SSE parsing, tool call routing, reads UserDefaults
 │   ├── Tools/
 │   │   ├── CalendarTool.swift       # EventKit: get/create calendar events
 │   │   ├── RemindersTool.swift      # EventKit: get/create reminders
@@ -53,8 +53,8 @@ SecondBrain/
 │   └── Views/
 │       ├── MainTabView.swift        # Root tab bar (frosted glass, 3 tabs)
 │       ├── ChatView.swift           # Dark chat with glass bubbles, styled input bar
-│       ├── SkillsView.swift         # Skill toggle cards with emerald accents
-│       └── SettingsView.swift       # Glass-morphism settings sections
+│       ├── SkillsView.swift         # Skill toggle cards, Add New Skill chat flow
+│       └── SettingsView.swift       # Configurable server URL, API key, CF credentials
 ├── docker-compose.yml              # Defines llm, agent-api, cloudflared containers
 ├── .env.example                    # Template for required secrets
 ├── .gitignore

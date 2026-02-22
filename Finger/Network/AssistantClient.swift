@@ -7,24 +7,28 @@ class AssistantClient {
     var isProcessing = false
     var currentResponse = ""
 
-    private let serverURL: String
     private let sessionID = UUID().uuidString
 
-    // TODO: Move to Keychain in Task 12
-    private let apiKey: String
-    private let cfClientId: String
-    private let cfClientSecret: String
+    // Read from UserDefaults (set in SettingsView via @AppStorage)
+    // Falls back to placeholder defaults if not configured
+    private var serverURL: String {
+        let stored = UserDefaults.standard.string(forKey: "serverURL") ?? ""
+        return stored.isEmpty ? "https://secondbrain.yingliu.site" : stored
+    }
 
-    init(
-        serverURL: String = "https://secondbrain.yingliu.site",
-        apiKey: String = "YOUR_API_SECRET_KEY",
-        cfClientId: String = "YOUR_CF_ACCESS_CLIENT_ID",
-        cfClientSecret: String = "YOUR_CF_ACCESS_CLIENT_SECRET"
-    ) {
-        self.serverURL = serverURL
-        self.apiKey = apiKey
-        self.cfClientId = cfClientId
-        self.cfClientSecret = cfClientSecret
+    private var apiKey: String {
+        let stored = UserDefaults.standard.string(forKey: "apiKey") ?? ""
+        return stored.isEmpty ? "YOUR_API_SECRET_KEY" : stored
+    }
+
+    private var cfClientId: String {
+        let stored = UserDefaults.standard.string(forKey: "cfClientId") ?? ""
+        return stored.isEmpty ? "YOUR_CF_ACCESS_CLIENT_ID" : stored
+    }
+
+    private var cfClientSecret: String {
+        let stored = UserDefaults.standard.string(forKey: "cfClientSecret") ?? ""
+        return stored.isEmpty ? "YOUR_CF_ACCESS_CLIENT_SECRET" : stored
     }
 
     // MARK: - Chat

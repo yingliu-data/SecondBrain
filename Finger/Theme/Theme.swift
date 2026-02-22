@@ -7,6 +7,7 @@ enum AppTheme {
         startPoint: .top, endPoint: .bottom
     )
     static let glassBg = Color.black.opacity(0.3)
+    static let glassHeavy = Color.black.opacity(0.4)
 
     // Accents
     static let accentGradient = LinearGradient(

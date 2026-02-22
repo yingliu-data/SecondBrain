@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.0 - 22 February 2026
+
+- Finger: Glass effect on all surfaces, Add New Skill chat flow, configurable server URL and API key
+
 ## 0.5.0 - 22 February 2026
 
 - Finger: Dark-first UI with glass-morphism, emerald accents, tab bar, Skills and Settings views

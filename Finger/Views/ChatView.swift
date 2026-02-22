@@ -186,7 +186,13 @@ struct ChatInputBar: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
+        .background(AppTheme.glassBg)
         .background(.ultraThinMaterial)
+        .overlay(alignment: .top) {
+            Rectangle()
+                .fill(AppTheme.border)
+                .frame(height: 0.5)
+        }
     }
 }
 

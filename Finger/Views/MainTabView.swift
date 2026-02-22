@@ -69,7 +69,13 @@ struct MainTabView: View {
                 .padding(.horizontal)
                 .padding(.top, 8)
                 .padding(.bottom, 4)
+                .background(AppTheme.glassHeavy)
                 .background(.ultraThinMaterial)
+                .overlay(alignment: .top) {
+                    Rectangle()
+                        .fill(AppTheme.border)
+                        .frame(height: 0.5)
+                }
             }
         }
         .preferredColorScheme(.dark)
