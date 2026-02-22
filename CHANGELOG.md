@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.0 - 22 February 2026
+
+- Finger: Dark-first UI with glass-morphism, emerald accents, tab bar, Skills and Settings views
+
 ## 0.4.1 - 22 February 2026
 
 - Finger: Add required Info.plist privacy descriptions for Calendar, Reminders, and Contacts
