@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.1 - 22 February 2026
+
+- Finger: Add required Info.plist privacy descriptions for Calendar, Reminders, and Contacts
+
+## 0.4.0 - 21 February 2026
+
+- Finger: On-device tool executors for Calendar, Reminders, Contacts, and Clipboard
+
 ## 0.3.0 - 21 February 2026
 
 - Finger iOS client: SwiftUI chat app with HMAC auth, SSE streaming, and Cloudflare Access headers

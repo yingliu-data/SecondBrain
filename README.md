@@ -55,7 +55,10 @@ SwiftUI app source files are in `Finger/`. To use:
 
 1. Create a new Xcode project (SwiftUI, iOS 26, name: "Finger")
 2. Add the Swift files from `Finger/` into the project
-3. Add Info.plist entries for Calendar, Reminders, and Contacts usage descriptions
+3. Add privacy descriptions to the target's build settings (required for tool executors):
+   - `INFOPLIST_KEY_NSCalendarsUsageDescription` = "Access your calendar to check and create events"
+   - `INFOPLIST_KEY_NSRemindersUsageDescription` = "Access reminders to read and create tasks"
+   - `INFOPLIST_KEY_NSContactsUsageDescription` = "Search your contacts when you ask about people"
 4. Replace placeholder credentials in `AssistantClient.swift` with your actual keys
 
 ## Development
