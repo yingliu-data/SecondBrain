@@ -5,6 +5,7 @@ struct ChatView: View {
     @State private var input = ""
     @State private var messages: [(role: String, text: String)] = []
     @State private var scrollTask: Task<Void, Never>?
+    @State private var speech = SpeechManager()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -62,14 +63,24 @@ struct ChatView: View {
             }
 
             // Input bar
-            ChatInputBar(text: $input, isProcessing: client.isProcessing) {
-                sendMessage()
-            }
+            ChatInputBar(
+                text: $input,
+                isProcessing: client.isProcessing,
+                isRecording: speech.isRecording,
+                transcript: speech.transcript,
+                onSend: { sendMessage() },
+                onStartRecording: { speech.startRecording() },
+                onStopRecording: {
+                    let text = speech.transcript
+                    speech.stopRecording()
+                    sendMessage(text: text)
+                }
+            )
         }
     }
 
-    private func sendMessage() {
-        let text = input.trimmingCharacters(in: .whitespaces)
+    private func sendMessage(text override: String? = nil) {
+        let text = (override ?? input).trimmingCharacters(in: .whitespaces)
         guard !text.isEmpty else { return }
         input = ""
         withAnimation(.spring(duration: 0.3)) {
@@ -144,7 +155,11 @@ struct StyledMessageBubble: View {
 struct ChatInputBar: View {
     @Binding var text: String
     let isProcessing: Bool
+    let isRecording: Bool
+    let transcript: String
     let onSend: () -> Void
+    let onStartRecording: () -> Void
+    let onStopRecording: () -> Void
     @FocusState private var isFocused: Bool
 
     private var canSend: Bool {
@@ -153,36 +168,83 @@ struct ChatInputBar: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            TextField("Type a message...", text: $text)
-                .focused($isFocused)
+            if isRecording {
+                // Recording mode: pulsing mic + live transcript
+                HStack(spacing: 10) {
+                    Image(systemName: "mic.fill")
+                        .font(.title3)
+                        .foregroundColor(AppTheme.emerald)
+                        .symbolEffect(.pulse)
+
+                    Text(transcript.isEmpty ? "Listening..." : transcript)
+                        .font(.subheadline)
+                        .foregroundColor(transcript.isEmpty ? AppTheme.textTertiary : .white)
+                        .lineLimit(2)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 12)
                 .background(Color.black.opacity(0.2))
-                .foregroundColor(.white)
                 .clipShape(RoundedRectangle(cornerRadius: 20))
                 .overlay(
                     RoundedRectangle(cornerRadius: 20)
-                        .stroke(
-                            isFocused ? AppTheme.emerald.opacity(0.5) : AppTheme.border,
-                            lineWidth: 1
-                        )
+                        .stroke(AppTheme.emerald.opacity(0.5), lineWidth: 1)
                 )
-                .submitLabel(.send)
-                .onSubmit { if canSend { onSend() } }
+            } else {
+                // Normal text input
+                TextField("Type a message...", text: $text)
+                    .focused($isFocused)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
+                    .background(Color.black.opacity(0.2))
+                    .foregroundColor(.white)
+                    .clipShape(RoundedRectangle(cornerRadius: 20))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 20)
+                            .stroke(
+                                isFocused ? AppTheme.emerald.opacity(0.5) : AppTheme.border,
+                                lineWidth: 1
+                            )
+                    )
+                    .submitLabel(.send)
+                    .onSubmit { if canSend { onSend() } }
+            }
 
-            Button(action: onSend) {
-                Image(systemName: "arrow.up")
+            // Button: stop (recording), send (has text), or mic (empty)
+            if isRecording {
+                Button(action: onStopRecording) {
+                    Image(systemName: "stop.fill")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundColor(.white)
+                        .frame(width: 40, height: 40)
+                        .background(Color.red.opacity(0.8))
+                        .clipShape(Circle())
+                }
+            } else if canSend {
+                Button(action: onSend) {
+                    Image(systemName: "arrow.up")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundColor(.white)
+                        .frame(width: 40, height: 40)
+                        .background(AppTheme.accentGradient)
+                        .clipShape(Circle())
+                        .shadow(color: AppTheme.emerald.opacity(0.3), radius: 8, y: 2)
+                }
+            } else {
+                // Mic button — long press to start recording
+                Image(systemName: "mic.fill")
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundColor(.white)
                     .frame(width: 40, height: 40)
-                    .background(AppTheme.accentGradient)
+                    .background(Color.black.opacity(0.2))
                     .clipShape(Circle())
-                    .shadow(color: AppTheme.emerald.opacity(0.3), radius: 8, y: 2)
+                    .overlay(
+                        Circle().stroke(AppTheme.border, lineWidth: 1)
+                    )
+                    .onLongPressGesture(minimumDuration: 0.3) {
+                        onStartRecording()
+                    }
             }
-            .disabled(!canSend)
-            .opacity(canSend ? 1.0 : 0.5)
-            .scaleEffect(canSend ? 1.0 : 0.9)
-            .animation(.spring(duration: 0.2), value: canSend)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
@@ -193,6 +255,7 @@ struct ChatInputBar: View {
                 .fill(AppTheme.border)
                 .frame(height: 0.5)
         }
+        .animation(.spring(duration: 0.2), value: isRecording)
     }
 }
 

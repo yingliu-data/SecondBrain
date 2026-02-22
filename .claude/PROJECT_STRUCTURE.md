@@ -50,9 +50,11 @@ SecondBrain/
 │   │   ├── CalendarTool.swift       # EventKit: get/create calendar events
 │   │   ├── RemindersTool.swift      # EventKit: get/create reminders
 │   │   └── ContactsTool.swift       # Contacts: search by name
+│   ├── Voice/
+│   │   └── SpeechManager.swift      # On-device speech recognition (SFSpeechRecognizer + AVAudioEngine)
 │   └── Views/
 │       ├── MainTabView.swift        # Root tab bar (frosted glass, 3 tabs)
-│       ├── ChatView.swift           # Dark chat with glass bubbles, styled input bar
+│       ├── ChatView.swift           # Dark chat with glass bubbles, mic input, styled input bar
 │       ├── SkillsView.swift         # Skill toggle cards, Add New Skill chat flow
 │       └── SettingsView.swift       # Configurable server URL, API key, CF credentials
 ├── docker-compose.yml              # Defines llm, agent-api, cloudflared containers

@@ -3,6 +3,7 @@
 ## 0.6.0 - 22 February 2026
 
 - Finger: Glass effect on all surfaces, Add New Skill chat flow, configurable server URL and API key
+- Finger: Voice input via long-press mic button with on-device speech recognition
 
 ## 0.5.0 - 22 February 2026
 
