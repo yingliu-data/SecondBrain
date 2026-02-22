@@ -8,28 +8,10 @@ class AssistantClient {
     var currentResponse = ""
 
     private let sessionID = UUID().uuidString
-
-    // Read from UserDefaults (set in SettingsView via @AppStorage)
-    // Falls back to placeholder defaults if not configured
-    private var serverURL: String {
-        let stored = UserDefaults.standard.string(forKey: "serverURL") ?? ""
-        return stored.isEmpty ? "https://secondbrain.yingliu.site" : stored
-    }
-
-    private var apiKey: String {
-        let stored = UserDefaults.standard.string(forKey: "apiKey") ?? ""
-        return stored.isEmpty ? "YOUR_API_SECRET_KEY" : stored
-    }
-
-    private var cfClientId: String {
-        let stored = UserDefaults.standard.string(forKey: "cfClientId") ?? ""
-        return stored.isEmpty ? "YOUR_CF_ACCESS_CLIENT_ID" : stored
-    }
-
-    private var cfClientSecret: String {
-        let stored = UserDefaults.standard.string(forKey: "cfClientSecret") ?? ""
-        return stored.isEmpty ? "YOUR_CF_ACCESS_CLIENT_SECRET" : stored
-    }
+    private let serverURL = "https://secondbrain.yingliu.site"
+    private let apiKey = "YOUR_API_SECRET_KEY"
+    private let cfClientId = "YOUR_CF_ACCESS_CLIENT_ID.access"
+    private let cfClientSecret = "YOUR_CF_ACCESS_CLIENT_SECRET"
 
     // MARK: - Chat
 

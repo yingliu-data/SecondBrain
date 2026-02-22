@@ -9,33 +9,25 @@ struct ChatView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Header card
             VStack(alignment: .leading, spacing: 4) {
                 Text("Finger")
                     .font(.title2.weight(.semibold))
                     .foregroundColor(.white)
                 Text("Always here to help")
                     .font(.subheadline)
-                    .foregroundColor(AppTheme.textSubtle)
+                    .foregroundColor(AppTheme.textTertiary)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(16)
-            .background(AppTheme.glassBg)
-            .background(.ultraThinMaterial)
-            .clipShape(RoundedRectangle(cornerRadius: AppTheme.radiusLg))
-            .overlay(
-                RoundedRectangle(cornerRadius: AppTheme.radiusLg)
-                    .stroke(AppTheme.border, lineWidth: 1)
-            )
+            .glassEffect(in: RoundedRectangle(cornerRadius: AppTheme.radiusLg))
             .padding(.horizontal, 16)
             .padding(.top, 8)
 
-            // Messages
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(spacing: 12) {
                         ForEach(Array(messages.enumerated()), id: \.offset) { i, msg in
-                            StyledMessageBubble(role: msg.role, text: msg.text)
+                            MessageBubble(role: msg.role, text: msg.text)
                                 .id(i)
                                 .transition(.asymmetric(
                                     insertion: .opacity.combined(with: .move(edge: .bottom)),
@@ -43,7 +35,7 @@ struct ChatView: View {
                                 ))
                         }
                         if client.isProcessing && !client.currentResponse.isEmpty {
-                            StyledMessageBubble(role: "assistant", text: client.currentResponse)
+                            MessageBubble(role: "assistant", text: client.currentResponse)
                                 .id("streaming")
                         }
                     }
@@ -62,7 +54,6 @@ struct ChatView: View {
                 }
             }
 
-            // Input bar
             ChatInputBar(
                 text: $input,
                 isProcessing: client.isProcessing,
@@ -86,7 +77,6 @@ struct ChatView: View {
         withAnimation(.spring(duration: 0.3)) {
             messages.append((role: "user", text: text))
         }
-
         Task {
             await client.send(message: text)
             withAnimation(.spring(duration: 0.3)) {
@@ -96,12 +86,28 @@ struct ChatView: View {
     }
 }
 
-// MARK: - Message Bubble
-
-struct StyledMessageBubble: View {
+private struct MessageBubble: View {
     let role: String
     let text: String
     private var isUser: Bool { role == "user" }
+
+    private var assistantShape: UnevenRoundedRectangle {
+        UnevenRoundedRectangle(
+            topLeadingRadius: 8,
+            bottomLeadingRadius: AppTheme.radiusLg,
+            bottomTrailingRadius: AppTheme.radiusLg,
+            topTrailingRadius: AppTheme.radiusLg
+        )
+    }
+
+    private var userShape: UnevenRoundedRectangle {
+        UnevenRoundedRectangle(
+            topLeadingRadius: AppTheme.radiusLg,
+            bottomLeadingRadius: AppTheme.radiusLg,
+            bottomTrailingRadius: AppTheme.radiusLg,
+            topTrailingRadius: 8
+        )
+    }
 
     var body: some View {
         GeometryReader { geo in
@@ -112,36 +118,15 @@ struct StyledMessageBubble: View {
                 Text(text)
                     .font(.subheadline)
                     .padding(12)
+                    .foregroundColor(isUser ? Color(hex: "111827") : .white)
                     .background {
                         if isUser {
-                            Color.white
-                        } else {
-                            AppTheme.glassBg
-                                .background(.ultraThinMaterial)
+                            Color.white.clipShape(userShape)
                         }
                     }
-                    .foregroundColor(isUser ? Color(hex: "111827") : .white)
-                    .clipShape(
-                        UnevenRoundedRectangle(
-                            topLeadingRadius: isUser ? AppTheme.radiusLg : 8,
-                            bottomLeadingRadius: AppTheme.radiusLg,
-                            bottomTrailingRadius: AppTheme.radiusLg,
-                            topTrailingRadius: isUser ? 8 : AppTheme.radiusLg
-                        )
-                    )
-                    .overlay(
-                        Group {
-                            if !isUser {
-                                UnevenRoundedRectangle(
-                                    topLeadingRadius: 8,
-                                    bottomLeadingRadius: AppTheme.radiusLg,
-                                    bottomTrailingRadius: AppTheme.radiusLg,
-                                    topTrailingRadius: AppTheme.radiusLg
-                                )
-                                .stroke(AppTheme.emerald.opacity(0.2), lineWidth: 1)
-                            }
-                        }
-                    )
+                    .if(!isUser) { view in
+                        view.glassEffect(in: assistantShape)
+                    }
 
                 if !isUser { Spacer(minLength: minSpacer) }
             }
@@ -149,8 +134,6 @@ struct StyledMessageBubble: View {
         .fixedSize(horizontal: false, vertical: true)
     }
 }
-
-// MARK: - Input Bar
 
 struct ChatInputBar: View {
     @Binding var text: String
@@ -169,13 +152,11 @@ struct ChatInputBar: View {
     var body: some View {
         HStack(spacing: 12) {
             if isRecording {
-                // Recording mode: pulsing mic + live transcript
                 HStack(spacing: 10) {
                     Image(systemName: "mic.fill")
                         .font(.title3)
                         .foregroundColor(AppTheme.emerald)
                         .symbolEffect(.pulse)
-
                     Text(transcript.isEmpty ? "Listening..." : transcript)
                         .font(.subheadline)
                         .foregroundColor(transcript.isEmpty ? AppTheme.textTertiary : .white)
@@ -184,14 +165,8 @@ struct ChatInputBar: View {
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 12)
-                .background(Color.black.opacity(0.2))
-                .clipShape(RoundedRectangle(cornerRadius: 20))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 20)
-                        .stroke(AppTheme.emerald.opacity(0.5), lineWidth: 1)
-                )
+                .glassEffect(.regular.tint(.green), in: RoundedRectangle(cornerRadius: 20))
             } else {
-                // Normal text input
                 TextField("Type a message...", text: $text)
                     .focused($isFocused)
                     .padding(.horizontal, 16)
@@ -210,7 +185,6 @@ struct ChatInputBar: View {
                     .onSubmit { if canSend { onSend() } }
             }
 
-            // Button: stop (recording), send (has text), or mic (empty)
             if isRecording {
                 Button(action: onStopRecording) {
                     Image(systemName: "stop.fill")
@@ -228,19 +202,15 @@ struct ChatInputBar: View {
                         .frame(width: 40, height: 40)
                         .background(AppTheme.accentGradient)
                         .clipShape(Circle())
-                        .shadow(color: AppTheme.emerald.opacity(0.3), radius: 8, y: 2)
                 }
             } else {
-                // Mic button — long press to start recording
                 Image(systemName: "mic.fill")
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundColor(.white)
                     .frame(width: 40, height: 40)
                     .background(Color.black.opacity(0.2))
                     .clipShape(Circle())
-                    .overlay(
-                        Circle().stroke(AppTheme.border, lineWidth: 1)
-                    )
+                    .overlay(Circle().stroke(AppTheme.border, lineWidth: 1))
                     .onLongPressGesture(minimumDuration: 0.3) {
                         onStartRecording()
                     }
@@ -248,20 +218,18 @@ struct ChatInputBar: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
-        .background(AppTheme.glassBg)
-        .background(.ultraThinMaterial)
-        .overlay(alignment: .top) {
-            Rectangle()
-                .fill(AppTheme.border)
-                .frame(height: 0.5)
-        }
+        .glassEffect()
         .animation(.spring(duration: 0.2), value: isRecording)
     }
 }
 
-#Preview {
-    ZStack {
-        AppTheme.backgroundGradient.ignoresSafeArea()
-        ChatView()
+private extension View {
+    @ViewBuilder
+    func `if`<Transform: View>(_ condition: Bool, transform: (Self) -> Transform) -> some View {
+        if condition {
+            transform(self)
+        } else {
+            self
+        }
     }
 }

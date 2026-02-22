@@ -43,9 +43,9 @@ SecondBrain/
 ├── Finger/                          # iOS SwiftUI app (temporary — moves to own repo)
 │   ├── FingerApp.swift              # App entry point → MainTabView
 │   ├── Theme/
-│   │   └── Theme.swift              # AppTheme colors, gradients, radii, GlassHeader
+│   │   └── Theme.swift              # AppTheme colors, gradients, radii
 │   ├── Network/
-│   │   └── AssistantClient.swift    # HMAC auth, SSE parsing, tool call routing, reads UserDefaults
+│   │   └── AssistantClient.swift    # HMAC auth, SSE parsing, tool call routing
 │   ├── Tools/
 │   │   ├── CalendarTool.swift       # EventKit: get/create calendar events
 │   │   ├── RemindersTool.swift      # EventKit: get/create reminders
@@ -53,10 +53,10 @@ SecondBrain/
 │   ├── Voice/
 │   │   └── SpeechManager.swift      # On-device speech recognition (SFSpeechRecognizer + AVAudioEngine)
 │   └── Views/
-│       ├── MainTabView.swift        # Root tab bar (frosted glass, 3 tabs)
-│       ├── ChatView.swift           # Dark chat with glass bubbles, mic input, styled input bar
-│       ├── SkillsView.swift         # Skill toggle cards, Add New Skill chat flow
-│       └── SettingsView.swift       # Configurable server URL, API key, CF credentials
+│       ├── MainTabView.swift        # Native TabView with Liquid Glass tab bar
+│       ├── ChatView.swift           # Chat with Liquid Glass bubbles, mic input
+│       ├── SkillsView.swift         # Skill toggle cards, LLM-powered Add New Skill
+│       └── SettingsView.swift       # Preferences and about
 ├── docker-compose.yml              # Defines llm, agent-api, cloudflared containers
 ├── .env.example                    # Template for required secrets
 ├── .gitignore
