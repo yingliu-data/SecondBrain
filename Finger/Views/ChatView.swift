@@ -4,6 +4,7 @@ struct ChatView: View {
     @State private var client = AssistantClient()
     @State private var input = ""
     @State private var messages: [(role: String, text: String)] = []
+    @State private var scrollTask: Task<Void, Never>?
 
     var body: some View {
         NavigationStack {
@@ -23,7 +24,12 @@ struct ChatView: View {
                         .padding()
                     }
                     .onChange(of: client.currentResponse) {
-                        proxy.scrollTo("streaming", anchor: .bottom)
+                        scrollTask?.cancel()
+                        scrollTask = Task {
+                            try? await Task.sleep(for: .milliseconds(50))
+                            guard !Task.isCancelled else { return }
+                            proxy.scrollTo("streaming", anchor: .bottom)
+                        }
                     }
                     .onChange(of: messages.count) {
                         proxy.scrollTo(messages.count - 1, anchor: .bottom)
