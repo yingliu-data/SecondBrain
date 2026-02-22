@@ -1,7 +1,7 @@
 # iOS AI Assistant — Build Guide v3
 
 **Start date:** _______________
-**Target completion:** 13 tasks
+**Target completion:** 14 tasks
 
 ---
 
@@ -577,7 +577,7 @@ MAX_TOOLS = int(os.environ.get("MAX_TOOL_CALLS_PER_TURN", 5))
 # Persistent async client with connection pooling to llama-server
 llm_client = httpx.AsyncClient(base_url=LLM_URL, timeout=httpx.Timeout(120.0))
 
-# Session storage (upgrade to SQLite in Task 12)
+# Session storage (upgrade to SQLite in Task 13)
 sessions: dict[str, list] = {}
 tool_result_events: dict[str, asyncio.Event] = {}
 tool_results: dict[str, str] = {}
@@ -940,7 +940,7 @@ done
 
 ---
 
-# Phase 2 — iPhone App Core (Task 6–7)
+# Phase 2 — iPhone App Core (Task 6–8)
 
 **Goal:** Minimal SwiftUI app that sends text, receives streamed responses, and executes tool calls.
 **End state:** Type on iPhone → see streaming tokens → LLM can read your calendar.
@@ -1296,14 +1296,298 @@ TC7.6: Deny calendar permission → tool returns error → LLM explains graceful
 
 ---
 
-# Phase 3 — Voice (Task 8–9)
+## Task 8: iOS UI Design & Styling
 
-**Goal:** Talk to your phone, hear the answer back.
-**End state:** Tap mic → speak → streaming text response → spoken aloud.
+Implement the full visual UI for the iOS app following the reference design (`ui_example/`). The app uses a dark-first aesthetic with glass-morphism, emerald/teal accent colors, and smooth spring animations throughout.
+
+### Design Reference
+
+The UI follows a design with these key characteristics:
+
+**Color Scheme:**
+- Background: Dark gradient (slate-900 → slate-800 → neutral-900, approximate `#0f172a` → `#1e293b` → `#171717`)
+- Primary accent: Emerald/teal gradient (`#10b981` → `#0d9488`)
+- Highlight: Bright green `#4dff9a`
+- Text: White with opacity levels (100%, 60%, 40%) for hierarchy
+- Borders: White at 10% opacity
+- Glass surfaces: Black at 20–40% opacity with backdrop blur
+
+**Layout:**
+- Full-screen dark gradient background
+- Bottom tab bar with frosted glass effect (3 tabs: Chat, Skills, Settings)
+- Active tab indicator: white/20 background + 1.1x scale-up
+- Safe area padding for home indicator
+
+**Chat Bubbles:**
+- User messages: White background, dark text, right-aligned, fully rounded with smaller top-right corner
+- AI messages: Semi-transparent dark (`black/30`) with subtle emerald border, left-aligned, fully rounded with smaller top-left corner
+- Max width: 80% of screen
+
+**Input Area:**
+- Frosted glass background (`black/30` + blur)
+- Subtle white/10 border, emerald highlight on focus
+- Send button: Emerald-to-teal gradient circle with shadow
+
+**Cards & Containers:**
+- Glass-morphism: Semi-transparent with backdrop blur (`.ultraThinMaterial`)
+- Large corner radius (24pt for containers, 16pt for nested elements)
+- Subtle white/10 borders
+
+**Animations:**
+- Spring physics for transitions (stiffness ~400, damping 17–30)
+- Tap feedback: 0.95 scale
+- Message appearance: fade-in + slide-up
+
+### Implementation
+
+#### Theme & Colors
+
+Define a shared color/theme system in SwiftUI:
+
+```swift
+// Theme.swift
+import SwiftUI
+
+enum AppTheme {
+    // Backgrounds
+    static let backgroundGradient = LinearGradient(
+        colors: [Color(hex: "0f172a"), Color(hex: "1e293b"), Color(hex: "171717")],
+        startPoint: .top, endPoint: .bottom
+    )
+    static let glassBg = Color.black.opacity(0.3)
+    static let glassHeavy = Color.black.opacity(0.4)
+
+    // Accents
+    static let accentGradient = LinearGradient(
+        colors: [Color(hex: "10b981"), Color(hex: "0d9488")],
+        startPoint: .leading, endPoint: .trailing
+    )
+    static let highlight = Color(hex: "4dff9a")
+
+    // Text
+    static let textPrimary = Color.white
+    static let textSecondary = Color.white.opacity(0.6)
+    static let textTertiary = Color.white.opacity(0.4)
+
+    // Borders
+    static let border = Color.white.opacity(0.1)
+
+    // Radii
+    static let radiusLg: CGFloat = 24
+    static let radiusMd: CGFloat = 16
+    static let radiusSm: CGFloat = 12
+}
+
+extension Color {
+    init(hex: String) {
+        let scanner = Scanner(string: hex)
+        var rgb: UInt64 = 0
+        scanner.scanHexInt64(&rgb)
+        self.init(
+            red: Double((rgb >> 16) & 0xFF) / 255,
+            green: Double((rgb >> 8) & 0xFF) / 255,
+            blue: Double(rgb & 0xFF) / 255
+        )
+    }
+}
+```
+
+#### Tab Bar
+
+Build a custom bottom tab bar matching the frosted glass design:
+
+```swift
+// MainTabView.swift
+import SwiftUI
+
+enum Tab: String, CaseIterable {
+    case chat, skills, settings
+
+    var icon: String {
+        switch self {
+        case .chat: "message.fill"
+        case .skills: "bolt.fill"
+        case .settings: "gearshape.fill"
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .chat: "Chat"
+        case .skills: "Skills"
+        case .settings: "Settings"
+        }
+    }
+}
+
+struct MainTabView: View {
+    @State private var selectedTab: Tab = .chat
+
+    var body: some View {
+        ZStack {
+            AppTheme.backgroundGradient.ignoresSafeArea()
+
+            VStack(spacing: 0) {
+                switch selectedTab {
+                case .chat: ChatView()
+                case .skills: SkillsView()
+                case .settings: SettingsView()
+                }
+
+                // Frosted glass tab bar
+                HStack {
+                    ForEach(Tab.allCases, id: \.self) { tab in
+                        Button {
+                            withAnimation(.spring(duration: 0.3)) { selectedTab = tab }
+                        } label: {
+                            VStack(spacing: 4) {
+                                Image(systemName: tab.icon)
+                                    .font(.system(size: 20))
+                                Text(tab.label)
+                                    .font(.caption2)
+                            }
+                            .foregroundColor(selectedTab == tab ? .white : .white.opacity(0.6))
+                            .scaleEffect(selectedTab == tab ? 1.1 : 1.0)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 8)
+                            .background(
+                                selectedTab == tab
+                                    ? RoundedRectangle(cornerRadius: 12)
+                                        .fill(.white.opacity(0.2))
+                                    : nil
+                            )
+                        }
+                    }
+                }
+                .padding(.horizontal)
+                .padding(.top, 8)
+                .padding(.bottom, 4)
+                .background(.ultraThinMaterial)
+            }
+        }
+    }
+}
+```
+
+#### Styled Chat Bubbles
+
+Rework `ChatView.swift` with the dark theme and glass-morphism chat bubbles:
+
+```swift
+struct StyledMessageBubble: View {
+    let role: String
+    let text: String
+    private var isUser: Bool { role == "user" }
+
+    var body: some View {
+        HStack {
+            if isUser { Spacer(minLength: UIScreen.main.bounds.width * 0.2) }
+
+            Text(text)
+                .padding(12)
+                .background(isUser ? Color.white : AppTheme.glassBg)
+                .foregroundColor(isUser ? Color(hex: "111827") : .white)
+                .overlay(
+                    !isUser
+                        ? RoundedRectangle(cornerRadius: AppTheme.radiusLg)
+                            .stroke(Color(hex: "10b981").opacity(0.2), lineWidth: 1)
+                        : nil
+                )
+                .clipShape(RoundedRectangle(cornerRadius: AppTheme.radiusLg))
+
+            if !isUser { Spacer(minLength: UIScreen.main.bounds.width * 0.2) }
+        }
+        .transition(.asymmetric(
+            insertion: .opacity.combined(with: .move(edge: .bottom)).combined(with: .scale(scale: 0.95)),
+            removal: .opacity
+        ))
+    }
+}
+```
+
+#### Styled Input Bar
+
+```swift
+struct ChatInputBar: View {
+    @Binding var text: String
+    let onSend: () -> Void
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        HStack(spacing: 12) {
+            TextField("Ask me anything...", text: $text)
+                .focused($isFocused)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+                .background(AppTheme.glassBg)
+                .foregroundColor(.white)
+                .clipShape(RoundedRectangle(cornerRadius: 20))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 20)
+                        .stroke(isFocused ? Color(hex: "10b981").opacity(0.5) : AppTheme.border, lineWidth: 1)
+                )
+
+            Button(action: onSend) {
+                Image(systemName: "arrow.up")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundColor(.white)
+                    .frame(width: 40, height: 40)
+                    .background(AppTheme.accentGradient)
+                    .clipShape(Circle())
+                    .shadow(color: Color(hex: "10b981").opacity(0.3), radius: 8, y: 2)
+            }
+            .disabled(text.isEmpty)
+            .scaleEffect(text.isEmpty ? 0.9 : 1.0)
+            .animation(.spring(duration: 0.2), value: text.isEmpty)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .background(.ultraThinMaterial)
+    }
+}
+```
+
+### Screens to Build
+
+| Screen | Description |
+|---|---|
+| `MainTabView` | Root view with bottom tab bar (frosted glass), 3 tabs |
+| `ChatView` | Dark chat with glass-morphism bubbles, styled input bar, streaming indicator |
+| `SkillsView` | Grid/list of tool capabilities (Calendar, Reminders, etc.) with glass toggle cards |
+| `SettingsView` | Server URL, API key, wake word toggle, voice speed — glass card sections |
+
+### Success criteria
+- [ ] Dark gradient background applied globally across all screens
+- [ ] Bottom tab bar with frosted glass effect and 3 tabs (Chat, Skills, Settings)
+- [ ] Chat bubbles: white for user (right-aligned), dark glass with emerald border for AI (left-aligned)
+- [ ] Input bar with glass background, emerald focus border, gradient send button
+- [ ] Glass-morphism cards used in Skills and Settings views
+- [ ] Spring animations on tab switches, message appearances, and button taps
+- [ ] Color theme matches reference: dark bg, emerald/teal accents, white text hierarchy
+- [ ] Large corner radii (24pt containers, 16pt nested) match reference design
+
+### Test cases
+```
+TC8.1: Launch app → dark gradient background visible → bottom tab bar present
+TC8.2: Tap each tab → content switches with spring animation → active tab highlights
+TC8.3: Send message → user bubble white/right → AI bubble dark-glass/left with emerald border
+TC8.4: Tap input field → border turns emerald → type text → send button scales up
+TC8.5: Skills tab → glass cards with tool names and toggle switches
+TC8.6: Settings tab → glass-morphism sections with controls
+TC8.7: Long chat → scroll works smoothly → messages animate in on appear
+TC8.8: Dark mode / light mode → app stays dark-first (forced dark theme)
+```
 
 ---
 
-## Task 8: Speech-to-Text & TTS
+# Phase 3 — Voice (Task 9–10)
+
+**Goal:** Talk to your phone, see the conversation in chat and hear it when speaker is turned.
+**End state:** Tap mic → speak → streaming text response → spoken aloud if speaker toggel is on.
+
+---
+
+## Task 9: Speech-to-Text & TTS
 
 ### SpeechManager.swift
 
@@ -1368,7 +1652,7 @@ class TTSManager {
 }
 ```
 
-## Task 9: Voice Mode UI
+## Task 10: Voice Mode UI
 
 Build a `VoiceModeView` with a pulsing mic button, live transcript, and waveform animation. Wire it together:
 
@@ -1379,25 +1663,25 @@ Tap mic → SpeechManager.startListening → transcript text
     → TTSManager.speak(response)
 ```
 
-### Task 8 success criteria
+### Task 9 success criteria
 - [ ] Microphone permission requested
 - [ ] Speech recognition runs on-device (no data sent to Apple)
 - [ ] Spoken words transcribed to text in real-time
 - [ ] Final transcript sent to server as a chat message
 
-### Task 8 test cases
+### Task 9 test cases
 ```
 TC8.1: Tap mic → speak "Hello" → transcript shows "Hello" → sent to server
 TC8.2: Tap mic → speak a long sentence → words appear incrementally
 TC8.3: Deny microphone permission → graceful error shown
 ```
 
-### Task 9 success criteria
+### Task 10 success criteria
 - [ ] TTS speaks the assistant's response aloud after streaming completes
 - [ ] Voice mode UI has pulsing mic button and live transcript display
 - [ ] Full voice loop works: speak → transcribe → send → stream → speak response
 
-### Task 9 test cases
+### Task 10 test cases
 ```
 TC9.1: Tap mic → "What's on my calendar tomorrow?" → streaming text appears
        → response spoken aloud via TTS
@@ -1408,14 +1692,14 @@ TC9.4: Voice speed slider changes TTS rate
 
 ---
 
-# Phase 4 — Wake Word & Background (Task 10–11)
+# Phase 4 — Wake Word & Background (Task 11–12)
 
 **Goal:** "Hey Jarvis" activates from background.
 **End state:** Phone in pocket → say "Hey Jarvis, set a reminder to buy milk" → reminder created, confirmation spoken.
 
 ---
 
-## Task 10: Wake Word Integration
+## Task 11: Wake Word Integration
 
 ```
 1. Sign up at https://console.picovoice.ai
@@ -1443,7 +1727,7 @@ class WakeWordManager: ObservableObject {
 }
 ```
 
-## Task 11: Background Audio Mode
+## Task 12: Background Audio Mode
 
 Enable "Audio, AirPlay, and Picture in Picture" background mode in Xcode capabilities. This lets Porcupine keep running when the app is backgrounded.
 
@@ -1456,13 +1740,13 @@ App backgrounded → Porcupine runs (~1 MB RAM, <4% CPU)
   → Speak response via TTS
 ```
 
-### Task 10 success criteria
+### Task 11 success criteria
 - [ ] Picovoice Porcupine SDK integrated via SPM
 - [ ] Custom "Hey Jarvis" wake word trained and `.ppn` file bundled
 - [ ] Wake word detected reliably in foreground
 - [ ] Detection triggers speech recognition flow
 
-### Task 10 test cases
+### Task 11 test cases
 ```
 TC10.1: App in foreground → say "Hey Jarvis" → chime plays → mic activates
 TC10.2: Say "Hey Jarvis, what time is it?" → full voice loop completes
@@ -1470,12 +1754,12 @@ TC10.3: Say unrelated phrase → no false activation
 TC10.4: Say wake word from 2 meters away → still detected
 ```
 
-### Task 11 success criteria
+### Task 12 success criteria
 - [ ] Background audio mode enabled in Xcode capabilities
 - [ ] Porcupine keeps running when app is backgrounded (~1 MB RAM, <4% CPU)
 - [ ] Wake word triggers full flow from background (chime → STT → server → TTS)
 
-### Task 11 test cases
+### Task 12 test cases
 ```
 TC11.1: Background app → "Hey Jarvis, set a reminder to buy milk" →
         reminder created → confirmation spoken
@@ -1486,13 +1770,13 @@ TC11.4: Check battery usage → Porcupine <4% CPU over 8 hours
 
 ---
 
-# Phase 5 — Polish (Task 12–13)
+# Phase 5 — Polish (Task 13–14)
 
 **Goal:** Production-ready app with settings, persistence, error handling, and monitoring.
 
 ---
 
-## Task 12: Settings & Persistence
+## Task 13: Settings & Persistence
 
 **Settings screen:**
 - Server URL (editable)
@@ -1537,7 +1821,7 @@ TC12.6: Airplane mode → send message → "Server unreachable" error → no cra
 TC12.7: Toggle wake word off → say "Hey Jarvis" → no activation
 ```
 
-## Task 13: Monitoring, Error Handling & Final QA
+## Task 14: Monitoring, Error Handling & Final QA
 
 **Server monitoring (optional but recommended):**
 
@@ -1618,6 +1902,8 @@ TC13.8: Noisy room → say wake word → still activates reliably
 
 MyAssistant/ (Xcode project)
 ├── MyAssistantApp.swift
+├── Theme/
+│   └── Theme.swift                    # AppTheme colors, gradients, radii
 ├── Network/
 │   └── AssistantClient.swift
 ├── Tools/
@@ -1630,7 +1916,11 @@ MyAssistant/ (Xcode project)
 │   ├── TTSManager.swift
 │   └── WakeWordManager.swift
 └── Views/
+    ├── MainTabView.swift              # Root tab bar (frosted glass)
     ├── ChatView.swift
+    ├── StyledMessageBubble.swift
+    ├── ChatInputBar.swift
+    ├── SkillsView.swift
     ├── VoiceModeView.swift
     └── SettingsView.swift
 ```
