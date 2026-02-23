@@ -1795,7 +1795,7 @@ TC12.6: Airplane mode → send message → "Server unreachable" error → no cra
 TC12.7: Toggle wake word off → say "Jarvis" → no activation
 ```
 
-## Task 14: Monitoring, Error Handling & Final QA
+## Task 14: Monitoring, Error Handling & Final QA (done)
 
 **Server monitoring (optional but recommended):**
 
@@ -1827,12 +1827,22 @@ TC12.7: Toggle wake word off → say "Jarvis" → no activation
 - Battery life test (8h background listening)
 - Load test (rapid-fire 20 messages)
 
+### Implementation
+
+**Backend (SecondBrain):**
+- `agent-api/app/agent/llm.py` — Added retry with exponential backoff (3 attempts, 1s/2s/4s) for transient LLM errors (connection refused, 502/503/504, read timeout) before cloud fallback
+- `agent-api/app/agent/loop.py` — Wrapped LLM call in try/except to yield a friendly SSE error when all retries + fallback fail
+- `docker-compose.yml` — Added dcgm-exporter service for GPU metrics at localhost:9400
+
+**iOS (FingerApp):**
+- `Network/AssistantClient.swift` — Added retry with exponential backoff (3 attempts, 1s/2s/4s) for transient network errors and 502/503/504 responses. User-friendly error messages for auth failures, timeouts, and network issues. Fresh HMAC signature per attempt.
+
 ### Success criteria
-- [ ] Retry logic with exponential backoff on network errors
-- [ ] 120s timeout for inference, 60s for tool results
-- [ ] Graceful degradation when LLM container is restarting
-- [ ] GPU monitoring via dcgm-exporter (optional)
-- [ ] App works reliably on WiFi, cellular, and VPN
+- [x] Retry logic with exponential backoff on network errors
+- [x] 120s timeout for inference, 60s for tool results
+- [x] Graceful degradation when LLM container is restarting
+- [x] GPU monitoring via dcgm-exporter (optional)
+- [ ] App works reliably on WiFi, cellular, and VPN (requires on-device testing)
 
 ### Test cases
 ```

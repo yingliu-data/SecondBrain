@@ -76,6 +76,25 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
+  # -- GPU Monitoring (optional) ---------------------------------------------
+  # Exposes GPU metrics at :9400/metrics for Prometheus/Grafana.
+  # Safe to remove if GPU monitoring is not needed.
+  dcgm-exporter:
+    image: nvcr.io/nvidia/k8s/dcgm-exporter:latest
+    container_name: secondbrain-dcgm
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    ports:
+      - "127.0.0.1:9400:9400"  # Localhost only — not exposed to internet
+    networks:
+      - llm_internal
+
 networks:
   llm_internal:
     driver: bridge
