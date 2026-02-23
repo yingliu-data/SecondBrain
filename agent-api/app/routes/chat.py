@@ -3,10 +3,11 @@ from fastapi.responses import StreamingResponse
 from app.auth.middleware import verify
 from app.agent.loop import run_agent_loop, SSE_HEADERS
 from app.config import MAX_INPUT
+from app.session.factory import create_session_store
 
 router = APIRouter()
 
-sessions: dict[str, list] = {}  # → SQLite (Task 12) → Redis (scaling stage 2)
+sessions = create_session_store()
 _registry = None
 _llm = None
 
@@ -24,8 +25,14 @@ async def chat(request: Request):
     session_id = body.get("session_id", "default")
     history = sessions.setdefault(session_id, [])
 
+    async def generate_and_save():
+        async for event in run_agent_loop(message, history, _registry, _llm):
+            yield event
+        if hasattr(sessions, "save"):
+            sessions.save(session_id, history)
+
     return StreamingResponse(
-        run_agent_loop(message, history, _registry, _llm),
+        generate_and_save(),
         media_type="text/event-stream",
         headers=SSE_HEADERS,
     )

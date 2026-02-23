@@ -82,4 +82,11 @@ async def run_agent_loop(message: str, history: list, registry, llm):
         for word in text.split(" "):
             yield f"event: token\ndata: {json.dumps({'text': word + ' '})}\n\n"
         yield "event: done\ndata: {}\n\n"
-        break
+        return
+    else:
+        # Tool loop exhausted without a final text response
+        logger.warning(f"Agent loop exhausted {MAX_TOOLS} tool iterations without final response")
+        fallback = "I'm sorry, I wasn't able to complete that request. Please try again."
+        history.append({"role": "assistant", "content": fallback})
+        yield f"event: token\ndata: {json.dumps({'text': fallback})}\n\n"
+        yield "event: done\ndata: {}\n\n"
