@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.10.0 - 23 February 2026
+
+### iOS App
+- feat: Keychain credential storage replacing hardcoded API keys (server URL, API key, CF Access, ElevenLabs)
+- feat: Settings UI with editable server URL, connection test button, and secure credential fields
+- feat: first-launch detection opens Settings tab when credentials not configured
+- feat: offline handling with health check before sending (graceful error messages)
+- feat: setup-required banner in Settings when credentials are missing
+
+### Server
+- feat: SQLite session persistence replacing in-memory dict (survives container restart)
+- feat: session CRUD endpoints (GET /api/v1/sessions, DELETE /api/v1/sessions/{id})
+- feat: configurable SESSION_BACKEND ("sqlite" default, "memory" fallback)
+
 ## 0.9.0 - 23 February 2026
 
 ### iOS App

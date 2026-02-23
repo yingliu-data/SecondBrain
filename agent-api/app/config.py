@@ -17,7 +17,7 @@ MAX_TOOLS = int(os.environ.get("MAX_TOOL_CALLS_PER_TURN", 5))
 TOOL_TIMEOUT = int(os.environ.get("TOOL_TIMEOUT", 60))        # seconds for device tool response
 
 # ── Session Store (swap backend without touching agent code) ──
-SESSION_BACKEND = os.environ.get("SESSION_BACKEND", "memory")  # "memory" | "sqlite" | "redis"
+SESSION_BACKEND = os.environ.get("SESSION_BACKEND", "sqlite")  # "memory" | "sqlite" | "redis"
 SESSION_DB_PATH = os.environ.get("SESSION_DB_PATH", "data/conversations.db")
 
 SYSTEM_PROMPT = """You are a personal AI assistant running on the user's private server.

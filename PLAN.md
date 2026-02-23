@@ -1733,42 +1733,55 @@ TC10.6: Leave Chat tab 1+ min → wake word still works (WebSocket keep-alive)
 
 ---
 
-## Task 13: Settings & Persistence
+## Task 13: Settings & Persistence (done)
 
-**Settings screen (partially done):**
+**Settings screen:**
 - [x] Wake word display ("Jarvis")
 - [x] Speaker toggle (persisted via @AppStorage)
 - [x] Debug log viewer
 - [x] Version and license info
-- [ ] Server URL (currently hardcoded)
-- [ ] Connection test button
-- [ ] API key entry (stored in Keychain)
+- [x] Server URL (editable in Settings, stored in Keychain)
+- [x] Connection test button (hits /health with status indicator)
+- [x] API key entry (stored in iOS Keychain via KeychainHelper)
+- [x] ElevenLabs key entry (stored in Keychain, used by SpeechManager + TTSManager)
+- [x] CF Access credentials (stored in Keychain)
+- [x] First-launch UX: opens Settings tab when no credentials configured
 
-**Conversation persistence (partially done):**
+**Conversation persistence:**
 - [x] SwiftData persistence on device (Conversation + Message models)
 - [x] Multi-conversation support with create/switch/delete
-- [ ] Replace in-memory `sessions` dict with SQLite on server
-- [ ] Server-side session management
+- [x] SQLite session store on server (replaces in-memory dict, survives container restart)
+- [x] Session CRUD endpoints: GET /api/v1/sessions, DELETE /api/v1/sessions/{id}
 
 **Offline handling:**
+- [x] Health check before sending (5s timeout)
+- [x] Credential check guard (redirects to Settings)
+- [x] Graceful error messages for all failure modes
 
-```swift
-func send(message: String) async {
-    guard await checkServerHealth() else {
-        currentResponse = "⚠️ Server unreachable. Check your connection."
-        return
-    }
-    // ... normal flow
-}
-```
+### Implementation
+
+**Backend (SecondBrain):**
+- `agent-api/app/session/store.py` — SQLite SessionStore with WAL mode, thread-local connections, dict-compatible interface
+- `agent-api/app/session/factory.py` — Factory function reads SESSION_BACKEND config ("sqlite" default, "memory" fallback)
+- `agent-api/app/routes/sessions.py` — Session CRUD endpoints (list, delete)
+- `agent-api/app/routes/chat.py` — Swapped in-memory dict for SessionStore, saves after stream completes
+- `agent-api/app/config.py` — Changed SESSION_BACKEND default from "memory" to "sqlite"
+
+**iOS (FingerApp):**
+- `Network/KeychainHelper.swift` — Minimal Security framework wrapper (get/set/delete/isConfigured)
+- `Views/SettingsView.swift` — Added Server section (URL + test), Credentials section (5 secure fields), setup banner
+- `Network/AssistantClient.swift` — Removed 4 hardcoded credentials, reads from Keychain, added health check
+- `Voice/SpeechManager.swift` — ElevenLabs key from Keychain instead of hardcoded
+- `Voice/TTSManager.swift` — ElevenLabs key from Keychain instead of hardcoded
+- `Views/MainTabView.swift` — First-launch detection opens Settings tab
 
 ### Success criteria
 - [x] Settings screen with wake word display, speaker toggle, debug logs
-- [ ] Settings: editable server URL + connection test button
-- [ ] API key stored in iOS Keychain (not UserDefaults)
-- [ ] Server-side sessions stored in SQLite (survives container restart)
+- [x] Settings: editable server URL + connection test button
+- [x] API key stored in iOS Keychain (not UserDefaults)
+- [x] Server-side sessions stored in SQLite (survives container restart)
 - [x] Multi-conversation with create/switch/delete via ConversationListView
-- [ ] Offline: server unreachable → graceful error message (no crash)
+- [x] Offline: server unreachable → graceful error message (no crash)
 
 ### Test cases
 ```
