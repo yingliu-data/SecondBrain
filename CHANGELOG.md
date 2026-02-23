@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.9.0 - 23 February 2026
+
+### iOS App
+- feat: live transcription via ElevenLabs WebSocket streaming STT (real-time partial transcripts)
+- feat: ElevenLabs TTS replacing AVSpeechSynthesizer for natural voice output
+- fix: SSE stream hang when backend returns non-200 (defer isProcessing reset)
+- refactor: code cleanup across all Swift files (remove dead code, fix force unwraps, tighten closures)
+
 ## 0.8.1 - 22 February 2026
 
 ### iOS App
