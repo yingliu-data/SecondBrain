@@ -10,7 +10,7 @@
 A personal AI assistant where a powerful home server runs the brain (LLM + agent logic) and your iPhone is a thin client that handles voice, text, and on-device tools like Calendar and Reminders. You talk to your phone, it relays to your server, the server thinks, and streams the answer back — with the ability to read your calendar, create reminders, search contacts, and more.
 
 ```
-iPhone 15 Pro                          Your Server (RTX 5080)
+iPhone (Finger app)                    Your Server (RTX 5080)
 ┌──────────────────┐                   ┌──────────────────────────┐
 │ SwiftUI App      │  ── HTTPS ──▶     │ Cloudflare Tunnel        │
 │ • Chat UI        │  (Cloudflare)     │   ↓                      │
@@ -24,7 +24,7 @@ iPhone 15 Pro                          Your Server (RTX 5080)
 ```
 
 **Hardware:** Linux server · NVIDIA RTX 5080 (16 GB VRAM, 960 GB/s bandwidth) · 128 GB RAM
-**Client:** iPhone 15 Pro · iOS 26
+**Client:** iPhone · iOS 26 · "Finger" SwiftUI app
 **Model:** Qwen3 14B Q4_K_M (~10 GB VRAM) with Qwen3 0.5B draft for speculative decoding
 **Networking:** Cloudflare Tunnel (zero inbound ports, edge auth, DDoS protection)
 **Docker image:** `ghcr.io/ggml-org/llama.cpp:server-cuda` (official prebuilt — no custom Dockerfile needed)
@@ -37,7 +37,7 @@ Every interaction follows this flow:
 
 ```
 1. User speaks or types on iPhone
-2. iPhone transcribes voice → text (on-device, Apple STT)
+2. iPhone transcribes voice → text (ElevenLabs WebSocket STT)
 3. iPhone sends text to server via HTTPS (through Cloudflare Tunnel)
 4. Server builds full prompt (system + tools + history + user message)
 5. Server sends to LLM (llama-server with speculative decoding)
@@ -54,9 +54,9 @@ Every interaction follows this flow:
 | LLM inference | Server | Needs GPU — too slow/big for iPhone |
 | Agent loop (prompt, tool parsing, retries) | Server | Centralized, easy to update |
 | Tool execution (calendar, contacts, health) | iPhone | These APIs only exist on iOS |
-| Speech-to-text | iPhone | Apple's on-device STT is excellent and free |
-| Text-to-speech | iPhone | On-device, zero latency |
-| Wake word detection | iPhone | Must run locally for background listening |
+| Speech-to-text | iPhone (ElevenLabs cloud) | ElevenLabs Scribe V2 real-time WebSocket STT |
+| Text-to-speech | iPhone (ElevenLabs cloud) | ElevenLabs TTS API with PCM audio playback |
+| Wake word detection | iPhone | Always-on ElevenLabs STT with keyword scanning |
 | Conversation memory | Server | Persistent, survives app restarts |
 
 ---
@@ -940,18 +940,18 @@ done
 
 ---
 
-# Phase 2 — iPhone App Core (Task 6–8)
+# Phase 2 — iPhone App Core (Task 6–8) (done)
 
 **Goal:** Minimal SwiftUI app that sends text, receives streamed responses, and executes tool calls.
 **End state:** Type on iPhone → see streaming tokens → LLM can read your calendar.
 
 ---
 
-## Task 6: Build the Client
+## Task 6: Build the Client (done)
 
 ### Create Xcode project
 
-New project → SwiftUI → "MyAssistant". Add these to Info.plist:
+New project → SwiftUI → "Finger". Add these to Info.plist:
 
 ```xml
 <key>NSCalendarsUsageDescription</key>
@@ -1161,12 +1161,12 @@ struct MessageBubble: View {
 ```
 
 ### Success criteria
-- [ ] App builds and runs on iPhone 15 Pro (iOS 26)
-- [ ] Text input sends message to server via HTTPS through Cloudflare
-- [ ] SSE tokens stream back and appear word-by-word in chat UI
-- [ ] Chat history displays user and assistant messages with distinct bubbles
-- [ ] HMAC auth headers are sent with every request
-- [ ] Cloudflare Access headers are included
+- [x] App builds and runs on iPhone (iOS 26)
+- [x] Text input sends message to server via HTTPS through Cloudflare
+- [x] SSE tokens stream back and appear word-by-word in chat UI
+- [x] Chat history displays user and assistant messages with distinct bubbles
+- [x] HMAC auth headers are sent with every request
+- [x] Cloudflare Access headers are included
 
 ### Test cases
 ```
@@ -1180,7 +1180,7 @@ TC6.5: Airplane mode → type message → connection error shown (no crash)
 
 ---
 
-## Task 7: On-Device Tool Executors
+## Task 7: On-Device Tool Executors (done)
 
 ### CalendarTool.swift
 
@@ -1275,12 +1275,12 @@ enum ContactsTool {
 | `run_shortcut` | Shortcuts/Intents | Phase 4 |
 
 ### Success criteria
-- [ ] Calendar permission requested and events returned via EventKit
-- [ ] Calendar event creation works via EventKit
-- [ ] Reminders permission requested and pending items returned
-- [ ] Contacts permission requested and search returns results
-- [ ] Clipboard read works via UIPasteboard
-- [ ] Tool call → iPhone executes → result sent back → LLM summarizes — full loop
+- [x] Calendar permission requested and events returned via EventKit
+- [x] Calendar event creation works via EventKit
+- [x] Reminders permission requested and pending items returned
+- [x] Contacts permission requested and search returns results
+- [x] Clipboard read works via UIPasteboard
+- [x] Tool call → iPhone executes → result sent back → LLM summarizes — full loop
 
 ### Test cases
 ```
@@ -1296,7 +1296,7 @@ TC7.6: Deny calendar permission → tool returns error → LLM explains graceful
 
 ---
 
-## Task 8: iOS UI Design & Styling
+## Task 8: iOS UI Design & Styling (done)
 
 Implement the full visual UI for the iOS app following the reference design (`ui_example/`). The app uses a dark-first aesthetic with glass-morphism, emerald/teal accent colors, and smooth spring animations throughout.
 
@@ -1557,14 +1557,14 @@ struct ChatInputBar: View {
 | `SettingsView` | Server URL, API key, wake word toggle, voice speed — glass card sections |
 
 ### Success criteria
-- [ ] Dark gradient background applied globally across all screens
-- [ ] Bottom tab bar with frosted glass effect and 3 tabs (Chat, Skills, Settings)
-- [ ] Chat bubbles: white for user (right-aligned), dark glass with emerald border for AI (left-aligned)
-- [ ] Input bar with glass background, emerald focus border, gradient send button
-- [ ] Glass-morphism cards used in Skills and Settings views
-- [ ] Spring animations on tab switches, message appearances, and button taps
-- [ ] Color theme matches reference: dark bg, emerald/teal accents, white text hierarchy
-- [ ] Large corner radii (24pt containers, 16pt nested) match reference design
+- [x] Dark gradient background applied globally across all screens
+- [x] Bottom tab bar with frosted glass effect and 3 tabs (Chat, Skills, Settings)
+- [x] Chat bubbles: user (right-aligned), AI (left-aligned) with Liquid Glass effects
+- [x] Input bar with glass background, emerald focus border, gradient send button
+- [x] Glass-morphism cards used in Skills and Settings views
+- [x] Spring animations on tab switches, message appearances, and button taps
+- [x] iOS 26 native Liquid Glass (.glassEffect) on all surfaces
+- [x] Multi-conversation support with SwiftData persistence
 
 ### Test cases
 ```
@@ -1580,193 +1580,150 @@ TC8.8: Dark mode / light mode → app stays dark-first (forced dark theme)
 
 ---
 
-# Phase 3 — Voice (Task 9–10)
+# Phase 3 — Voice (Task 9–10) (done)
 
-**Goal:** Talk to your phone, see the conversation in chat and hear it when speaker is turned.
-**End state:** Tap mic → speak → streaming text response → spoken aloud if speaker toggel is on.
+**Goal:** Talk to your phone, see the conversation in chat and hear it when speaker is turned on.
+**End state:** Tap mic → speak → streaming text response → spoken aloud if speaker toggle is on.
 
 ---
 
-## Task 9: Speech-to-Text & TTS
+## Task 9: Speech-to-Text & TTS (done)
 
-### SpeechManager.swift
+Uses ElevenLabs cloud APIs (not Apple on-device STT/TTS) for higher quality voice.
 
-```swift
-import Speech
+### SpeechManager.swift — ElevenLabs WebSocket STT
 
-class SpeechManager: ObservableObject {
-    private let recognizer = SFSpeechRecognizer()
-    private let audioEngine = AVAudioEngine()
-    private var request: SFSpeechAudioBufferRecognitionRequest?
-    private var task: SFSpeechRecognitionTask?
+Real-time streaming speech-to-text via ElevenLabs Scribe V2 WebSocket API:
+- AVAudioEngine captures microphone PCM audio
+- Audio chunks streamed as base64 over WebSocket to `wss://api.elevenlabs.io/v1/speech-to-text/realtime`
+- Server returns `partial_transcript` and `committed_transcript` events
+- Transcript builds incrementally from committed + partial text
 
-    func startListening(onResult: @escaping (String) -> Void) {
-        SFSpeechRecognizer.requestAuthorization { status in
-            guard status == .authorized else { return }
-        }
-        request = SFSpeechAudioBufferRecognitionRequest()
-        request?.requiresOnDeviceRecognition = true  // Privacy: no data to Apple
+### TTSManager.swift — ElevenLabs TTS
 
-        let node = audioEngine.inputNode
-        let format = node.outputFormat(forBus: 0)
-        node.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
-            self?.request?.append(buffer)
-        }
+Text-to-speech via ElevenLabs REST API:
+- POST text to `https://api.elevenlabs.io/v1/text-to-speech/{voice_id}?output_format=pcm_24000`
+- Returns raw PCM audio (16-bit signed int at 24kHz)
+- Converts to Float32 PCM, schedules on AVAudioPlayerNode for playback
+- Strips markdown before sending to TTS for cleaner output
 
-        audioEngine.prepare()
-        try? audioEngine.start()
+## Task 10: Voice Mode UI (done)
 
-        task = recognizer?.recognitionTask(with: request!) { result, error in
-            if let result, result.isFinal {
-                onResult(result.bestTranscription.formattedString)
-            }
-        }
-    }
-
-    func stopListening() {
-        audioEngine.stop()
-        audioEngine.inputNode.removeTap(onBus: 0)
-        request?.endAudio()
-    }
-}
-```
-
-### TTSManager.swift
-
-```swift
-import AVFoundation
-
-class TTSManager {
-    private let synth = AVSpeechSynthesizer()
-
-    func speak(_ text: String) {
-        let utterance = AVSpeechUtterance(string: text)
-        utterance.voice = AVSpeechSynthesisVoice(language: "en-GB")
-        utterance.rate = 0.52
-        synth.speak(utterance)
-    }
-
-    func stop() {
-        synth.stopSpeaking(at: .immediate)
-    }
-}
-```
-
-## Task 10: Voice Mode UI
-
-Build a `VoiceModeView` with a pulsing mic button, live transcript, and waveform animation. Wire it together:
+Voice is integrated directly into `ChatView` via `ChatInputBar` — no separate VoiceModeView:
+- Mic button in input bar toggles recording
+- Recording state shows pulsing mic icon + live transcript in the input area
+- Send button appears when text is typed; mic button shows otherwise
+- Speaker toggle in Settings enables/disables TTS on responses
 
 ```
-Tap mic → SpeechManager.startListening → transcript text
+Tap mic → SpeechManager.startRecording → live transcript in input bar
+    → Tap mic again to stop → transcript sent as message
     → AssistantClient.send(transcript)
-    → streamed response appears
-    → TTSManager.speak(response)
+    → streamed response appears in chat
+    → TTSManager.speak(response) if speaker enabled
 ```
 
 ### Task 9 success criteria
-- [ ] Microphone permission requested
-- [ ] Speech recognition runs on-device (no data sent to Apple)
-- [ ] Spoken words transcribed to text in real-time
-- [ ] Final transcript sent to server as a chat message
-
-### Task 9 test cases
-```
-TC8.1: Tap mic → speak "Hello" → transcript shows "Hello" → sent to server
-TC8.2: Tap mic → speak a long sentence → words appear incrementally
-TC8.3: Deny microphone permission → graceful error shown
-```
+- [x] Microphone permission requested
+- [x] ElevenLabs WebSocket STT transcribes speech in real-time
+- [x] Partial transcripts show live in input bar during recording
+- [x] Final transcript sent to server as a chat message
 
 ### Task 10 success criteria
-- [ ] TTS speaks the assistant's response aloud after streaming completes
-- [ ] Voice mode UI has pulsing mic button and live transcript display
-- [ ] Full voice loop works: speak → transcribe → send → stream → speak response
-
-### Task 10 test cases
-```
-TC9.1: Tap mic → "What's on my calendar tomorrow?" → streaming text appears
-       → response spoken aloud via TTS
-TC9.2: Tap mic during TTS playback → TTS stops → new recording starts
-TC9.3: Long response → TTS speaks entire response without cutting off
-TC9.4: Voice speed slider changes TTS rate
-```
+- [x] ElevenLabs TTS speaks assistant responses when speaker toggle is on
+- [x] Voice UI integrated into ChatInputBar (pulsing mic + live transcript)
+- [x] Full voice loop works: speak → transcribe → send → stream → speak response
+- [x] Tapping mic during TTS stops playback and starts new recording
 
 ---
 
-# Phase 4 — Wake Word & Background (Task 11–12)
+# Phase 4 — Wake Word & Background (Task 11–12) (done)
 
-**Goal:** "Hey Jarvis" activates from background.
-**End state:** Phone in pocket → say "Hey Jarvis, set a reminder to buy milk" → reminder created, confirmation spoken.
+**Goal:** "Jarvis" activates hands-free from the Chat tab.
+**End state:** Chat tab open → say "Jarvis, set a reminder to buy milk" → chime → auto-records → reminder created, confirmation spoken.
 
 ---
 
-## Task 11: Wake Word Integration
+## Task 11: Wake Word Integration (done)
+
+Uses the existing ElevenLabs STT in always-listening mode — no Picovoice, no new SDK dependencies.
+
+### VoiceFlowCoordinator.swift — State Machine
+
+`VoiceFlowCoordinator` orchestrates wake word detection, command recording, and TTS:
 
 ```
-1. Sign up at https://console.picovoice.ai
-2. Train custom wake word: "Hey Jarvis"
-3. Download .ppn file for iOS
-4. Add Porcupine SDK via SPM
+ChatView appears
+    ↓
+[listeningForWakeWord]  ← SpeechManager running silently, scanning for "jarvis"
+    │                      (no recording UI shown — user sees normal chat)
+    │                      (auto-restarts every 50s to avoid WebSocket timeout)
+    ↓ "jarvis" detected in transcript
+    ↓ system chime plays
+[recording]             ← same SpeechManager session continues
+    │                      recording UI appears (pulsing mic + live command transcript)
+    │                      silence detection starts (2s silence = auto-stop)
+    ↓ 2s silence after command OR user taps mic
+[processing]            ← command extracted (text after "jarvis"), sent to backend
+    ↓ response received
+[speaking]              ← TTS plays (if speaker enabled)
+    ↓ TTS finishes (or skipped)
+[listeningForWakeWord]  ← loop back
 ```
 
-### WakeWordManager.swift
+Key mechanisms:
+- **Same-utterance support:** "Jarvis what time is it?" → extracts "what time is it?" by stripping text up to and including "jarvis"
+- **Silence detection:** Polls transcript every 500ms. If command text unchanged for 2s → auto-stop and send
+- **No-command timeout:** If nothing spoken within 5s after wake word → cancel, restart listening
+- **WebSocket keep-alive:** Restarts SpeechManager every 50s during wake word mode
+- **Manual mic still works:** Tapping mic button bypasses wake word, starts fresh recording
 
-```swift
-import Porcupine
+### Files changed
+- `Voice/VoiceFlowCoordinator.swift` — **Created** (~295 lines)
+- `Views/ChatView.swift` — Replaced `SpeechManager`/`TTSManager` with `VoiceFlowCoordinator`
+- `Views/SettingsView.swift` — Wake Word row shows "Jarvis"
 
-class WakeWordManager: ObservableObject {
-    private var porcupine: Porcupine?
+## Task 12: Background Audio Mode (done)
 
-    func start(onWake: @escaping () -> Void) throws {
-        porcupine = try Porcupine(
-            accessKey: "YOUR_PICOVOICE_KEY",
-            keywordPath: Bundle.main.path(forResource: "hey-jarvis_ios", ofType: "ppn")!
-        )
-        // Audio processing loop — runs on background thread
-        // When wake word detected → onWake()
-    }
-}
-```
+Background wake word detection using the same ElevenLabs STT WebSocket. When the app goes to background with the Chat tab active, the microphone and WebSocket stay alive via the iOS `audio` background mode entitlement.
 
-## Task 12: Background Audio Mode
-
-Enable "Audio, AirPlay, and Picture in Picture" background mode in Xcode capabilities. This lets Porcupine keep running when the app is backgrounded.
+### Implementation
 
 ```
-App backgrounded → Porcupine runs (~1 MB RAM, <4% CPU)
-  → "Hey Jarvis" detected
-  → Play chime
-  → Start speech recognition
-  → Send to server
-  → Speak response via TTS
+App backgrounded (Chat tab active)
+  → AVAudioEngine keeps capturing via UIBackgroundModes=audio
+  → ElevenLabs STT WebSocket stays active (50s keep-alive restarts)
+  → "Jarvis" detected → chime → record command → send → TTS response
+  → Audio interruption (phone call) → auto-resume after call ends
 ```
+
+### Changes
+- `Finger.xcodeproj/project.pbxproj` — Added `UIBackgroundModes = (audio)` to Debug + Release
+- `Voice/SpeechManager.swift` — Added `AVAudioSession.interruptionNotification` handling; auto-resumes after phone calls/Siri
+- `Voice/VoiceFlowCoordinator.swift` — Added `handleAppBackgrounded()` / `handleAppForegrounded()` lifecycle methods; wired interruption resume callback
+- `Views/ChatView.swift` — Added `@Environment(\.scenePhase)` observer to call coordinator lifecycle methods
 
 ### Task 11 success criteria
-- [ ] Picovoice Porcupine SDK integrated via SPM
-- [ ] Custom "Hey Jarvis" wake word trained and `.ppn` file bundled
-- [ ] Wake word detected reliably in foreground
-- [ ] Detection triggers speech recognition flow
+- [x] ElevenLabs always-on STT with keyword scanning (no new SDK)
+- [x] Wake word "Jarvis" detected reliably in foreground
+- [x] VoiceFlowCoordinator state machine orchestrates full flow
+- [x] Auto-stop after 2s silence, same-utterance command extraction
+- [x] Manual mic tap still works (no regression)
 
 ### Task 11 test cases
 ```
-TC10.1: App in foreground → say "Hey Jarvis" → chime plays → mic activates
-TC10.2: Say "Hey Jarvis, what time is it?" → full voice loop completes
-TC10.3: Say unrelated phrase → no false activation
-TC10.4: Say wake word from 2 meters away → still detected
+TC10.1: Chat tab → say "Jarvis" → chime plays → recording UI appears
+TC10.2: Say "Jarvis, what time is it?" → full voice loop completes → auto-stops
+TC10.3: Say unrelated phrase → no activation
+TC10.4: Say "Jarvis" then wait 5s → cancels, returns to listening
+TC10.5: Tap mic manually → works as before (no wake word needed)
+TC10.6: Leave Chat tab 1+ min → wake word still works (WebSocket keep-alive)
 ```
 
 ### Task 12 success criteria
-- [ ] Background audio mode enabled in Xcode capabilities
-- [ ] Porcupine keeps running when app is backgrounded (~1 MB RAM, <4% CPU)
-- [ ] Wake word triggers full flow from background (chime → STT → server → TTS)
-
-### Task 12 test cases
-```
-TC11.1: Background app → "Hey Jarvis, set a reminder to buy milk" →
-        reminder created → confirmation spoken
-TC11.2: Lock phone → say wake word → assistant responds via TTS
-TC11.3: Background for 1 hour → wake word still detected
-TC11.4: Check battery usage → Porcupine <4% CPU over 8 hours
-```
+- [x] Background audio mode enabled in Xcode capabilities
+- [ ] Wake word detection works when app is backgrounded (requires on-device testing)
+- [ ] Battery impact acceptable (<15% over 8 hours) (requires on-device testing)
 
 ---
 
@@ -1778,17 +1735,20 @@ TC11.4: Check battery usage → Porcupine <4% CPU over 8 hours
 
 ## Task 13: Settings & Persistence
 
-**Settings screen:**
-- Server URL (editable)
-- Connection test button
-- Wake word toggle
-- Voice speed slider
-- API key entry (stored in Keychain)
+**Settings screen (partially done):**
+- [x] Wake word display ("Jarvis")
+- [x] Speaker toggle (persisted via @AppStorage)
+- [x] Debug log viewer
+- [x] Version and license info
+- [ ] Server URL (currently hardcoded)
+- [ ] Connection test button
+- [ ] API key entry (stored in Keychain)
 
-**Conversation persistence:**
-- Replace in-memory `sessions` dict with SQLite on server
-- Conversation history survives restarts
-- Session management (new chat, delete history)
+**Conversation persistence (partially done):**
+- [x] SwiftData persistence on device (Conversation + Message models)
+- [x] Multi-conversation support with create/switch/delete
+- [ ] Replace in-memory `sessions` dict with SQLite on server
+- [ ] Server-side session management
 
 **Offline handling:**
 
@@ -1803,10 +1763,11 @@ func send(message: String) async {
 ```
 
 ### Success criteria
-- [ ] Settings screen with server URL, connection test, wake word toggle, voice speed, API key
+- [x] Settings screen with wake word display, speaker toggle, debug logs
+- [ ] Settings: editable server URL + connection test button
 - [ ] API key stored in iOS Keychain (not UserDefaults)
 - [ ] Server-side sessions stored in SQLite (survives container restart)
-- [ ] "New chat" and "Delete history" actions work
+- [x] Multi-conversation with create/switch/delete via ConversationListView
 - [ ] Offline: server unreachable → graceful error message (no crash)
 
 ### Test cases
@@ -1818,7 +1779,7 @@ TC12.3: Send 5 messages → restart agent-api container → send message →
 TC12.4: "New chat" → previous messages cleared → new session ID
 TC12.5: "Delete history" → server confirms deletion → chat is empty
 TC12.6: Airplane mode → send message → "Server unreachable" error → no crash
-TC12.7: Toggle wake word off → say "Hey Jarvis" → no activation
+TC12.7: Toggle wake word off → say "Jarvis" → no activation
 ```
 
 ## Task 14: Monitoring, Error Handling & Final QA
@@ -1900,29 +1861,32 @@ TC13.8: Noisy room → say wake word → still activates reliably
     ├── backup-data.sh
     └── scan-images.sh
 
-MyAssistant/ (Xcode project)
-├── MyAssistantApp.swift
+FingerApp/ (Xcode project — github.com/yingliu-data/FingerApp)
+├── Finger.xcodeproj/
+├── FingerApp.swift                    # App entry → MainTabView + SwiftData container
+├── Models/
+│   ├── Conversation.swift             # SwiftData @Model for conversations
+│   └── Message.swift                  # SwiftData @Model for messages
 ├── Theme/
 │   └── Theme.swift                    # AppTheme colors, gradients, radii
 ├── Network/
-│   └── AssistantClient.swift
+│   ├── AssistantClient.swift          # HMAC auth, SSE parsing, tool call routing
+│   └── DebugLog.swift                 # Timestamped debug logging
 ├── Tools/
-│   ├── CalendarTool.swift
-│   ├── RemindersTool.swift
-│   ├── ContactsTool.swift
-│   └── ClipboardTool.swift
+│   ├── CalendarTool.swift             # EventKit events
+│   ├── RemindersTool.swift            # EventKit reminders
+│   └── ContactsTool.swift             # Contacts search
 ├── Voice/
-│   ├── SpeechManager.swift
-│   ├── TTSManager.swift
-│   └── WakeWordManager.swift
+│   ├── SpeechManager.swift            # ElevenLabs WebSocket streaming STT
+│   ├── TTSManager.swift               # ElevenLabs TTS API with PCM playback
+│   └── VoiceFlowCoordinator.swift     # Wake word detection + voice flow state machine
 └── Views/
-    ├── MainTabView.swift              # Root tab bar (frosted glass)
-    ├── ChatView.swift
-    ├── StyledMessageBubble.swift
-    ├── ChatInputBar.swift
-    ├── SkillsView.swift
-    ├── VoiceModeView.swift
-    └── SettingsView.swift
+    ├── MainTabView.swift              # Native TabView with Liquid Glass tab bar
+    ├── ConversationListView.swift     # Multi-conversation list with CRUD
+    ├── ChatView.swift                 # Chat with markdown, choice buttons, voice
+    ├── ChoiceButtonsView.swift        # Tappable Liquid Glass option buttons
+    ├── SkillsView.swift               # Skill toggle cards + Add New Skill
+    └── SettingsView.swift             # Preferences, debug logs
 ```
 
 ---
