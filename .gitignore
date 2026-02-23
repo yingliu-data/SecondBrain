@@ -1,6 +1,7 @@
 # ── SecondBrain project-specific ─────────────────────────
 /models/
 agent-api/data/
+.claude/
 
 # ── Python ───────────────────────────────────────────────
 # Byte-compiled / optimized / DLL files
