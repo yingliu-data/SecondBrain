@@ -12,6 +12,11 @@
 - feat: user-friendly error messages for auth failures, timeouts, and network issues
 - feat: fresh HMAC signature per retry attempt (prevents stale timestamp rejections)
 
+## 0.10.1 - 1 March 2026
+
+### Server
+- feat: email skill with IMAP sync (Gmail, Hotmail, improx), junk filtering, SQLite cache, FTS search, and SMTP reply
+
 ## 0.10.0 - 23 February 2026
 
 ### iOS App
