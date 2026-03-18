@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.11.0 - 23 February 2026
+
+### Server
+- feat: LLM retry with exponential backoff (3 attempts, 1s/2s/4s) before cloud fallback
+- feat: graceful SSE error when LLM is completely unavailable (no crash)
+- feat: dcgm-exporter GPU monitoring container in docker-compose.yml
+
+### iOS App
+- feat: network retry with exponential backoff (3 attempts) for transient errors and 502/503/504
+- feat: user-friendly error messages for auth failures, timeouts, and network issues
+- feat: fresh HMAC signature per retry attempt (prevents stale timestamp rejections)
+
 ## 0.10.1 - 1 March 2026
 
 ### Server

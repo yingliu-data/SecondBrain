@@ -33,7 +33,15 @@ async def run_agent_loop(message: str, history: list, registry, llm):
 
     for loop_idx in range(MAX_TOOLS):
         # Call LLM via provider abstraction (local → cloud fallback)
-        resp = await llm.chat_completion(messages, tools=tool_defs or None)
+        try:
+            resp = await llm.chat_completion(messages, tools=tool_defs or None)
+        except Exception as e:
+            logger.error(f"LLM unavailable after retries: {e}")
+            error_msg = "I'm temporarily unable to respond — the server may be restarting. Please try again in a moment."
+            history.append({"role": "assistant", "content": error_msg})
+            yield f"event: token\ndata: {json.dumps({'text': error_msg})}\n\n"
+            yield "event: done\ndata: {}\n\n"
+            return
         choice = resp["choices"][0]
         assistant_msg = choice["message"]
         finish_reason = choice.get("finish_reason", "stop")
