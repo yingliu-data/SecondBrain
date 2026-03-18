@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.11.1 - 18 March 2026
+
+### Server
+- fix: replace DuckDuckGo Instant Answer API with actual web search via `duckduckgo-search` library
+
+### Docs
+- docs: update README.md and PROJECT_STRUCTURE.md for WhisperKit STT (replacing ElevenLabs STT)
+
 ## 0.11.0 - 23 February 2026
 
 ### Server
