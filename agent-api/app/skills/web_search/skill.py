@@ -1,6 +1,5 @@
+import asyncio
 import logging
-from duckduckgo_search import AsyncDDGS
-from duckduckgo_search.exceptions import DuckDuckGoSearchException
 from app.skills.base import BaseSkill
 
 logger = logging.getLogger("skills.web_search")
@@ -48,8 +47,15 @@ class WebSearchSkill(BaseSkill):
             return "Error: Empty search query."
 
         try:
-            async with AsyncDDGS() as ddgs:
-                results = await ddgs.atext(query, max_results=MAX_RESULTS)
+            from duckduckgo_search import DDGS
+            from duckduckgo_search.exceptions import DuckDuckGoSearchException
+        except ImportError:
+            return "Error: duckduckgo-search package is not installed."
+
+        try:
+            results = await asyncio.to_thread(
+                DDGS().text, query, max_results=MAX_RESULTS
+            )
         except DuckDuckGoSearchException as e:
             logger.warning("DuckDuckGo search error for %r: %s", query, e)
             return f"Error: Web search failed — {e}. Try rephrasing your query."
