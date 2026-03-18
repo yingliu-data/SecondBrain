@@ -1,14 +1,20 @@
-import httpx
+import logging
+from duckduckgo_search import AsyncDDGS
+from duckduckgo_search.exceptions import DuckDuckGoSearchException
 from app.skills.base import BaseSkill
+
+logger = logging.getLogger("skills.web_search")
+
+MAX_RESULTS = 5
 
 
 class WebSearchSkill(BaseSkill):
     name = "web_search"
     display_name = "Web Search"
     description = "Search the web for current information, news, and facts."
-    version = "1.0.0"
+    version = "1.1.0"
     execution_side = "server"
-    always_available = True  # Web search could be useful for any query
+    always_available = True
 
     def get_tool_definitions(self) -> list[dict]:
         return [
@@ -20,7 +26,7 @@ class WebSearchSkill(BaseSkill):
                         "Search the web for current information. Runs on the server. "
                         "Use when the user asks about recent events, facts you're unsure about, "
                         "current weather, news, or anything requiring up-to-date information. "
-                        "Returns search result snippets with titles."
+                        "Returns search result snippets with titles and URLs."
                     ),
                     "parameters": {
                         "type": "object",
@@ -38,21 +44,31 @@ class WebSearchSkill(BaseSkill):
 
     async def execute(self, tool_name: str, arguments: dict) -> str:
         query = arguments.get("query", "")
+        if not query.strip():
+            return "Error: Empty search query."
+
         try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                resp = await client.get(
-                    "https://api.duckduckgo.com/",
-                    params={"q": query, "format": "json", "no_html": 1, "no_redirect": 1},
-                )
-                data = resp.json()
-                results = []
-                if data.get("AbstractText"):
-                    results.append(f"Summary: {data['AbstractText']}")
-                for topic in data.get("RelatedTopics", [])[:5]:
-                    if isinstance(topic, dict) and "Text" in topic:
-                        results.append(f"• {topic['Text']}")
-                return "\n".join(results) if results else f"No results for '{query}'. Try a more specific query."
-        except httpx.TimeoutException:
-            return "Error: Web search timed out after 15s. Try a shorter query."
+            async with AsyncDDGS() as ddgs:
+                results = await ddgs.atext(query, max_results=MAX_RESULTS)
+        except DuckDuckGoSearchException as e:
+            logger.warning("DuckDuckGo search error for %r: %s", query, e)
+            return f"Error: Web search failed — {e}. Try rephrasing your query."
         except Exception as e:
+            logger.error("Unexpected web search error for %r: %s", query, e)
             return f"Error: Web search failed ({type(e).__name__}). Try again."
+
+        if not results:
+            return f"No web results found for '{query}'. Try a broader or different query."
+
+        lines = [f"Web results for \"{query}\":\n"]
+        for i, r in enumerate(results, 1):
+            title = r.get("title", "No title")
+            url = r.get("href", "")
+            snippet = r.get("body", "")
+            lines.append(f"{i}. {title}")
+            if url:
+                lines.append(f"   {url}")
+            if snippet:
+                lines.append(f"   {snippet}")
+
+        return "\n".join(lines)

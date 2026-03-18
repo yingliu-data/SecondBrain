@@ -16,7 +16,7 @@ FingerApp (iPhone)                    SecondBrain (Server, RTX 5080)
 ┌──────────────────┐                  ┌──────────────────────────┐
 │ SwiftUI App      │  ── HTTPS ──►    │ Cloudflare Tunnel        │
 │ • Chat UI        │  (Cloudflare)    │   ↓                      │
-│ • Voice (EL STT) │  ◄── SSE ──     │ Agent API (FastAPI)      │
+│ • Voice (WK STT) │  ◄── SSE ──     │ Agent API (FastAPI)      │
 │ • Markdown render│                  │   ├── Skills system      │
 │ • Tool Executors │                  │   │   (auto-discovery,   │
 │   (Calendar,     │                  │   │    CRUD management)   │
@@ -34,7 +34,7 @@ FingerApp (iPhone)                    SecondBrain (Server, RTX 5080)
 |---|---|
 | LLM Inference | llama.cpp (CUDA), Qwen3 14B q4_k_m + 0.5B draft |
 | Backend | Python 3.12, FastAPI, Uvicorn, SSE-Starlette |
-| iOS Client | Swift, SwiftUI, SwiftData, ElevenLabs (STT/TTS) |
+| iOS Client | Swift, SwiftUI, SwiftData, WhisperKit (STT), ElevenLabs (TTS) |
 | Auth | HMAC-SHA256 + Bearer token + Timestamp verification |
 | Networking | Cloudflare Tunnel (Zero Trust) |
 | Infrastructure | Docker Compose (3 containers), GitHub Actions CI/CD |
@@ -88,7 +88,7 @@ The iOS app lives in the separate [FingerApp](https://github.com/yingliu-data/Fi
 
 **Key features:**
 - Multi-conversation chat with streaming markdown rendering
-- Live voice transcription via ElevenLabs WebSocket streaming STT
+- Live voice transcription via WhisperKit on-device STT
 - ElevenLabs TTS for natural assistant voice output
 - Device tool executors (Calendar, Reminders, Contacts, Clipboard)
 - Skill management with device/server badges and LLM-powered Add New Skill
