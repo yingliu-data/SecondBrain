@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.11.2 - 24 March 2026
+
+### iOS App
+- chore: rename project branding from FingerApp to IndexApp
+
 ## 0.11.1 - 18 March 2026
 
 ### Server
