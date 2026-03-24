@@ -7,12 +7,12 @@ Personal AI assistant — a home server runs the brain (LLM + agent logic) and a
 | Repo | Contents |
 |---|---|
 | [SecondBrain](https://github.com/yingliu-data/SecondBrain) | Backend: FastAPI agent API, Docker orchestration, CI/CD |
-| [FingerApp](https://github.com/yingliu-data/FingerApp) | iOS client: SwiftUI app (iOS 26, Liquid Glass) |
+| [IndexApp](https://github.com/yingliu-data/IndexApp) | iOS client: SwiftUI app (iOS 26, Liquid Glass) |
 
 ## Architecture
 
 ```
-FingerApp (iPhone)                    SecondBrain (Server, RTX 5080)
+IndexApp (iPhone)                    SecondBrain (Server, RTX 5080)
 ┌──────────────────┐                  ┌──────────────────────────┐
 │ SwiftUI App      │  ── HTTPS ──►    │ Cloudflare Tunnel        │
 │ • Chat UI        │  (Cloudflare)    │   ↓                      │
@@ -82,9 +82,9 @@ Push to `main` triggers GitHub Actions which SSHs into the server via Cloudflare
 
 See `.env.example` for the template. Generate secrets with `openssl rand -hex 32`.
 
-## iOS Client (Finger)
+## iOS Client (Index)
 
-The iOS app lives in the separate [FingerApp](https://github.com/yingliu-data/FingerApp) repo. Open `Finger.xcodeproj` in Xcode.
+The iOS app lives in the separate [IndexApp](https://github.com/yingliu-data/IndexApp) repo. Open `Index.xcodeproj` in Xcode.
 
 **Key features:**
 - Multi-conversation chat with streaming markdown rendering

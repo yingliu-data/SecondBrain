@@ -13,14 +13,14 @@
 | Project Structure | `/Users/sophia/Local Projects/.claude/SecondBrain-AGENT/PROJECT_STRUCTURE.md` | Architecture, containers, endpoints, skills |
 | Development Workflow | `/Users/sophia/Local Projects/.claude/SecondBrain-AGENT/dev/SKILL.md` | Full dev workflow skill (`/develop`) |
 | iOS Test Workflow | `/Users/sophia/Local Projects/.claude/SecondBrain-AGENT/ios-test/SKILL.md` | iOS test skill (`/ios-test`) |
-| VSCode Workspace | `/Users/sophia/Local Projects/.claude/SecondBrain-AGENT/SecondBrain.code-workspace` | Multi-root workspace (SecondBrain + FingerApp + .claude) |
+| VSCode Workspace | `/Users/sophia/Local Projects/.claude/SecondBrain-AGENT/SecondBrain.code-workspace` | Multi-root workspace (SecondBrain + IndexApp + .claude) |
 
 ## Repos
 
 | Repo | Local Path | GitHub |
 |------|-----------|--------|
 | **SecondBrain** (backend) | `/Users/sophia/Local Projects/SecondBrain/` | `github.com/yingliu-data/SecondBrain` |
-| **FingerApp** (iOS) | `/Users/sophia/Local Projects/FingerApp/` | `github.com/yingliu-data/FingerApp` |
+| **IndexApp** (iOS) | `/Users/sophia/Local Projects/IndexApp/` | `github.com/yingliu-data/IndexApp` |
 
 ## Quick Reference
 
