@@ -5,6 +5,9 @@
 ### iOS App
 - chore: rename project branding from FingerApp to IndexApp
 
+### Docs
+- docs: update README, PLAN, and CLAUDE references from FingerApp to IndexApp and new GitHub repo path
+
 ## 0.11.1 - 18 March 2026
 
 ### Server

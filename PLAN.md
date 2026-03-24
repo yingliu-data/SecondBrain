@@ -10,7 +10,7 @@
 A personal AI assistant where a powerful home server runs the brain (LLM + agent logic) and your iPhone is a thin client that handles voice, text, and on-device tools like Calendar and Reminders. You talk to your phone, it relays to your server, the server thinks, and streams the answer back — with the ability to read your calendar, create reminders, search contacts, and more.
 
 ```
-iPhone (Finger app)                    Your Server (RTX 5080)
+iPhone (Index app)                    Your Server (RTX 5080)
 ┌──────────────────┐                   ┌──────────────────────────┐
 │ SwiftUI App      │  ── HTTPS ──▶     │ Cloudflare Tunnel        │
 │ • Chat UI        │  (Cloudflare)     │   ↓                      │
@@ -24,7 +24,7 @@ iPhone (Finger app)                    Your Server (RTX 5080)
 ```
 
 **Hardware:** Linux server · NVIDIA RTX 5080 (16 GB VRAM, 960 GB/s bandwidth) · 128 GB RAM
-**Client:** iPhone · iOS 26 · "Finger" SwiftUI app
+**Client:** iPhone · iOS 26 · "Index" SwiftUI app
 **Model:** Qwen3 14B Q4_K_M (~10 GB VRAM) with Qwen3 0.5B draft for speculative decoding
 **Networking:** Cloudflare Tunnel (zero inbound ports, edge auth, DDoS protection)
 **Docker image:** `ghcr.io/ggml-org/llama.cpp:server-cuda` (official prebuilt — no custom Dockerfile needed)
@@ -951,7 +951,7 @@ done
 
 ### Create Xcode project
 
-New project → SwiftUI → "Finger". Add these to Info.plist:
+New project → SwiftUI → "Index". Add these to Info.plist:
 
 ```xml
 <key>NSCalendarsUsageDescription</key>
@@ -1698,7 +1698,7 @@ App backgrounded (Chat tab active)
 ```
 
 ### Changes
-- `Finger.xcodeproj/project.pbxproj` — Added `UIBackgroundModes = (audio)` to Debug + Release
+- `Index.xcodeproj/project.pbxproj` — Added `UIBackgroundModes = (audio)` to Debug + Release
 - `Voice/SpeechManager.swift` — Added `AVAudioSession.interruptionNotification` handling; auto-resumes after phone calls/Siri
 - `Voice/VoiceFlowCoordinator.swift` — Added `handleAppBackgrounded()` / `handleAppForegrounded()` lifecycle methods; wired interruption resume callback
 - `Views/ChatView.swift` — Added `@Environment(\.scenePhase)` observer to call coordinator lifecycle methods
@@ -1767,7 +1767,7 @@ TC10.6: Leave Chat tab 1+ min → wake word still works (WebSocket keep-alive)
 - `agent-api/app/routes/chat.py` — Swapped in-memory dict for SessionStore, saves after stream completes
 - `agent-api/app/config.py` — Changed SESSION_BACKEND default from "memory" to "sqlite"
 
-**iOS (FingerApp):**
+**iOS (IndexApp):**
 - `Network/KeychainHelper.swift` — Minimal Security framework wrapper (get/set/delete/isConfigured)
 - `Views/SettingsView.swift` — Added Server section (URL + test), Credentials section (5 secure fields), setup banner
 - `Network/AssistantClient.swift` — Removed 4 hardcoded credentials, reads from Keychain, added health check
@@ -1834,7 +1834,7 @@ TC12.7: Toggle wake word off → say "Jarvis" → no activation
 - `agent-api/app/agent/loop.py` — Wrapped LLM call in try/except to yield a friendly SSE error when all retries + fallback fail
 - `docker-compose.yml` — Added dcgm-exporter service for GPU metrics at localhost:9400
 
-**iOS (FingerApp):**
+**iOS (IndexApp):**
 - `Network/AssistantClient.swift` — Added retry with exponential backoff (3 attempts, 1s/2s/4s) for transient network errors and 502/503/504 responses. User-friendly error messages for auth failures, timeouts, and network issues. Fresh HMAC signature per attempt.
 
 ### Success criteria
@@ -1884,9 +1884,9 @@ TC13.8: Noisy room → say wake word → still activates reliably
     ├── backup-data.sh
     └── scan-images.sh
 
-FingerApp/ (Xcode project — github.com/yingliu-data/FingerApp)
-├── Finger.xcodeproj/
-├── FingerApp.swift                    # App entry → MainTabView + SwiftData container
+IndexApp/ (Xcode project — github.com/yingliu-data/IndexApp)
+├── Index.xcodeproj/
+├── IndexApp.swift                    # App entry → MainTabView + SwiftData container
 ├── Models/
 │   ├── Conversation.swift             # SwiftData @Model for conversations
 │   └── Message.swift                  # SwiftData @Model for messages
