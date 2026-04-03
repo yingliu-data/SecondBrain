@@ -7,7 +7,7 @@ from datetime import datetime
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse, JSONResponse
 
-from app.agent.loop import SSE_HEADERS
+from app.agent.loop import SSE_HEADERS, _AVATAR_TOOLS
 from app.agent.sanitize import sanitize
 from app.auth.guest import (
     guest_manager,
@@ -100,10 +100,13 @@ async def guest_chat(request: Request):
                         result = await _registry.execute_server_tool(tool_name, arguments)
 
                         # Emit avatar_command SSE event
-                        if tool_name in ("set_pose", "move_joints", "animate_sequence"):
+                        if tool_name in _AVATAR_TOOLS:
                             try:
                                 parsed = json.loads(result)
                                 yield f"event: avatar_command\ndata: {json.dumps({'name': tool_name, 'result': parsed})}\n\n"
+                                if tool_name == "plan_movement":
+                                    n = len(parsed.get("frames", []))
+                                    result = json.dumps({"status": "ok", "frames_generated": n})
                             except (json.JSONDecodeError, TypeError):
                                 pass
 

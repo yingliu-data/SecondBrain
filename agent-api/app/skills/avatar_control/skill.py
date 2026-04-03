@@ -1,7 +1,8 @@
 import json
 import logging
 from app.skills.base import BaseSkill
-from app.skills.avatar_control.poses import POSES, POSE_NAMES
+from app.skills.avatar_control.poses import POSES, POSE_NAMES, MOVEMENT_CYCLES, CYCLE_NAMES
+from app.skills.avatar_control.motion import build_animation, EasingType
 
 logger = logging.getLogger("skills.avatar_control")
 
@@ -18,11 +19,12 @@ class AvatarControlSkill(BaseSkill):
     name = "avatar_control"
     display_name = "Avatar Control"
     description = "Control a 3D avatar's body pose and animations."
-    version = "1.0.0"
+    version = "2.0.0"
     execution_side = "server"
     keywords = [
         "avatar", "robot", "control", "move", "pose", "arm", "leg",
         "hand", "wave", "dance", "raise", "point", "gesture",
+        "walk", "step", "clap", "nod", "bow", "shrug", "reach",
     ]
 
     def get_tool_definitions(self) -> list[dict]:
@@ -131,6 +133,62 @@ class AvatarControlSkill(BaseSkill):
                     },
                 },
             },
+            {
+                "type": "function",
+                "function": {
+                    "name": "plan_movement",
+                    "description": (
+                        "Plan a smooth multi-step movement with interpolation. "
+                        "Use for walking, clapping, nodding, bowing, or any "
+                        "complex motion. Specify a predefined action cycle OR "
+                        "a custom sequence of pose names with timing."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "action": {
+                                "type": "string",
+                                "enum": CYCLE_NAMES,
+                                "description": "Predefined movement cycle.",
+                            },
+                            "poses": {
+                                "type": "array",
+                                "description": "Custom sequence of pose names with timing (ms).",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "pose": {
+                                            "type": "string",
+                                            "enum": POSE_NAMES,
+                                        },
+                                        "ms": {
+                                            "type": "integer",
+                                            "default": 500,
+                                        },
+                                    },
+                                    "required": ["pose"],
+                                },
+                            },
+                            "repeats": {
+                                "type": "integer",
+                                "description": "How many times to repeat.",
+                                "default": 1,
+                            },
+                            "speed": {
+                                "type": "string",
+                                "enum": ["slow", "normal", "fast"],
+                                "description": "Movement speed.",
+                                "default": "normal",
+                            },
+                            "easing": {
+                                "type": "string",
+                                "enum": ["linear", "ease_in", "ease_out", "ease_in_out"],
+                                "default": "ease_in_out",
+                            },
+                        },
+                    },
+                },
+            },
         ]
 
     async def execute(self, tool_name: str, arguments: dict) -> str:
@@ -140,6 +198,8 @@ class AvatarControlSkill(BaseSkill):
             return self._move_joints(arguments)
         elif tool_name == "animate_sequence":
             return self._animate_sequence(arguments)
+        elif tool_name == "plan_movement":
+            return self._plan_movement(arguments)
         return f"Error: Unknown tool '{tool_name}'"
 
     def _set_pose(self, args: dict) -> str:
@@ -182,4 +242,54 @@ class AvatarControlSkill(BaseSkill):
             "type": "animation",
             "frames": frames,
             "loop": args.get("loop", False),
+        })
+
+    # ── Speed name → duration per segment (ms) ──
+    _SPEED_MAP = {"slow": 800, "normal": 500, "fast": 250}
+
+    def _plan_movement(self, args: dict) -> str:
+        action = args.get("action")
+        poses_seq = args.get("poses")
+        repeats = max(1, min(args.get("repeats", 1), 10))
+        speed = args.get("speed", "normal")
+        easing_name = args.get("easing", "ease_in_out")
+
+        duration_ms = self._SPEED_MAP.get(speed, 500)
+        try:
+            easing = EasingType(easing_name)
+        except ValueError:
+            easing = EasingType.EASE_IN_OUT
+
+        # Build keyframes from either action cycle or custom pose list
+        if action:
+            cycle_keys = MOVEMENT_CYCLES.get(action)
+            if not cycle_keys:
+                return f"Error: Unknown action '{action}'. Available: {', '.join(CYCLE_NAMES)}"
+            keyframes = [POSES[k] for k in cycle_keys]
+        elif poses_seq:
+            keyframes = []
+            for step in poses_seq:
+                pose_name = step.get("pose", "")
+                if pose_name not in POSES:
+                    return f"Error: Unknown pose '{pose_name}'. Available: {', '.join(POSE_NAMES)}"
+                keyframes.append(POSES[pose_name])
+                if "ms" in step:
+                    duration_ms = step["ms"]
+        else:
+            return "Error: Provide 'action' (a cycle name) or 'poses' (a list of pose names)."
+
+        # Generate interpolated frames for one cycle
+        single_cycle = build_animation(
+            keyframes,
+            default_easing=easing,
+            default_duration_ms=duration_ms,
+        )
+
+        # Repeat the cycle
+        frames = single_cycle * repeats
+
+        return json.dumps({
+            "type": "animation",
+            "frames": frames[:200],
+            "loop": False,
         })

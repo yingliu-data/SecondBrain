@@ -16,6 +16,9 @@ SSE_HEADERS = {
     "Connection": "keep-alive",
 }
 
+# Avatar tools that emit a separate SSE event for the frontend renderer.
+_AVATAR_TOOLS = {"set_pose", "move_joints", "animate_sequence", "plan_movement"}
+
 
 async def run_agent_loop(message: str, history: list, registry, llm):
     """Generator that yields SSE events.
@@ -66,10 +69,16 @@ async def run_agent_loop(message: str, history: list, registry, llm):
 
                     # Emit avatar commands as a separate SSE event so the
                     # frontend can act on them before the LLM text response.
-                    if tool_name in ("set_pose", "move_joints", "animate_sequence"):
+                    if tool_name in _AVATAR_TOOLS:
                         try:
                             parsed = json.loads(result)
                             yield f"event: avatar_command\ndata: {json.dumps({'name': tool_name, 'result': parsed})}\n\n"
+                            # For plan_movement the full frame list can be huge;
+                            # replace the tool result fed to the LLM with a
+                            # compact summary to save context tokens.
+                            if tool_name == "plan_movement":
+                                n = len(parsed.get("frames", []))
+                                result = json.dumps({"status": "ok", "frames_generated": n})
                         except (json.JSONDecodeError, TypeError):
                             pass
                 elif tool_name in device_tools:
