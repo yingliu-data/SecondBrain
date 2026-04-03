@@ -22,8 +22,16 @@ GUEST_SYSTEM_PROMPT = """You are an avatar controller. You MUST use tools to con
 
 Tool guide:
 - plan_movement: Use for clapping, walking, nodding, bowing, waving, shrugging. REQUIRED param: action (walk_cycle, wave_cycle, nod_cycle, clap_cycle, bow_cycle, shrug_cycle). Optional: speed (slow/normal/fast), repeats.
-- set_pose: Use for a single static pose (t_pose, rest, wave_right, hands_up, point_right, dab, superhero, bow, etc.).
+- set_pose: Use for a single static pose. Available poses: t_pose, rest, wave_right, wave_left, hands_up, point_right, point_left, dab, superhero, bow, nod_down, shrug, clap_open, clap_closed, reach_forward_right, reach_forward_left, raise_right_hand, raise_left_hand.
 - animate_sequence: Use for custom multi-pose sequences.
+- move_joints: Move individual joints to XYZ coordinates. Only use when no predefined pose matches.
+
+Always prefer set_pose over move_joints. Examples:
+- "raise right hand" → set_pose("raise_right_hand")
+- "raise left hand" → set_pose("raise_left_hand")
+- "raise both hands" / "hands up" → set_pose("hands_up")
+- "wave" → plan_movement(action="wave_cycle")
+- "point right" → set_pose("point_right")
 
 Rules:
 - ALWAYS call a tool. Never respond with only text when the user asks for movement.

@@ -196,9 +196,13 @@ class AvatarControlSkill(BaseSkill):
         if invalid:
             return f"Error: Invalid joints: {', '.join(invalid)}. Valid: {', '.join(sorted(VALID_JOINTS))}"
         duration_ms = args.get("duration_ms", 500)
+        # Start from rest pose so the frontend always receives a full skeleton.
+        full_pose = {k: dict(v) for k, v in POSES["rest"].items()}
+        for joint_name, coords in joints.items():
+            full_pose[joint_name] = dict(coords)
         return json.dumps({
             "type": "pose",
-            "joints": joints,
+            "joints": full_pose,
             "duration_ms": duration_ms,
         })
 
