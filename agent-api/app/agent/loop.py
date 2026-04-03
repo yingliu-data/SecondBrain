@@ -63,6 +63,15 @@ async def run_agent_loop(message: str, history: list, registry, llm):
                 if tool_name in server_tools:
                     # Server skill — execute via registry
                     result = await registry.execute_server_tool(tool_name, arguments)
+
+                    # Emit avatar commands as a separate SSE event so the
+                    # frontend can act on them before the LLM text response.
+                    if tool_name in ("set_pose", "move_joints", "animate_sequence"):
+                        try:
+                            parsed = json.loads(result)
+                            yield f"event: avatar_command\ndata: {json.dumps({'name': tool_name, 'result': parsed})}\n\n"
+                        except (json.JSONDecodeError, TypeError):
+                            pass
                 elif tool_name in device_tools:
                     # Device skill — delegate to iPhone via SSE
                     yield f"event: tool_call\ndata: {json.dumps({'id': tc_id, 'name': tool_name, 'arguments': arguments})}\n\n"
