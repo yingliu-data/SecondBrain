@@ -139,9 +139,8 @@ class AvatarControlSkill(BaseSkill):
                     "name": "plan_movement",
                     "description": (
                         "Plan a smooth multi-step movement with interpolation. "
-                        "Use for walking, clapping, nodding, bowing, or any "
-                        "complex motion. Specify a predefined action cycle OR "
-                        "a custom sequence of pose names with timing."
+                        "ALWAYS use this for walking, clapping, nodding, bowing, "
+                        "waving, or shrugging."
                     ),
                     "parameters": {
                         "type": "object",
@@ -149,25 +148,7 @@ class AvatarControlSkill(BaseSkill):
                             "action": {
                                 "type": "string",
                                 "enum": CYCLE_NAMES,
-                                "description": "Predefined movement cycle.",
-                            },
-                            "poses": {
-                                "type": "array",
-                                "description": "Custom sequence of pose names with timing (ms).",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "pose": {
-                                            "type": "string",
-                                            "enum": POSE_NAMES,
-                                        },
-                                        "ms": {
-                                            "type": "integer",
-                                            "default": 500,
-                                        },
-                                    },
-                                    "required": ["pose"],
-                                },
+                                "description": "Movement to perform.",
                             },
                             "repeats": {
                                 "type": "integer",
@@ -180,12 +161,8 @@ class AvatarControlSkill(BaseSkill):
                                 "description": "Movement speed.",
                                 "default": "normal",
                             },
-                            "easing": {
-                                "type": "string",
-                                "enum": ["linear", "ease_in", "ease_out", "ease_in_out"],
-                                "default": "ease_in_out",
-                            },
                         },
+                        "required": ["action"],
                     },
                 },
             },
@@ -248,44 +225,23 @@ class AvatarControlSkill(BaseSkill):
     _SPEED_MAP = {"slow": 800, "normal": 500, "fast": 250}
 
     def _plan_movement(self, args: dict) -> str:
-        action = args.get("action")
-        poses_seq = args.get("poses")
+        action = args.get("action", "")
         repeats = max(1, min(args.get("repeats", 1), 10))
         speed = args.get("speed", "normal")
-        easing_name = args.get("easing", "ease_in_out")
-
         duration_ms = self._SPEED_MAP.get(speed, 500)
-        try:
-            easing = EasingType(easing_name)
-        except ValueError:
-            easing = EasingType.EASE_IN_OUT
 
-        # Build keyframes from either action cycle or custom pose list
-        if action:
-            cycle_keys = MOVEMENT_CYCLES.get(action)
-            if not cycle_keys:
-                return f"Error: Unknown action '{action}'. Available: {', '.join(CYCLE_NAMES)}"
-            keyframes = [POSES[k] for k in cycle_keys]
-        elif poses_seq:
-            keyframes = []
-            for step in poses_seq:
-                pose_name = step.get("pose", "")
-                if pose_name not in POSES:
-                    return f"Error: Unknown pose '{pose_name}'. Available: {', '.join(POSE_NAMES)}"
-                keyframes.append(POSES[pose_name])
-                if "ms" in step:
-                    duration_ms = step["ms"]
-        else:
-            return "Error: Provide 'action' (a cycle name) or 'poses' (a list of pose names)."
+        cycle_keys = MOVEMENT_CYCLES.get(action)
+        if not cycle_keys:
+            return f"Error: Unknown action '{action}'. Available: {', '.join(CYCLE_NAMES)}"
 
-        # Generate interpolated frames for one cycle
+        keyframes = [POSES[k] for k in cycle_keys]
+
         single_cycle = build_animation(
             keyframes,
-            default_easing=easing,
+            default_easing=EasingType.EASE_IN_OUT,
             default_duration_ms=duration_ms,
         )
 
-        # Repeat the cycle
         frames = single_cycle * repeats
 
         return json.dumps({
