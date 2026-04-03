@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.12.0 - 3 April 2026
+
+### Server
+- feat: avatar_control skill with predefined pose library (wave, point, dab, T-pose, rest, hands_up, superhero)
+- feat: unauthenticated guest chat endpoint (`/api/v1/guest/chat`) with SSE streaming
+- feat: guest session management with rate limiting (60s TTL, 10 messages, 3 sessions/IP/hour)
+- feat: `avatar_command` SSE event type emitted from agent loop for real-time pose control
+- feat: CORS middleware for pose-spatial-studio frontend origins
+
 ## 0.11.2 - 24 March 2026
 
 ### iOS App

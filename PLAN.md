@@ -1918,10 +1918,23 @@ IndexApp/ (Xcode project — github.com/yingliu-data/IndexApp)
 
 Once running, expand in priority order:
 
+security:
+ - Indirect Prompt Injection from output
+ - reject malicious message coming in from user
+ - generated output or tool calling include config file which includes token
+ - Use regex/LLM scanners to block sensitive strings (e.g., Credit Cards
+
+monitering:
+Logic Monitoring:Does the agent's plan still match the original goal?
+Resource Monitoring: Is the cost-per-task exceeding a predefined threshold?
+Safety Monitoring: Is the agent attempting to access forbidden file paths?
+5. **MCP tools** — File access, browser automation, code execution on server
+  - max token, max_loop
+
 1. **NVFP4 quantization** — when llama.cpp adds Blackwell NVFP4 support → ~2× speed, ~50% VRAM savings
 2. **Bigger model** — Qwen3 30B partial offload (128 GB RAM overflow) for harder reasoning
 3. **RAG** — ChromaDB for personal knowledge retrieval
 4. **More channels** — Telegram bot, web UI, Apple Watch using the same API
-5. **MCP tools** — File access, browser automation, code execution on server
+
 6. **Proactive notifications** — Server cron checks calendar → push notification reminders
 7. **Second GPU** — Tensor parallelism → 70B models at full speed
