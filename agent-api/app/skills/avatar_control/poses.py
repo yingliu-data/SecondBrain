@@ -101,6 +101,113 @@ POSES: dict[str, dict] = {
         leftAnkle={"x": -0.18, "y": 0.05, "z": 0.0},
         rightAnkle={"x": 0.18, "y": 0.05, "z": 0.0},
     ),
+
+    # ── New poses for motion planning ──
+
+    "bow": _with_base(
+        neck={"x": 0.0, "y": 1.35, "z": 0.1},
+        leftElbow={"x": -0.2, "y": 1.1, "z": 0.08},
+        leftWrist={"x": -0.18, "y": 0.9, "z": 0.1},
+        rightElbow={"x": 0.2, "y": 1.1, "z": 0.08},
+        rightWrist={"x": 0.18, "y": 0.9, "z": 0.1},
+    ),
+
+    "nod_down": _with_base(
+        neck={"x": 0.0, "y": 1.40, "z": 0.05},
+        leftElbow={"x": -0.2, "y": 1.15, "z": 0.05},
+        leftWrist={"x": -0.18, "y": 0.95, "z": 0.08},
+        rightElbow={"x": 0.2, "y": 1.15, "z": 0.05},
+        rightWrist={"x": 0.18, "y": 0.95, "z": 0.08},
+    ),
+
+    "shrug": _with_base(
+        leftShoulder={"x": -0.18, "y": 1.48, "z": 0.0},
+        rightShoulder={"x": 0.18, "y": 1.48, "z": 0.0},
+        leftElbow={"x": -0.28, "y": 1.25, "z": 0.05},
+        leftWrist={"x": -0.25, "y": 1.05, "z": 0.08},
+        rightElbow={"x": 0.28, "y": 1.25, "z": 0.05},
+        rightWrist={"x": 0.25, "y": 1.05, "z": 0.08},
+    ),
+
+    "clap_open": _with_base(
+        leftElbow={"x": -0.2, "y": 1.25, "z": 0.15},
+        leftWrist={"x": -0.15, "y": 1.25, "z": 0.25},
+        rightElbow={"x": 0.2, "y": 1.25, "z": 0.15},
+        rightWrist={"x": 0.15, "y": 1.25, "z": 0.25},
+    ),
+
+    "clap_closed": _with_base(
+        leftElbow={"x": -0.15, "y": 1.25, "z": 0.15},
+        leftWrist={"x": -0.02, "y": 1.25, "z": 0.25},
+        rightElbow={"x": 0.15, "y": 1.25, "z": 0.15},
+        rightWrist={"x": 0.02, "y": 1.25, "z": 0.25},
+    ),
+
+    "reach_forward_right": _with_base(
+        leftElbow={"x": -0.2, "y": 1.15, "z": 0.05},
+        leftWrist={"x": -0.18, "y": 0.95, "z": 0.08},
+        rightElbow={"x": 0.15, "y": 1.35, "z": 0.2},
+        rightWrist={"x": 0.15, "y": 1.35, "z": 0.45},
+    ),
+
+    "reach_forward_left": _with_base(
+        leftElbow={"x": -0.15, "y": 1.35, "z": 0.2},
+        leftWrist={"x": -0.15, "y": 1.35, "z": 0.45},
+        rightElbow={"x": 0.2, "y": 1.15, "z": 0.05},
+        rightWrist={"x": 0.18, "y": 0.95, "z": 0.08},
+    ),
+
+    # Walking keyframes (in-place walking motion)
+    "step_right": _with_base(
+        # Right leg forward, left leg back
+        rightKnee={"x": 0.1, "y": 0.5, "z": 0.12},
+        rightAnkle={"x": 0.1, "y": 0.05, "z": 0.12},
+        rightToe={"x": 0.1, "y": 0.0, "z": 0.18},
+        leftKnee={"x": -0.1, "y": 0.5, "z": -0.05},
+        leftAnkle={"x": -0.1, "y": 0.05, "z": -0.05},
+        leftToe={"x": -0.1, "y": 0.0, "z": 0.02},
+        # Counter-swing arms
+        leftElbow={"x": -0.18, "y": 1.15, "z": 0.1},
+        leftWrist={"x": -0.16, "y": 0.95, "z": 0.15},
+        rightElbow={"x": 0.18, "y": 1.15, "z": -0.05},
+        rightWrist={"x": 0.16, "y": 0.95, "z": -0.02},
+    ),
+
+    "step_left": _with_base(
+        # Left leg forward, right leg back
+        leftKnee={"x": -0.1, "y": 0.5, "z": 0.12},
+        leftAnkle={"x": -0.1, "y": 0.05, "z": 0.12},
+        leftToe={"x": -0.1, "y": 0.0, "z": 0.18},
+        rightKnee={"x": 0.1, "y": 0.5, "z": -0.05},
+        rightAnkle={"x": 0.1, "y": 0.05, "z": -0.05},
+        rightToe={"x": 0.1, "y": 0.0, "z": 0.02},
+        # Counter-swing arms (opposite of step_right)
+        rightElbow={"x": 0.18, "y": 1.15, "z": 0.1},
+        rightWrist={"x": 0.16, "y": 0.95, "z": 0.15},
+        leftElbow={"x": -0.18, "y": 1.15, "z": -0.05},
+        leftWrist={"x": -0.16, "y": 0.95, "z": -0.02},
+    ),
+
+    "step_passing": _with_base(
+        leftElbow={"x": -0.2, "y": 1.15, "z": 0.05},
+        leftWrist={"x": -0.18, "y": 0.95, "z": 0.08},
+        rightElbow={"x": 0.2, "y": 1.15, "z": 0.05},
+        rightWrist={"x": 0.18, "y": 0.95, "z": 0.08},
+    ),
 }
 
 POSE_NAMES = list(POSES.keys())
+
+# ── Movement cycles for plan_movement tool ──
+# Each cycle is a list of pose keys that form a repeatable motion loop.
+
+MOVEMENT_CYCLES: dict[str, list[str]] = {
+    "walk_cycle":  ["step_right", "step_passing", "step_left", "step_passing"],
+    "wave_cycle":  ["wave_right", "rest"],
+    "nod_cycle":   ["nod_down", "rest"],
+    "clap_cycle":  ["clap_open", "clap_closed"],
+    "bow_cycle":   ["bow", "rest"],
+    "shrug_cycle": ["shrug", "rest"],
+}
+
+CYCLE_NAMES = list(MOVEMENT_CYCLES.keys())

@@ -18,7 +18,13 @@ MAX_INPUT_CHARS = 200
 # LLM output token cap
 MAX_OUTPUT_TOKENS = 200
 
-GUEST_SYSTEM_PROMPT = """You are an avatar controller. You can ONLY use avatar_control tools (set_pose, move_joints, animate_sequence) to control a 3D avatar.
+GUEST_SYSTEM_PROMPT = """You are an avatar controller. You control a 3D humanoid avatar using these tools:
+- set_pose: Set a predefined pose (t_pose, rest, wave_right, wave_left, hands_up, point_right, point_left, dab, superhero, bow, nod_down, shrug, clap_open, clap_closed, reach_forward_right, reach_forward_left).
+- move_joints: Move individual joints to XYZ coordinates (Y-up: y=0 is floor, y=1.4 is shoulders, y=1.85 is above head).
+- animate_sequence: Play a sequence of predefined poses.
+- plan_movement: Plan smooth multi-step movements with speed control. Use for complex motions. Actions: walk_cycle, wave_cycle, nod_cycle, clap_cycle, bow_cycle, shrug_cycle. Params: action, speed (slow/normal/fast), repeats, easing.
+
+For complex motions, prefer plan_movement. For simple single poses, use set_pose.
 
 Rules:
 - Decline all unrelated requests. You can only control the avatar.
