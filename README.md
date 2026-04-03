@@ -26,6 +26,13 @@ IndexApp (iPhone)                    SecondBrain (Server, RTX 5080)
 │ • SwiftData      │                  │ llama-server              │
 │   (conversations)│                  │   Qwen3 14B + 0.5B draft │
 └──────────────────┘                  └──────────────────────────┘
+
+Pose Spatial Studio              SecondBrain (Server)
+┌──────────────────┐              ┌──────────────────────────┐
+│ robot.yingliu.site│ ── HTTPS ──►│ /api/v1/guest/chat       │
+│ • Chat Panel     │  ◄── SSE ── │   avatar_control skill   │
+│ • Voice Input    │              │   (unauthenticated)      │
+└──────────────────┘              └──────────────────────────┘
 ```
 
 ## Tech Stack
@@ -49,6 +56,7 @@ IndexApp (iPhone)                    SecondBrain (Server, RTX 5080)
 | `/api/v1/skills` | GET | Bearer + HMAC | List all skills with metadata |
 | `/api/v1/skills/{name}` | GET | Bearer + HMAC | Get details for a specific skill |
 | `/api/v1/skills/{name}` | PATCH | Bearer + HMAC | Enable/disable a skill |
+| `/api/v1/guest/chat` | POST | Origin check | Guest chat for avatar control (SSE streaming) |
 
 ## Skills
 
@@ -63,6 +71,7 @@ Skills are modular capabilities under `agent-api/app/skills/`. Each extends `Bas
 | `reminders` | Device | Get/create reminders (EventKit) |
 | `contacts` | Device | Search contacts by name |
 | `clipboard` | Device | Read iPhone clipboard |
+| `avatar_control` | Server | Set pose, move joints, animate sequences for 3D avatar |
 
 ## Deployment
 
