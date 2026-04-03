@@ -1,8 +1,7 @@
 import json
 import logging
 from app.skills.base import BaseSkill
-from app.skills.avatar_control.poses import POSES, POSE_NAMES, MOVEMENT_CYCLES, CYCLE_NAMES
-from app.skills.avatar_control.motion import build_animation, EasingType  # noqa: kept for future use
+from app.skills.avatar_control.poses import POSES, POSE_NAMES
 
 logger = logging.getLogger("skills.avatar_control")
 
@@ -19,7 +18,7 @@ class AvatarControlSkill(BaseSkill):
     name = "avatar_control"
     display_name = "Avatar Control"
     description = "Control a 3D avatar's body pose and animations."
-    version = "2.0.0"
+    version = "3.0.0"
     execution_side = "server"
     keywords = [
         "avatar", "robot", "control", "move", "pose", "arm", "leg",
@@ -34,8 +33,7 @@ class AvatarControlSkill(BaseSkill):
                 "function": {
                     "name": "set_pose",
                     "description": (
-                        "Set the avatar to a predefined full-body pose. "
-                        "Use this for common poses like waving, pointing, T-pose, etc."
+                        "Set the avatar to a predefined full-body pose."
                     ),
                     "parameters": {
                         "type": "object",
@@ -44,11 +42,6 @@ class AvatarControlSkill(BaseSkill):
                                 "type": "string",
                                 "enum": POSE_NAMES,
                                 "description": "Name of the predefined pose.",
-                            },
-                            "duration_ms": {
-                                "type": "integer",
-                                "description": "Transition duration in milliseconds.",
-                                "default": 500,
                             },
                         },
                         "required": ["pose_name"],
@@ -60,9 +53,9 @@ class AvatarControlSkill(BaseSkill):
                 "function": {
                     "name": "move_joints",
                     "description": (
-                        "Move specific joints to target 3D positions. "
-                        "Use when the user wants to move individual body parts. "
-                        "Coordinates are in Y-up convention: x=left/right, y=up/down, z=forward/back."
+                        "Move specific joints to 3D positions. Only specify "
+                        "joints you want to change — others stay at rest. "
+                        "Y-up: x=left(-)/right(+), y=up, z=forward(+)/back(-)."
                     ),
                     "parameters": {
                         "type": "object",
@@ -70,8 +63,8 @@ class AvatarControlSkill(BaseSkill):
                             "joints": {
                                 "type": "object",
                                 "description": (
-                                    "Dict of joint names to {x, y, z} target positions. "
-                                    "Valid joints: " + ", ".join(sorted(VALID_JOINTS))
+                                    "Joint name → {x, y, z}. "
+                                    "Valid: " + ", ".join(sorted(VALID_JOINTS))
                                 ),
                                 "additionalProperties": {
                                     "type": "object",
@@ -83,11 +76,6 @@ class AvatarControlSkill(BaseSkill):
                                     "required": ["x", "y", "z"],
                                 },
                             },
-                            "duration_ms": {
-                                "type": "integer",
-                                "description": "Transition duration in milliseconds.",
-                                "default": 500,
-                            },
                         },
                         "required": ["joints"],
                     },
@@ -98,15 +86,16 @@ class AvatarControlSkill(BaseSkill):
                 "function": {
                     "name": "animate_sequence",
                     "description": (
-                        "Play a sequence of predefined poses as an animation. "
-                        "Use for dancing, repeated gestures, or multi-step movements."
+                        "Play a sequence of poses as animation. Use for any "
+                        "multi-step movement: walking, dancing, clapping, etc. "
+                        "Set loop=true for repeating motions."
                     ),
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "sequence": {
                                 "type": "array",
-                                "description": "Array of pose steps to play in order.",
+                                "description": "Pose steps to play in order.",
                                 "items": {
                                     "type": "object",
                                     "properties": {
@@ -116,8 +105,8 @@ class AvatarControlSkill(BaseSkill):
                                         },
                                         "hold_ms": {
                                             "type": "integer",
-                                            "description": "How long to hold this pose before transitioning.",
-                                            "default": 500,
+                                            "description": "Hold duration in ms.",
+                                            "default": 400,
                                         },
                                     },
                                     "required": ["pose_name"],
@@ -125,44 +114,11 @@ class AvatarControlSkill(BaseSkill):
                             },
                             "loop": {
                                 "type": "boolean",
-                                "description": "Whether to loop the animation.",
+                                "description": "Repeat the animation.",
                                 "default": False,
                             },
                         },
                         "required": ["sequence"],
-                    },
-                },
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "plan_movement",
-                    "description": (
-                        "Plan a smooth multi-step movement with interpolation. "
-                        "ALWAYS use this for walking, clapping, nodding, bowing, "
-                        "waving, or shrugging."
-                    ),
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "action": {
-                                "type": "string",
-                                "enum": CYCLE_NAMES,
-                                "description": "Movement to perform.",
-                            },
-                            "repeats": {
-                                "type": "integer",
-                                "description": "How many times to repeat.",
-                                "default": 1,
-                            },
-                            "speed": {
-                                "type": "string",
-                                "enum": ["slow", "normal", "fast"],
-                                "description": "Movement speed.",
-                                "default": "normal",
-                            },
-                        },
-                        "required": ["action"],
                     },
                 },
             },
@@ -175,19 +131,16 @@ class AvatarControlSkill(BaseSkill):
             return self._move_joints(arguments)
         elif tool_name == "animate_sequence":
             return self._animate_sequence(arguments)
-        elif tool_name == "plan_movement":
-            return self._plan_movement(arguments)
         return f"Error: Unknown tool '{tool_name}'"
 
     def _set_pose(self, args: dict) -> str:
         pose_name = args.get("pose_name", "")
         if pose_name not in POSES:
             return f"Error: Unknown pose '{pose_name}'. Available: {', '.join(POSE_NAMES)}"
-        duration_ms = args.get("duration_ms", 500)
         return json.dumps({
             "type": "pose",
             "joints": POSES[pose_name],
-            "duration_ms": duration_ms,
+            "duration_ms": args.get("duration_ms", 500),
         })
 
     def _move_joints(self, args: dict) -> str:
@@ -195,15 +148,14 @@ class AvatarControlSkill(BaseSkill):
         invalid = set(joints.keys()) - VALID_JOINTS
         if invalid:
             return f"Error: Invalid joints: {', '.join(invalid)}. Valid: {', '.join(sorted(VALID_JOINTS))}"
-        duration_ms = args.get("duration_ms", 500)
-        # Start from rest pose so the frontend always receives a full skeleton.
+        # Merge onto rest pose so the frontend always receives a full skeleton.
         full_pose = {k: dict(v) for k, v in POSES["rest"].items()}
         for joint_name, coords in joints.items():
             full_pose[joint_name] = dict(coords)
         return json.dumps({
             "type": "pose",
             "joints": full_pose,
-            "duration_ms": duration_ms,
+            "duration_ms": args.get("duration_ms", 500),
         })
 
     def _animate_sequence(self, args: dict) -> str:
@@ -217,40 +169,10 @@ class AvatarControlSkill(BaseSkill):
                 return f"Error: Unknown pose '{pose_name}' in sequence."
             frames.append({
                 "joints": POSES[pose_name],
-                "hold_ms": step.get("hold_ms", 500),
+                "hold_ms": step.get("hold_ms", 400),
             })
         return json.dumps({
             "type": "animation",
             "frames": frames,
             "loop": args.get("loop", False),
-        })
-
-    # ── Speed name → duration per segment (ms) ──
-    _SPEED_MAP = {"slow": 800, "normal": 500, "fast": 250}
-
-    def _plan_movement(self, args: dict) -> str:
-        action = args.get("action", "")
-        repeats = max(1, min(args.get("repeats", 1), 10))
-        speed = args.get("speed", "normal")
-        hold_ms = self._SPEED_MAP.get(speed, 500)
-
-        cycle_keys = MOVEMENT_CYCLES.get(action)
-        if not cycle_keys:
-            return f"Error: Unknown action '{action}'. Available: {', '.join(CYCLE_NAMES)}"
-
-        # Return keyframes directly — the frontend's SLERP smoothing
-        # handles interpolation between poses at 60fps.  Server-side
-        # interpolation produced 17KB+ SSE payloads and was redundant
-        # with the renderer's own quaternion smoothing.
-        single_cycle = [
-            {"joints": POSES[k], "hold_ms": hold_ms}
-            for k in cycle_keys
-        ]
-
-        frames = single_cycle * repeats
-
-        return json.dumps({
-            "type": "animation",
-            "frames": frames,
-            "loop": False,
         })
