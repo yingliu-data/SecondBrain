@@ -102,6 +102,22 @@ POSES: dict[str, dict] = {
         rightAnkle={"x": 0.18, "y": 0.05, "z": 0.0},
     ),
 
+    # ── Single-arm raise poses ──
+
+    "raise_right_hand": _with_base(
+        leftElbow={"x": -0.2, "y": 1.15, "z": 0.05},
+        leftWrist={"x": -0.18, "y": 0.95, "z": 0.08},
+        rightElbow={"x": 0.25, "y": 1.6, "z": 0.0},
+        rightWrist={"x": 0.25, "y": 1.85, "z": 0.0},
+    ),
+
+    "raise_left_hand": _with_base(
+        leftElbow={"x": -0.25, "y": 1.6, "z": 0.0},
+        leftWrist={"x": -0.25, "y": 1.85, "z": 0.0},
+        rightElbow={"x": 0.2, "y": 1.15, "z": 0.05},
+        rightWrist={"x": 0.18, "y": 0.95, "z": 0.08},
+    ),
+
     # ── New poses for motion planning ──
 
     "bow": _with_base(
