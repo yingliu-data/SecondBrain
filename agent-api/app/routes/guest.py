@@ -72,7 +72,6 @@ async def guest_chat(request: Request):
                 resp = await _llm.chat_completion(
                     messages,
                     tools=tool_defs,
-                    max_tokens=MAX_OUTPUT_TOKENS,
                 )
             except Exception as e:
                 logger.error(f"Guest LLM error: {e}")
