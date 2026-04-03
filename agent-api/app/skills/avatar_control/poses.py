@@ -118,6 +118,28 @@ POSES: dict[str, dict] = {
         rightWrist={"x": 0.18, "y": 0.95, "z": 0.08},
     ),
 
+    # ── Single-leg raise poses ──
+
+    "raise_right_leg": _with_base(
+        leftElbow={"x": -0.2, "y": 1.15, "z": 0.05},
+        leftWrist={"x": -0.18, "y": 0.95, "z": 0.08},
+        rightElbow={"x": 0.2, "y": 1.15, "z": 0.05},
+        rightWrist={"x": 0.18, "y": 0.95, "z": 0.08},
+        rightKnee={"x": 0.1, "y": 0.65, "z": 0.2},
+        rightAnkle={"x": 0.1, "y": 0.45, "z": 0.25},
+        rightToe={"x": 0.1, "y": 0.4, "z": 0.3},
+    ),
+
+    "raise_left_leg": _with_base(
+        leftElbow={"x": -0.2, "y": 1.15, "z": 0.05},
+        leftWrist={"x": -0.18, "y": 0.95, "z": 0.08},
+        rightElbow={"x": 0.2, "y": 1.15, "z": 0.05},
+        rightWrist={"x": 0.18, "y": 0.95, "z": 0.08},
+        leftKnee={"x": -0.1, "y": 0.65, "z": 0.2},
+        leftAnkle={"x": -0.1, "y": 0.45, "z": 0.25},
+        leftToe={"x": -0.1, "y": 0.4, "z": 0.3},
+    ),
+
     # ── New poses for motion planning ──
 
     "bow": _with_base(

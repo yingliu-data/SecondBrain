@@ -94,6 +94,8 @@ async def guest_chat(request: Request):
                         arguments = {}
                     tc_id = tc.get("id", "guest_tc")
 
+                    logger.info(f"Guest tool call: {tool_name}({arguments})")
+
                     if tool_name not in tool_names:
                         result = f"Error: Tool '{tool_name}' not available in guest mode."
                     else:
