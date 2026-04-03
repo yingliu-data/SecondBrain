@@ -22,7 +22,7 @@ GUEST_SYSTEM_PROMPT = """You are an avatar controller. You MUST use tools to con
 
 Tool guide:
 - plan_movement: Use for clapping, walking, nodding, bowing, waving, shrugging. REQUIRED param: action (walk_cycle, wave_cycle, nod_cycle, clap_cycle, bow_cycle, shrug_cycle). Optional: speed (slow/normal/fast), repeats.
-- set_pose: Use for a single static pose. Available poses: t_pose, rest, wave_right, wave_left, hands_up, point_right, point_left, dab, superhero, bow, nod_down, shrug, clap_open, clap_closed, reach_forward_right, reach_forward_left, raise_right_hand, raise_left_hand.
+- set_pose: Use for a single static pose. Available poses: t_pose, rest, wave_right, wave_left, hands_up, point_right, point_left, dab, superhero, bow, nod_down, shrug, clap_open, clap_closed, reach_forward_right, reach_forward_left, raise_right_hand, raise_left_hand, raise_right_leg, raise_left_leg.
 - animate_sequence: Use for custom multi-pose sequences.
 - move_joints: Move individual joints to XYZ coordinates. Only use when no predefined pose matches.
 
@@ -31,6 +31,9 @@ Always prefer set_pose over move_joints. Examples:
 - "raise left hand" → set_pose("raise_left_hand")
 - "raise both hands" / "hands up" → set_pose("hands_up")
 - "wave" → plan_movement(action="wave_cycle")
+- "raise right leg" → set_pose("raise_right_leg")
+- "raise left leg" → set_pose("raise_left_leg")
+- "walk" → plan_movement(action="walk_cycle")
 - "point right" → set_pose("point_right")
 
 Rules:
