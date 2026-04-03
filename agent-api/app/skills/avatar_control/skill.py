@@ -2,7 +2,7 @@ import json
 import logging
 from app.skills.base import BaseSkill
 from app.skills.avatar_control.poses import POSES, POSE_NAMES, MOVEMENT_CYCLES, CYCLE_NAMES
-from app.skills.avatar_control.motion import build_animation, EasingType
+from app.skills.avatar_control.motion import build_animation, EasingType  # noqa: kept for future use
 
 logger = logging.getLogger("skills.avatar_control")
 
@@ -232,24 +232,25 @@ class AvatarControlSkill(BaseSkill):
         action = args.get("action", "")
         repeats = max(1, min(args.get("repeats", 1), 10))
         speed = args.get("speed", "normal")
-        duration_ms = self._SPEED_MAP.get(speed, 500)
+        hold_ms = self._SPEED_MAP.get(speed, 500)
 
         cycle_keys = MOVEMENT_CYCLES.get(action)
         if not cycle_keys:
             return f"Error: Unknown action '{action}'. Available: {', '.join(CYCLE_NAMES)}"
 
-        keyframes = [POSES[k] for k in cycle_keys]
-
-        single_cycle = build_animation(
-            keyframes,
-            default_easing=EasingType.EASE_IN_OUT,
-            default_duration_ms=duration_ms,
-        )
+        # Return keyframes directly — the frontend's SLERP smoothing
+        # handles interpolation between poses at 60fps.  Server-side
+        # interpolation produced 17KB+ SSE payloads and was redundant
+        # with the renderer's own quaternion smoothing.
+        single_cycle = [
+            {"joints": POSES[k], "hold_ms": hold_ms}
+            for k in cycle_keys
+        ]
 
         frames = single_cycle * repeats
 
         return json.dumps({
             "type": "animation",
-            "frames": frames[:200],
+            "frames": frames,
             "loop": False,
         })
