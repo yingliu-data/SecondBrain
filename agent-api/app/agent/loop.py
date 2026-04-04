@@ -17,7 +17,7 @@ SSE_HEADERS = {
 }
 
 # Avatar tools that emit a separate SSE event for the frontend renderer.
-_AVATAR_TOOLS = {"set_pose", "move_joints", "animate_sequence"}
+_AVATAR_TOOLS = {"set_pose", "move_joints", "animate_sequence", "plan_movement"}
 
 
 async def run_agent_loop(message: str, history: list, registry, llm):
@@ -73,6 +73,15 @@ async def run_agent_loop(message: str, history: list, registry, llm):
                         try:
                             parsed = json.loads(result)
                             yield f"event: avatar_command\ndata: {json.dumps({'name': tool_name, 'result': parsed})}\n\n"
+                            # For plan_movement, feed compact summary to LLM
+                            # instead of full frame data to save context tokens.
+                            if tool_name == "plan_movement":
+                                n_frames = len(parsed.get("frames", []))
+                                result = json.dumps({
+                                    "status": "ok",
+                                    "frames_generated": n_frames,
+                                    "loop": parsed.get("loop", False),
+                                })
                         except (json.JSONDecodeError, TypeError):
                             pass
                 elif tool_name in device_tools:
