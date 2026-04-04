@@ -48,6 +48,11 @@ class SkillRegistry:
                 logger.error(f"Failed to load skill '{modname}': {e}")
         self._save_state()
 
+    def set_llm_provider(self, llm):
+        """Pass LLM provider to skills that need secondary LLM calls."""
+        for skill in self._skills.values():
+            skill.set_llm(llm)
+
     # ── Public API ────────────────────────────────────────────
 
     def list_all(self) -> list[dict]:

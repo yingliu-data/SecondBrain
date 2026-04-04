@@ -34,6 +34,9 @@ app.add_middleware(
 registry = SkillRegistry()
 llm = LLMProvider()
 
+# Give skills access to LLM (for plan_movement decomposition)
+registry.set_llm_provider(llm)
+
 # Inject dependencies into routes
 chat.set_dependencies(registry, llm)
 guest.set_dependencies(registry, llm)

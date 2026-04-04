@@ -106,6 +106,14 @@ async def guest_chat(request: Request):
                             try:
                                 parsed = json.loads(result)
                                 yield f"event: avatar_command\ndata: {json.dumps({'name': tool_name, 'result': parsed})}\n\n"
+                                # Compact summary for LLM context
+                                if tool_name == "plan_movement":
+                                    n_frames = len(parsed.get("frames", []))
+                                    result = json.dumps({
+                                        "status": "ok",
+                                        "frames_generated": n_frames,
+                                        "loop": parsed.get("loop", False),
+                                    })
                             except (json.JSONDecodeError, TypeError):
                                 pass
 

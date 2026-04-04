@@ -48,6 +48,11 @@ class BaseSkill(ABC):
         """Return OpenAI-compatible tool definitions for this skill.
         These get passed to llama-server in the tools parameter."""
 
+    def set_llm(self, llm):
+        """Optional: give this skill access to the LLM provider.
+        Override in skills that need to make secondary LLM calls."""
+        pass
+
     async def execute(self, tool_name: str, arguments: dict) -> str:
         """Execute a server-side tool. Only called for server skills.
         Device skills are delegated to the iPhone automatically."""
