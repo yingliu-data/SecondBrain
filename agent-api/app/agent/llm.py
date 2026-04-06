@@ -125,12 +125,17 @@ class LLMProvider:
             return resp.json()
 
     async def _start_local_llm(self):
-        """Auto-start the local LLM container and wait for it to be ready."""
-        import subprocess
+        """Auto-start the local LLM container via Docker socket API."""
         logger.warning("Local LLM not running, starting container...")
         try:
-            subprocess.run(["docker", "start", "secondbrain-llm"], check=True, capture_output=True)
-        except (subprocess.CalledProcessError, FileNotFoundError) as e:
+            async with httpx.AsyncClient(
+                transport=httpx.AsyncHTTPTransport(uds="/var/run/docker.sock"),
+                base_url="http://localhost",
+            ) as docker:
+                r = await docker.post("/containers/secondbrain-llm/start", timeout=30)
+                if r.status_code not in (204, 304):  # 204=started, 304=already running
+                    raise RuntimeError(f"Docker API returned {r.status_code}: {r.text}")
+        except Exception as e:
             raise RuntimeError(f"Failed to start local LLM container: {e}")
 
         local = self._get_local()
