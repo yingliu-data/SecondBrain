@@ -54,6 +54,18 @@ jobs:
       - name: Test SSH
         run: ssh -o StrictHostKeyChecking=accept-new secondbrain "echo 'SSH OK'"
 
+      - name: Sync secrets to server .env
+        run: |
+          ssh secondbrain "
+            ENV_FILE=~/data/SecondBrain/.env
+            # Upsert GEMINI_API_KEY
+            if grep -q '^GEMINI_API_KEY=' \$ENV_FILE 2>/dev/null; then
+              sed -i 's|^GEMINI_API_KEY=.*|GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}|' \$ENV_FILE
+            else
+              echo 'GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}' >> \$ENV_FILE
+            fi
+          "
+
       - name: Deploy and restart
         run: |
           CONTAINER=secondbrain-agent-api
