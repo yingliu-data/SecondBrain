@@ -86,7 +86,7 @@ class LLMProvider:
 
             for attempt in range(_MAX_RETRIES):
                 try:
-                    resp = await self._gemini.post("/v1/chat/completions", json=payload)
+                    resp = await self._gemini.post("/chat/completions", json=payload)
 
                     if self._is_quota_error(resp):
                         self._mark_gemini_exhausted(resp)
