@@ -3,6 +3,7 @@ services:
   # Official prebuilt image. PTX JIT-compiles to Blackwell on first run.
   # Confirmed working on RTX 5070 Ti / RTX PRO 6000 (compute capability 12.0).
   llm:
+    profiles: ["local-llm"]   # Only starts with: docker compose --profile local-llm up -d llm
     image: ghcr.io/ggml-org/llama.cpp:server-cuda
     container_name: secondbrain-llm
     restart: unless-stopped
@@ -46,6 +47,7 @@ services:
     working_dir: /root/agent-api
     command: bash -c "pip install --break-system-packages -q -r requirements.txt && uvicorn app.main:app --host 0.0.0.0 --port 8000 --loop uvloop --http httptools --workers 1"
     environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
       - LLM_URL=http://secondbrain-llm:8080
       - API_SECRET_KEY=${API_SECRET_KEY}
       - SESSION_SECRET=${SESSION_SECRET}
@@ -59,9 +61,8 @@ services:
     networks:
       - llm_internal
       - tunnel_network
-    depends_on:
-      llm:
-        condition: service_healthy
+    # Local LLM is optional — agent-api uses Gemini as primary.
+    # Start local fallback with: docker compose --profile local-llm up -d llm
 
   # -- Cloudflare Tunnel ---------------------------------------------------
   cloudflared:

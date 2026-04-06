@@ -1,38 +1,132 @@
-import asyncio, httpx, logging
+import asyncio, time, httpx, logging
 from app.config import (
+    GEMINI_API_KEY, GEMINI_MODEL, GEMINI_URL,
     LLM_URL, LLM_MODEL, LLM_TIMEOUT,
-    LLM_MAX_TOKENS, LLM_TEMPERATURE, LLM_FALLBACK_URL, LLM_FALLBACK_KEY,
+    LLM_MAX_TOKENS, LLM_TEMPERATURE,
 )
 
 logger = logging.getLogger("llm")
 
-# Transient HTTP status codes worth retrying
 _RETRYABLE_STATUS = {502, 503, 504}
 _MAX_RETRIES = 3
-_BACKOFF_BASE = 1.0  # seconds: 1s, 2s, 4s
+_BACKOFF_BASE = 1.0
+_DEFAULT_QUOTA_COOLDOWN = 3600  # 1 hour fallback if no Retry-After header
 
 
 class LLMProvider:
-    """Abstraction over LLM inference. Swap providers via LLM_PROVIDER env var.
-    Supports local (llama-server), cloud fallback, and future multi-model routing."""
+    """Gemini-primary LLM provider with local llama-server fallback.
+    Local client is created lazily to save resources when Gemini handles everything."""
 
     def __init__(self):
-        self._local = httpx.AsyncClient(
-            base_url=LLM_URL, timeout=httpx.Timeout(LLM_TIMEOUT)
-        )
-        self._fallback = None
-        if LLM_FALLBACK_URL:
-            self._fallback = httpx.AsyncClient(
-                base_url=LLM_FALLBACK_URL,
+        # Primary: Gemini (always ready if key is set)
+        self._gemini = None
+        if GEMINI_API_KEY:
+            self._gemini = httpx.AsyncClient(
+                base_url=GEMINI_URL,
                 timeout=httpx.Timeout(LLM_TIMEOUT),
-                headers={"Authorization": f"Bearer {LLM_FALLBACK_KEY}"},
+                headers={"Authorization": f"Bearer {GEMINI_API_KEY}"},
             )
 
+        # Fallback: local llama-server (lazy — created on first use)
+        self._local = None
+
+        # Quota tracking
+        self._gemini_exhausted = False
+        self._gemini_exhausted_until: float | None = None
+
+    def _get_local(self) -> httpx.AsyncClient:
+        """Lazily create the local LLM client."""
+        if self._local is None:
+            self._local = httpx.AsyncClient(
+                base_url=LLM_URL, timeout=httpx.Timeout(LLM_TIMEOUT)
+            )
+        return self._local
+
+    def _is_quota_error(self, resp: httpx.Response) -> bool:
+        if resp.status_code == 429:
+            return True
+        if resp.status_code == 403:
+            try:
+                body = resp.json()
+                msg = body.get("error", {}).get("message", "").lower()
+                return "quota" in msg or "limit" in msg
+            except Exception:
+                return False
+        return False
+
+    def _mark_gemini_exhausted(self, resp: httpx.Response):
+        self._gemini_exhausted = True
+        retry_after = resp.headers.get("Retry-After")
+        if retry_after:
+            try:
+                self._gemini_exhausted_until = time.monotonic() + int(retry_after)
+            except ValueError:
+                self._gemini_exhausted_until = time.monotonic() + _DEFAULT_QUOTA_COOLDOWN
+        else:
+            self._gemini_exhausted_until = time.monotonic() + _DEFAULT_QUOTA_COOLDOWN
+        logger.warning(
+            f"Gemini quota exhausted, falling back to local LLM. "
+            f"Will retry Gemini after {self._gemini_exhausted_until - time.monotonic():.0f}s"
+        )
+
+    def _check_quota_reset(self):
+        if self._gemini_exhausted and self._gemini_exhausted_until:
+            if time.monotonic() >= self._gemini_exhausted_until:
+                self._gemini_exhausted = False
+                self._gemini_exhausted_until = None
+                logger.info("Gemini quota cooldown expired, retrying Gemini")
+
     async def chat_completion(self, messages: list, tools: list | None = None) -> dict:
-        """Send a chat completion request with retry + exponential backoff.
-        Retries transient errors up to 3 times, then falls back to cloud API."""
+        self._check_quota_reset()
+
+        # Try Gemini first (if available and not exhausted)
+        if self._gemini and not self._gemini_exhausted:
+            payload = self._build_payload(GEMINI_MODEL, messages, tools)
+            last_error = None
+
+            for attempt in range(_MAX_RETRIES):
+                try:
+                    resp = await self._gemini.post("/v1/chat/completions", json=payload)
+
+                    if self._is_quota_error(resp):
+                        self._mark_gemini_exhausted(resp)
+                        break  # fall through to local
+
+                    if resp.status_code in _RETRYABLE_STATUS:
+                        raise httpx.HTTPStatusError(
+                            f"Gemini returned {resp.status_code}",
+                            request=resp.request, response=resp,
+                        )
+                    resp.raise_for_status()
+                    logger.debug("Using Gemini")
+                    return resp.json()
+                except (httpx.ConnectError, httpx.ReadTimeout, httpx.HTTPStatusError) as e:
+                    last_error = e
+                    if attempt < _MAX_RETRIES - 1:
+                        delay = _BACKOFF_BASE * (2 ** attempt)
+                        logger.warning(f"Gemini attempt {attempt+1} failed ({e}), retrying in {delay}s")
+                        await asyncio.sleep(delay)
+            else:
+                # All retries failed (not quota) — still try local
+                logger.warning(f"Gemini failed after {_MAX_RETRIES} attempts ({last_error}), trying local LLM")
+
+        # Fallback: local llama-server
+        logger.info("Using local LLM fallback")
+        payload = self._build_payload(LLM_MODEL, messages, tools)
+        try:
+            local = self._get_local()
+            resp = await local.post("/v1/chat/completions", json=payload)
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.ConnectError:
+            raise RuntimeError(
+                "Local LLM not reachable. Start it with: "
+                "docker compose --profile local-llm up -d llm"
+            )
+
+    def _build_payload(self, model: str, messages: list, tools: list | None) -> dict:
         payload = {
-            "model": LLM_MODEL,
+            "model": model,
             "messages": messages,
             "stream": False,
             "temperature": LLM_TEMPERATURE,
@@ -41,37 +135,29 @@ class LLMProvider:
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
-
-        last_error = None
-        for attempt in range(_MAX_RETRIES):
-            try:
-                resp = await self._local.post("/v1/chat/completions", json=payload)
-                if resp.status_code in _RETRYABLE_STATUS:
-                    raise httpx.HTTPStatusError(
-                        f"LLM returned {resp.status_code}",
-                        request=resp.request, response=resp,
-                    )
-                resp.raise_for_status()
-                return resp.json()
-            except (httpx.ConnectError, httpx.ReadTimeout, httpx.HTTPStatusError) as e:
-                last_error = e
-                if attempt < _MAX_RETRIES - 1:
-                    delay = _BACKOFF_BASE * (2 ** attempt)
-                    logger.warning(f"Local LLM attempt {attempt+1} failed ({e}), retrying in {delay}s")
-                    await asyncio.sleep(delay)
-
-        # All local retries exhausted — try cloud fallback
-        if self._fallback:
-            logger.warning(f"Local LLM failed after {_MAX_RETRIES} attempts ({last_error}), falling back to cloud API")
-            resp = await self._fallback.post("/v1/chat/completions", json=payload)
-            resp.raise_for_status()
-            return resp.json()
-
-        raise last_error
+        return payload
 
     async def health(self) -> dict:
+        result = {"status": "ok"}
+
+        # Check Gemini
+        if self._gemini:
+            if self._gemini_exhausted:
+                result["gemini"] = "quota_exhausted"
+            else:
+                result["gemini"] = "configured"
+        else:
+            result["gemini"] = "not_configured"
+
+        # Check local
         try:
-            r = await self._local.get("/health")
-            return {"status": "ok", "llm": r.json()}
-        except Exception as e:
-            return {"status": "degraded", "error": str(e)}
+            local = self._get_local()
+            r = await local.get("/health")
+            result["local"] = r.json()
+        except Exception:
+            result["local"] = "not_running"
+
+        if result["gemini"] != "configured" and result["local"] == "not_running":
+            result["status"] = "degraded"
+
+        return result
