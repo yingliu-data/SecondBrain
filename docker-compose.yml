@@ -58,6 +58,7 @@ services:
     volumes:
       - agent-api-code:/root/agent-api          # Code volume (populated by CI)
       - ./agent-api/data:/root/agent-api/data   # Persistent data (logs, db)
+      - /var/run/docker.sock:/var/run/docker.sock  # Auto-start local LLM on fallback
     networks:
       - llm_internal
       - tunnel_network

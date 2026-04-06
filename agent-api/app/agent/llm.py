@@ -113,16 +113,38 @@ class LLMProvider:
         # Fallback: local llama-server
         logger.info("Using local LLM fallback")
         payload = self._build_payload(LLM_MODEL, messages, tools)
+        local = self._get_local()
         try:
-            local = self._get_local()
             resp = await local.post("/v1/chat/completions", json=payload)
             resp.raise_for_status()
             return resp.json()
         except httpx.ConnectError:
-            raise RuntimeError(
-                "Local LLM not reachable. Start it with: "
-                "docker compose --profile local-llm up -d llm"
-            )
+            await self._start_local_llm()
+            resp = await local.post("/v1/chat/completions", json=payload)
+            resp.raise_for_status()
+            return resp.json()
+
+    async def _start_local_llm(self):
+        """Auto-start the local LLM container and wait for it to be ready."""
+        import subprocess
+        logger.warning("Local LLM not running, starting container...")
+        try:
+            subprocess.run(["docker", "start", "secondbrain-llm"], check=True, capture_output=True)
+        except (subprocess.CalledProcessError, FileNotFoundError) as e:
+            raise RuntimeError(f"Failed to start local LLM container: {e}")
+
+        local = self._get_local()
+        for i in range(24):  # 24 × 5s = 120s max
+            await asyncio.sleep(5)
+            try:
+                r = await local.get("/health")
+                if r.status_code == 200:
+                    logger.info("Local LLM is ready")
+                    return
+            except Exception:
+                pass
+            logger.info(f"Waiting for local LLM... ({(i+1)*5}s)")
+        raise RuntimeError("Local LLM failed to start within 120s")
 
     def _build_payload(self, model: str, messages: list, tools: list | None) -> dict:
         payload = {
