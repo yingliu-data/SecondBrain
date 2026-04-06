@@ -1,11 +1,15 @@
 import os
 
-# ── LLM Provider (abstracted for future multi-model / cloud fallback) ──
-LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "local")        # "local" | "openai" | "anthropic"
-LLM_URL = os.environ.get("LLM_URL", "http://llm:8080")        # local llama-server
-LLM_MODEL = os.environ.get("LLM_MODEL", "qwen3-14b")          # model name
-LLM_FALLBACK_URL = os.environ.get("LLM_FALLBACK_URL", "")     # cloud API fallback (optional)
-LLM_FALLBACK_KEY = os.environ.get("LLM_FALLBACK_KEY", "")     # cloud API key (optional)
+# ── LLM Provider (Gemini primary, local fallback) ──
+# Primary: Gemini cloud API (OpenAI-compatible endpoint)
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.1-flash-live-preview")
+GEMINI_URL = os.environ.get("GEMINI_URL", "https://generativelanguage.googleapis.com/v1beta/openai")
+
+# Fallback: Local llama-server (only used when Gemini quota exhausted)
+LLM_URL = os.environ.get("LLM_URL", "http://secondbrain-llm:8080")
+LLM_MODEL = os.environ.get("LLM_MODEL", "qwen3-14b")
+
 LLM_TIMEOUT = int(os.environ.get("LLM_TIMEOUT", 120))         # seconds
 LLM_MAX_TOKENS = int(os.environ.get("LLM_MAX_TOKENS", 512))
 LLM_TEMPERATURE = float(os.environ.get("LLM_TEMPERATURE", 0.7))
