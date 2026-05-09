@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 from app.skills.base import BaseSkill
 from app.skills.avatar_control.poses import POSES, POSE_NAMES
 from app.skills.avatar_control.body import JOINT_LIMITS, clamp_joint
@@ -291,6 +292,7 @@ class AvatarControlSkill(BaseSkill):
                     {"role": "user", "content": user_prompt},
                 ],
                 tools=None,
+                max_tokens=2048,
             )
             raw = resp["choices"][0]["message"].get("content", "")
         except Exception as e:
@@ -344,12 +346,14 @@ class AvatarControlSkill(BaseSkill):
         return json.dumps(result)
 
     def _parse_plan(self, raw: str) -> dict | str:
-        """Extract JSON from LLM response, handling markdown fences."""
+        """Extract JSON from LLM response, handling markdown fences and Qwen3 reasoning."""
         text = raw.strip()
+        # Strip a leading <think>...</think> block if vLLM's reasoning parser is
+        # not stripping it server-side. Defense-in-depth.
+        text = re.sub(r"^<think>.*?</think>\s*", "", text, flags=re.DOTALL).strip()
         # Strip markdown code fences if present
         if text.startswith("```"):
             lines = text.split("\n")
-            # Remove first and last fence lines
             lines = [l for l in lines if not l.strip().startswith("```")]
             text = "\n".join(lines).strip()
 

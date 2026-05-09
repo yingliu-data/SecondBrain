@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.12.1 - 9 May 2026
+
+### Server
+- feat: switch to local-vLLM-only LLM provider; remove Gemini cloud fallback and quota tracking
+- fix: enable vLLM `--enable-auto-tool-choice`, `--tool-call-parser=hermes`, `--reasoning-parser=qwen3` so iOS chat and `/api/v1/guest/chat` tool calls succeed
+- fix: `avatar_control.plan_movement` — bump planner `max_tokens` to 2048 to avoid truncated keyframe JSON; strip Qwen3 `<think>` reasoning blocks before parsing
+- chore: drop `GEMINI_API_KEY` from agent-api env and remove the secret-sync step from the deploy workflow
+
 ## 0.12.0 - 3 April 2026
 
 ### Server

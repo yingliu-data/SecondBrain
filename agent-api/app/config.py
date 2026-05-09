@@ -1,12 +1,6 @@
 import os
 
-# ── LLM Provider (Gemini primary, local fallback) ──
-# Primary: Gemini cloud API (OpenAI-compatible endpoint)
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
-GEMINI_URL = os.environ.get("GEMINI_URL", "https://generativelanguage.googleapis.com/v1beta/openai")
-
-# Fallback: Local llama-server (only used when Gemini quota exhausted)
+# ── LLM Provider (local vLLM only) ──
 LLM_URL = os.environ.get("LLM_URL", "http://secondbrain-llm:8080")
 LLM_MODEL = os.environ.get("LLM_MODEL", "qwen3-14b")
 
