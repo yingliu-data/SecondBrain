@@ -293,6 +293,7 @@ class AvatarControlSkill(BaseSkill):
                 ],
                 tools=None,
                 max_tokens=2048,
+                chat_template_kwargs={"enable_thinking": False},
             )
             raw = resp["choices"][0]["message"].get("content", "")
         except Exception as e:
