@@ -292,7 +292,7 @@ class AvatarControlSkill(BaseSkill):
                     {"role": "user", "content": user_prompt},
                 ],
                 tools=None,
-                max_tokens=2048,
+                max_tokens=6000,
                 chat_template_kwargs={"enable_thinking": False},
             )
             raw = resp["choices"][0]["message"].get("content", "")
