@@ -23,8 +23,8 @@ IndexApp (iPhone)                    SecondBrain (Server, RTX 5080)
 │    Reminders,    │                  │   ├── Native fn calling   │
 │    Contacts,     │                  │   └── LLM provider       │
 │    Clipboard)    │                  │       ↓                   │
-│ • SwiftData      │                  │ llama-server              │
-│   (conversations)│                  │   Qwen3 14B + 0.5B draft │
+│ • SwiftData      │                  │ vLLM                      │
+│   (conversations)│                  │   Qwen3-14B-AWQ           │
 └──────────────────┘                  └──────────────────────────┘
 
 Pose Spatial Studio              SecondBrain (Server)
@@ -39,7 +39,7 @@ Pose Spatial Studio              SecondBrain (Server)
 
 | Layer | Technology |
 |---|---|
-| LLM Inference | llama.cpp (CUDA), Qwen3 14B q4_k_m + 0.5B draft |
+| LLM Inference | vLLM (CUDA), Qwen3-14B-AWQ |
 | Backend | Python 3.12, FastAPI, Uvicorn, SSE-Starlette |
 | iOS Client | Swift, SwiftUI, SwiftData, WhisperKit (STT), ElevenLabs (TTS) |
 | Auth | HMAC-SHA256 + Bearer token + Timestamp verification |
