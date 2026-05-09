@@ -27,8 +27,9 @@ class LLMProvider:
         messages: list,
         tools: list | None = None,
         max_tokens: int | None = None,
+        chat_template_kwargs: dict | None = None,
     ) -> dict:
-        payload = self._build_payload(LLM_MODEL, messages, tools, max_tokens)
+        payload = self._build_payload(LLM_MODEL, messages, tools, max_tokens, chat_template_kwargs)
         local = self._get_local()
 
         last_error: Exception | None = None
@@ -87,6 +88,7 @@ class LLMProvider:
         messages: list,
         tools: list | None,
         max_tokens: int | None,
+        chat_template_kwargs: dict | None,
     ) -> dict:
         payload = {
             "model": model,
@@ -98,6 +100,8 @@ class LLMProvider:
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
+        if chat_template_kwargs:
+            payload["chat_template_kwargs"] = chat_template_kwargs
         return payload
 
     async def health(self) -> dict:

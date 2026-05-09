@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.12.2 - 9 May 2026
+
+### Server
+- feat: bump vLLM `--max-model-len` to 32K (Qwen3-14B native context); drop `--max-num-seqs` to 4 to keep KV-cache pressure manageable on the RTX 5080
+- fix: `avatar_control.plan_movement` — disable Qwen3 thinking on the planner LLM call (`chat_template_kwargs={"enable_thinking": false}`) so the full 2048-token budget is available for keyframe JSON instead of being burned on internal reasoning
+- feat: `LLMProvider.chat_completion` accepts an optional `chat_template_kwargs` to forward Qwen3 chat-template options to vLLM
+
 ## 0.12.1 - 9 May 2026
 
 ### Server
