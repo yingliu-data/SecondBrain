@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.12.3 - 10 May 2026
+
+### Server
+- fix: `avatar_control.plan_movement` planner `max_tokens` 2048 → 6000. With thinking disabled the model emits pure JSON, but full keyframe arrays for multi-step actions like "dance" are ~3-4K tokens (16 joints × 4-8 keyframes); 2048 truncated mid-output. 6000 fits comfortably within the 24K context window.
+
 ## 0.12.2 - 9 May 2026
 
 ### Server
