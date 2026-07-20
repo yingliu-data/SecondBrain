@@ -4,3 +4,4 @@ httpx>=0.28
 sse-starlette>=2.0
 pydantic>=2.0
 ddgs>=9.0
+mcp>=1.9,<2

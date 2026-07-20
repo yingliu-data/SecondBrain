@@ -47,6 +47,22 @@ llm = LLMProvider()
 # Give skills access to LLM (for plan_movement decomposition)
 registry.set_llm_provider(llm)
 
+# Register one proxy skill per configured MCP server. Tool lists are fetched
+# in the background after startup — a down server never blocks boot.
+from app.mcp.proxy_skill import MCPProxySkill
+from app.mcp.ssrf import validate_mcp_url
+
+mcp_proxies: list[MCPProxySkill] = []
+for _cfg in tenant_registry.mcp_server_configs().values():
+    try:
+        validate_mcp_url(_cfg)
+    except ValueError as e:
+        logging.getLogger("mcp").error(f"Skipping MCP server: {e}")
+        continue
+    _proxy = MCPProxySkill(_cfg)
+    registry.register(_proxy)
+    mcp_proxies.append(_proxy)
+
 # Inject dependencies into routes
 chat.set_dependencies(registry, llm)
 guest.set_dependencies(registry, llm)
@@ -68,3 +84,10 @@ from app.auth.guest import guest_manager
 @app.on_event("startup")
 async def _start_guest_cleanup():
     guest_manager.start_cleanup()
+
+
+@app.on_event("startup")
+async def _start_mcp_refresh():
+    import asyncio
+    for proxy in mcp_proxies:
+        asyncio.create_task(proxy.start_background_refresh())
