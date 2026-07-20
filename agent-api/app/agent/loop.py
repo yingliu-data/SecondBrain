@@ -20,24 +20,31 @@ SSE_HEADERS = {
 _AVATAR_TOOLS = {"set_pose", "move_joints", "animate_sequence", "plan_movement"}
 
 
-async def run_agent_loop(message: str, history: list, registry, llm):
+async def run_agent_loop(message: str, history: list, registry, llm, *,
+                         system_prompt: str | None = None,
+                         max_tools: int | None = None,
+                         max_tokens: int | None = None,
+                         allowed_skills: set[str] | None = None):
     """Generator that yields SSE events.
     - registry: routes tool calls to the right skill
-    - llm: LLMProvider instance (local, cloud, or fallback chain)"""
+    - llm: LLMProvider instance (local, cloud, or fallback chain)
+    Tenant overrides default to None = legacy global behavior."""
 
-    system = SYSTEM_PROMPT.format(current_time=datetime.now().isoformat())
+    system = (system_prompt or SYSTEM_PROMPT).format(current_time=datetime.now().isoformat())
+    tool_budget = max_tools or MAX_TOOLS
     history.append({"role": "user", "content": message})
     messages = [{"role": "system", "content": system}] + history[-20:]
 
     # Get tool definitions filtered by query relevance (not all tools)
-    tool_defs = registry.get_tools_for_query(message)
-    server_tools = registry.get_server_tool_names()
-    device_tools = registry.get_device_tool_names()
+    tool_defs = registry.get_tools_for_query(message, allowed_skills)
+    server_tools = registry.get_server_tool_names(allowed_skills)
+    device_tools = registry.get_device_tool_names(allowed_skills)
 
-    for loop_idx in range(MAX_TOOLS):
+    for loop_idx in range(tool_budget):
         # Call LLM via provider abstraction (local → cloud fallback)
         try:
-            resp = await llm.chat_completion(messages, tools=tool_defs or None)
+            resp = await llm.chat_completion(messages, tools=tool_defs or None,
+                                             max_tokens=max_tokens)
         except Exception as e:
             logger.error(f"LLM unavailable after retries: {e}")
             error_msg = "I'm temporarily unable to respond — the server may be restarting. Please try again in a moment."
@@ -64,8 +71,17 @@ async def run_agent_loop(message: str, history: list, registry, llm):
                 logger.info(f"Tool call: {tool_name}({arguments}) [loop {loop_idx+1}]")
 
                 if tool_name in server_tools:
-                    # Server skill — execute via registry
-                    result = await registry.execute_server_tool(tool_name, arguments)
+                    # Server skill — execute via registry. Long-running tools
+                    # (e.g. remote MCP pipelines) run as a task while we emit
+                    # SSE comment keepalives so proxies don't drop the stream.
+                    exec_task = asyncio.ensure_future(
+                        registry.execute_server_tool(tool_name, arguments, allowed_skills))
+                    while True:
+                        done, _ = await asyncio.wait({exec_task}, timeout=15)
+                        if done:
+                            break
+                        yield ": keepalive\n\n"
+                    result = exec_task.result()
 
                     # Emit avatar commands as a separate SSE event so the
                     # frontend can act on them before the LLM text response.
@@ -114,7 +130,7 @@ async def run_agent_loop(message: str, history: list, registry, llm):
         return
     else:
         # Tool loop exhausted without a final text response
-        logger.warning(f"Agent loop exhausted {MAX_TOOLS} tool iterations without final response")
+        logger.warning(f"Agent loop exhausted {tool_budget} tool iterations without final response")
         fallback = "I'm sorry, I wasn't able to complete that request. Please try again."
         history.append({"role": "assistant", "content": fallback})
         yield f"event: token\ndata: {json.dumps({'text': fallback})}\n\n"

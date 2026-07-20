@@ -10,6 +10,11 @@ LLM_TEMPERATURE = float(os.environ.get("LLM_TEMPERATURE", 0.7))
 
 # ── API ──
 API_SECRET_KEY = os.environ["API_SECRET_KEY"]
+TENANTS_FILE = os.environ.get("TENANTS_FILE", "data/tenants.json")
+# Hostnames allowed to resolve to private/loopback addresses for MCP servers
+MCP_ALLOWED_PRIVATE_HOSTS = [
+    h for h in os.environ.get("MCP_ALLOWED_PRIVATE_HOSTS", "host.docker.internal").split(",") if h
+]
 MAX_INPUT = int(os.environ.get("MAX_INPUT_LENGTH", 4096))
 MAX_TOOLS = int(os.environ.get("MAX_TOOL_CALLS_PER_TURN", 5))
 TOOL_TIMEOUT = int(os.environ.get("TOOL_TIMEOUT", 60))        # seconds for device tool response

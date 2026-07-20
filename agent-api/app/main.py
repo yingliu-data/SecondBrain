@@ -3,6 +3,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.skills.registry import SkillRegistry
 from app.agent.llm import LLMProvider
+from app.auth import middleware
+from app.tenants import create_tenant_registry
 from app.routes import chat, tool_result, skills, health, sessions, guest
 
 # ── Logging ──────────────────────────────────────────────────
@@ -18,16 +20,24 @@ logging.getLogger("security").addHandler(sec_handler)
 # ── App ──────────────────────────────────────────────────────
 app = FastAPI()
 
-# CORS — allow guest frontend origins for the unauthenticated avatar endpoint
+# Tenants ("entries"): per-API-key toolset/prompt/origins. Loaded once at
+# startup from data/tenants.json; restart to apply changes.
+tenant_registry = create_tenant_registry()
+middleware.set_tenant_registry(tenant_registry)
+
+# CORS — guest avatar origins plus every tenant's registered origins.
+# The Origin header never grants access by itself: tenant identity always
+# comes from the per-tenant API key (Bearer + HMAC).
+GUEST_ORIGINS = [
+    "https://robot.yingliu.site",
+    "http://localhost:5173",
+    "http://localhost:4173",
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://robot.yingliu.site",
-        "http://localhost:5173",
-        "http://localhost:4173",
-    ],
-    allow_methods=["POST", "OPTIONS"],
-    allow_headers=["Content-Type"],
+    allow_origins=sorted(set(GUEST_ORIGINS) | set(tenant_registry.all_origins())),
+    allow_methods=["POST", "GET", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "X-Timestamp", "X-Signature"],
 )
 
 # Initialize core components
