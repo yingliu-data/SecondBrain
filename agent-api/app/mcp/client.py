@@ -16,6 +16,14 @@ from app.tenants import MCPServerConfig
 logger = logging.getLogger("mcp")
 
 
+def _unwrap(e: BaseException) -> str:
+    """anyio task groups wrap the real failure in ExceptionGroups — surface
+    the first leaf exception so error strings stay readable."""
+    while getattr(e, "exceptions", None):
+        e = e.exceptions[0]
+    return f"{type(e).__name__}: {e}"
+
+
 def _headers(cfg: MCPServerConfig) -> dict | None:
     if cfg.auth_token:
         return {"Authorization": f"Bearer {cfg.auth_token}"}
@@ -52,8 +60,9 @@ async def call_tool(cfg: MCPServerConfig, tool_name: str, arguments: dict) -> st
     except asyncio.TimeoutError:
         return f"Error: tool '{tool_name}' on MCP server '{cfg.name}' timed out after {cfg.timeout_s}s."
     except Exception as e:
-        logger.error(f"MCP call failed [{cfg.name}/{tool_name}]: {e}")
-        return f"Error: MCP server '{cfg.name}' unreachable or failed: {e}"
+        reason = _unwrap(e)
+        logger.error(f"MCP call failed [{cfg.name}/{tool_name}]: {reason}")
+        return f"Error: MCP server '{cfg.name}' unreachable or failed: {reason}"
 
     texts = [c.text for c in result.content if getattr(c, "text", None)]
     text = "\n".join(texts) if texts else "(no text content returned)"

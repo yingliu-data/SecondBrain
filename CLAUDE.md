@@ -29,5 +29,8 @@
 - Agent loop: [agent-api/app/agent/loop.py](agent-api/app/agent/loop.py)
 - Auth middleware: [agent-api/app/auth/middleware.py](agent-api/app/auth/middleware.py)
 - Skills folder: [agent-api/app/skills/](agent-api/app/skills/)
+- Tenants ("entries", per-API-key toolsets): [agent-api/app/tenants/](agent-api/app/tenants/) — config `data/tenants.json` (see [tenants.json.example](agent-api/tenants.json.example)), restart to apply
+- MCP client (remote MCP servers as skills): [agent-api/app/mcp/](agent-api/app/mcp/) — first server: wcc-pipeline `workspace/mcp_server/`
+- Tests: `cd agent-api && pip install -r requirements-dev.txt && pytest`
 - CI/CD: [.github/workflows/deploy_agent_api.yml](.github/workflows/deploy_agent_api.yml)
 - Docker: [docker-compose.yml](docker-compose.yml)

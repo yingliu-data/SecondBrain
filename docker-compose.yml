@@ -63,11 +63,13 @@ services:
       - RATE_LIMIT_PER_MINUTE=30
     volumes:
       - agent-api-code:/root/agent-api          # Code volume (populated by CI)
-      - ./agent-api/data:/root/agent-api/data   # Persistent data (logs, db)
+      - ./agent-api/data:/root/agent-api/data   # Persistent data (logs, db, tenants.json)
       - /var/run/docker.sock:/var/run/docker.sock  # Auto-start local LLM on fallback
     networks:
       - llm_internal
       - tunnel_network
+    extra_hosts:
+      - "host.docker.internal:host-gateway"     # Reach host-run MCP servers (e.g. wcc)
     # Local LLM (vLLM) is the only provider. Start it with:
     #   docker compose --profile local-llm up -d llm
     # agent-api will auto-start it via the docker.sock mount if it goes down.
