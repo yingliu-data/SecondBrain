@@ -1,4 +1,23 @@
 from abc import ABC, abstractmethod
+from contextvars import ContextVar
+
+# Per-request context so skills (e.g. remember) can find the active session
+# and user without racing on shared singleton state. Set by routes/chat.py.
+_current_session: ContextVar = ContextVar("current_session", default=None)
+_current_user_id: ContextVar = ContextVar("current_user_id", default="")
+
+
+def set_current_context(session, user_id: str):
+    _current_session.set(session)
+    _current_user_id.set(user_id)
+
+
+def get_current_session():
+    return _current_session.get()
+
+
+def get_current_user_id() -> str:
+    return _current_user_id.get()
 
 
 class BaseSkill(ABC):

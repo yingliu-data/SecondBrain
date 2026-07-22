@@ -10,13 +10,20 @@ LLM_TEMPERATURE = float(os.environ.get("LLM_TEMPERATURE", 0.7))
 
 # ── API ──
 API_SECRET_KEY = os.environ["API_SECRET_KEY"]
+TENANTS_FILE = os.environ.get("TENANTS_FILE", "data/tenants.json")
+# Hostnames allowed to resolve to private/loopback addresses for MCP servers
+MCP_ALLOWED_PRIVATE_HOSTS = [
+    h for h in os.environ.get("MCP_ALLOWED_PRIVATE_HOSTS", "host.docker.internal").split(",") if h
+]
 MAX_INPUT = int(os.environ.get("MAX_INPUT_LENGTH", 4096))
 MAX_TOOLS = int(os.environ.get("MAX_TOOL_CALLS_PER_TURN", 5))
 TOOL_TIMEOUT = int(os.environ.get("TOOL_TIMEOUT", 60))        # seconds for device tool response
 
 # ── Session Store (swap backend without touching agent code) ──
-SESSION_BACKEND = os.environ.get("SESSION_BACKEND", "sqlite")  # "memory" | "sqlite" | "redis"
+SESSION_BACKEND = os.environ.get("SESSION_BACKEND", "dir")  # "dir" | "sqlite" | "memory"
 SESSION_DB_PATH = os.environ.get("SESSION_DB_PATH", "data/conversations.db")
+SESSIONS_ROOT = os.environ.get("SESSIONS_ROOT", "data/sessions")   # dir backend
+USERS_ROOT = os.environ.get("USERS_ROOT", "data/users")            # user-scope memory/profile
 
 SYSTEM_PROMPT = """You are a personal AI assistant running on the user's private server.
 You have tools that execute on the user's iPhone (calendar, reminders, contacts, clipboard)
