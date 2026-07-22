@@ -66,8 +66,9 @@ services:
     networks:
       - llm_internal
       - tunnel_network
+      - agent-net                               # Shared with wcc-mcp container: http://wcc-mcp:8765
     extra_hosts:
-      - "host.docker.internal:host-gateway"     # Reach host-run MCP servers (e.g. wcc)
+      - "host.docker.internal:host-gateway"     # Reach host-run MCP servers
     # Local LLM (vLLM) is the only provider. Start it with:
     #   docker compose --profile local-llm up -d llm
     # agent-api will auto-start it via the docker.sock mount if it goes down.
@@ -110,3 +111,5 @@ networks:
     internal: true    # No internet access for LLM
   tunnel_network:
     driver: bridge
+  agent-net:
+    external: true    # Created once on the VM (docker network create agent-net); wcc-mcp joins it too
