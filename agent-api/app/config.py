@@ -8,6 +8,11 @@ LLM_TIMEOUT = int(os.environ.get("LLM_TIMEOUT", 120))         # seconds
 LLM_MAX_TOKENS = int(os.environ.get("LLM_MAX_TOKENS", 512))
 LLM_TEMPERATURE = float(os.environ.get("LLM_TEMPERATURE", 0.7))
 
+# Qwen3 thinking during agent-loop turns. With realistic tool sets (10+ real
+# schemas) thinking mode reliably describes tools instead of calling them,
+# so it is off by default (same reason avatar_control's planner disables it).
+LLM_ENABLE_THINKING = os.environ.get("LLM_ENABLE_THINKING", "false").lower() in ("1", "true", "yes")
+
 # ── API ──
 API_SECRET_KEY = os.environ["API_SECRET_KEY"]
 TENANTS_FILE = os.environ.get("TENANTS_FILE", "data/tenants.json")
