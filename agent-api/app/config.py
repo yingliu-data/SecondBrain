@@ -20,8 +20,10 @@ MAX_TOOLS = int(os.environ.get("MAX_TOOL_CALLS_PER_TURN", 5))
 TOOL_TIMEOUT = int(os.environ.get("TOOL_TIMEOUT", 60))        # seconds for device tool response
 
 # ── Session Store (swap backend without touching agent code) ──
-SESSION_BACKEND = os.environ.get("SESSION_BACKEND", "sqlite")  # "memory" | "sqlite" | "redis"
+SESSION_BACKEND = os.environ.get("SESSION_BACKEND", "dir")  # "dir" | "sqlite" | "memory"
 SESSION_DB_PATH = os.environ.get("SESSION_DB_PATH", "data/conversations.db")
+SESSIONS_ROOT = os.environ.get("SESSIONS_ROOT", "data/sessions")   # dir backend
+USERS_ROOT = os.environ.get("USERS_ROOT", "data/users")            # user-scope memory/profile
 
 SYSTEM_PROMPT = """You are a personal AI assistant running on the user's private server.
 You have tools that execute on the user's iPhone (calendar, reminders, contacts, clipboard)

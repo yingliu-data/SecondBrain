@@ -19,8 +19,15 @@ class MCPServerConfig(BaseModel):
 
 
 class Tenant(BaseModel):
-    """One entry: an API key bound to origins, a prompt, and a toolset."""
+    """One entry: an API key bound to origins, a prompt, and a toolset.
+
+    `user` is the person owning this entry — several tenants may share one
+    user. Sessions/traces are stored per tenant under the user's directory;
+    user-scope memory is shared across the user's tenants. Defaults to the
+    tenant name, so single-tenant users need not set it.
+    """
     name: str
+    user: str = ""
     api_key: str
     origins: list[str] = []
     system_prompt: str | None = None      # None -> global SYSTEM_PROMPT
@@ -36,6 +43,15 @@ class Tenant(BaseModel):
         if ":" in v or not v:
             raise ValueError("tenant name must be non-empty and must not contain ':'")
         return v
+
+    def model_post_init(self, __context) -> None:
+        if not self.user:
+            self.user = self.name
+        from app.session.ids import is_safe_id
+        if not is_safe_id(self.user) or not is_safe_id(self.name):
+            raise ValueError(
+                f"tenant name/user must be filesystem-safe [A-Za-z0-9_-]: "
+                f"name={self.name!r} user={self.user!r}")
 
     def session_key(self, session_id: str) -> str:
         """Store key for this tenant. The default tenant keeps raw keys so

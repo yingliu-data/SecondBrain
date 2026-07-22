@@ -29,6 +29,29 @@ def test_named_tenant_scoping(tenant_registry):
     assert wcc.max_tools == 2
 
 
+def test_user_defaults_to_tenant_name(tenant_registry):
+    wcc = tenant_registry.get_by_api_key("wcc-key")
+    assert wcc.user == "wcc-events"  # no explicit user in conftest doc
+    default = tenant_registry.get_by_api_key("test-default-key")
+    assert default.user == "default"
+
+
+def test_explicit_shared_user(tmp_path):
+    doc = {"tenants": [
+        {"name": "a", "user": "shared", "api_key": "ka"},
+        {"name": "b", "user": "shared", "api_key": "kb"},
+    ]}
+    reg = TenantRegistry(_write(tmp_path, doc), "k")
+    assert reg.get_by_api_key("ka").user == "shared"
+    assert reg.get_by_api_key("kb").user == "shared"
+
+
+def test_unsafe_user_rejected(tmp_path):
+    doc = {"tenants": [{"name": "a", "user": "../evil", "api_key": "x"}]}
+    with pytest.raises(Exception):
+        TenantRegistry(_write(tmp_path, doc), "k")
+
+
 def test_origins_union(tenant_registry):
     assert tenant_registry.all_origins() == ["https://wcc-example-mcp.net"]
 
