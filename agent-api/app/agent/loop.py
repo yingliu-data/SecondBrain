@@ -1,6 +1,6 @@
 import json, asyncio, time, logging
 from datetime import datetime
-from app.config import MAX_TOOLS, SYSTEM_PROMPT, TOOL_TIMEOUT
+from app.config import LLM_ENABLE_THINKING, MAX_TOOLS, SYSTEM_PROMPT, TOOL_TIMEOUT
 from app.agent.sanitize import sanitize
 
 logger = logging.getLogger("agent")
@@ -54,8 +54,11 @@ async def run_agent_loop(message: str, history: list, registry, llm, *,
     for loop_idx in range(tool_budget):
         # Call LLM via provider abstraction (local → cloud fallback)
         try:
-            resp = await llm.chat_completion(messages, tools=tool_defs or None,
-                                             max_tokens=max_tokens)
+            resp = await llm.chat_completion(
+                messages, tools=tool_defs or None, max_tokens=max_tokens,
+                chat_template_kwargs=(
+                    None if LLM_ENABLE_THINKING else {"enable_thinking": False}),
+            )
         except Exception as e:
             logger.error(f"LLM unavailable after retries: {e}")
             trace("llm_error", {"error": str(e)[:500]})
