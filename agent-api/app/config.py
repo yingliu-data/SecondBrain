@@ -21,7 +21,7 @@ MCP_ALLOWED_PRIVATE_HOSTS = [
     h for h in os.environ.get("MCP_ALLOWED_PRIVATE_HOSTS", "host.docker.internal").split(",") if h
 ]
 MAX_INPUT = int(os.environ.get("MAX_INPUT_LENGTH", 4096))
-MAX_TOOLS = int(os.environ.get("MAX_TOOL_CALLS_PER_TURN", 5))
+MAX_TOOLS = int(os.environ.get("MAX_TOOL_CALLS_PER_TURN", 10))
 TOOL_TIMEOUT = int(os.environ.get("TOOL_TIMEOUT", 60))        # seconds for device tool response
 
 # ── Session Store (swap backend without touching agent code) ──

@@ -57,7 +57,7 @@ services:
       - API_SECRET_KEY=${API_SECRET_KEY}
       - SESSION_SECRET=${SESSION_SECRET}
       - LOG_LEVEL=warning
-      - MAX_TOOL_CALLS_PER_TURN=5
+      - MAX_TOOL_CALLS_PER_TURN=10
       - MAX_INPUT_LENGTH=4096
       - RATE_LIMIT_PER_MINUTE=30
     volumes:
