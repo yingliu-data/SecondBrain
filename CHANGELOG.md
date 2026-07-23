@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.12.4 - 23 July 2026
+
+### Server
+- feat: agent loop always ends the turn with a real outcome message. On tool-budget exhaustion it makes one final no-tools LLM call summarizing success/failure from the tool results (deterministic "Tools run: …" line as fallback); mid-loop LLM failures now report which tools already ran; an empty final LLM reply no longer results in a blank response to the client
+
 ## 0.12.3 - 10 May 2026
 
 ### Server

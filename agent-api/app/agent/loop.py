@@ -20,6 +20,16 @@ SSE_HEADERS = {
 _AVATAR_TOOLS = {"set_pose", "move_joints", "animate_sequence", "plan_movement"}
 
 
+def _tool_outcome_line(tool_runs: list[dict]) -> str:
+    """One-line deterministic summary of tool outcomes, used when the LLM
+    can't produce a final answer itself. Plain words (no symbols) so TTS
+    reads it cleanly."""
+    if not tool_runs:
+        return "No tools were run."
+    parts = [f"{r['name']} ({'ok' if r['ok'] else 'failed'})" for r in tool_runs]
+    return "Tools run: " + ", ".join(parts) + "."
+
+
 async def run_agent_loop(message: str, history: list, registry, llm, *,
                          system_prompt: str | None = None,
                          max_tools: int | None = None,
@@ -50,6 +60,7 @@ async def run_agent_loop(message: str, history: list, registry, llm, *,
     tool_defs = registry.get_tools_for_query(message, allowed_skills)
     server_tools = registry.get_server_tool_names(allowed_skills)
     device_tools = registry.get_device_tool_names(allowed_skills)
+    tool_runs: list[dict] = []  # [{name, ok}] for end-of-turn outcome summaries
 
     for loop_idx in range(tool_budget):
         # Call LLM via provider abstraction (local → cloud fallback)
@@ -63,6 +74,10 @@ async def run_agent_loop(message: str, history: list, registry, llm, *,
             logger.error(f"LLM unavailable after retries: {e}")
             trace("llm_error", {"error": str(e)[:500]})
             error_msg = "I'm temporarily unable to respond — the server may be restarting. Please try again in a moment."
+            if tool_runs:
+                error_msg = ("I ran into a problem before finishing. "
+                             + _tool_outcome_line(tool_runs)
+                             + " Please try again in a moment.")
             history.append({"role": "assistant", "content": error_msg})
             yield f"event: token\ndata: {json.dumps({'text': error_msg})}\n\n"
             yield "event: done\ndata: {}\n\n"
@@ -136,6 +151,8 @@ async def run_agent_loop(message: str, history: list, registry, llm, *,
                     result = f"Error: Unknown tool '{tool_name}'. Available: {', '.join(all_tools)}"
 
                 result = sanitize(result)
+                tool_runs.append({"name": tool_name,
+                                  "ok": not result.startswith("Error")})
                 trace("tool_result",
                       {"name": tool_name, "result": result[:2000]},
                       duration_ms=int((time.monotonic() - tool_started) * 1000))
@@ -143,18 +160,48 @@ async def run_agent_loop(message: str, history: list, registry, llm, *,
             continue
 
         # ── Final text response ─────────────────────────
-        text = assistant_msg.get("content", "")
-        trace("assistant_response", {"chars": len(text or ""), "loops": loop_idx + 1})
+        text = (assistant_msg.get("content") or "").strip()
+        if not text:
+            logger.warning("LLM returned empty final content")
+            text = ("I finished but couldn't produce an answer. "
+                    + _tool_outcome_line(tool_runs))
+        trace("assistant_response", {"chars": len(text), "loops": loop_idx + 1})
         history.append({"role": "assistant", "content": text})
         for word in text.split(" "):
             yield f"event: token\ndata: {json.dumps({'text': word + ' '})}\n\n"
         yield "event: done\ndata: {}\n\n"
         return
     else:
-        # Tool loop exhausted without a final text response
+        # Tool loop exhausted without a final text response. Make one last
+        # no-tools LLM call so the user still gets a real outcome summary
+        # (success or failure) built from the tool results above.
         logger.warning(f"Agent loop exhausted {tool_budget} tool iterations without final response")
         trace("loop_exhausted", {"budget": tool_budget})
-        fallback = "I'm sorry, I wasn't able to complete that request. Please try again."
-        history.append({"role": "assistant", "content": fallback})
-        yield f"event: token\ndata: {json.dumps({'text': fallback})}\n\n"
+        text = ""
+        try:
+            messages.append({
+                "role": "user",
+                "content": (
+                    "[SYSTEM NOTE] The tool budget is exhausted; no more tool "
+                    "calls are possible. Tell the user whether their request "
+                    "succeeded or failed, with a one-to-two sentence summary "
+                    "of the tool results above."),
+            })
+            resp = await llm.chat_completion(
+                messages, max_tokens=max_tokens,
+                chat_template_kwargs=(
+                    None if LLM_ENABLE_THINKING else {"enable_thinking": False}),
+            )
+            text = (resp["choices"][0]["message"].get("content") or "").strip()
+        except Exception as e:
+            logger.error(f"Wrap-up summary LLM call failed: {e}")
+            trace("llm_error", {"error": str(e)[:500], "stage": "wrap_up"})
+        if not text:
+            text = ("I wasn't able to complete that request. "
+                    + _tool_outcome_line(tool_runs))
+        trace("assistant_response", {"chars": len(text), "loops": tool_budget,
+                                     "wrap_up": True})
+        history.append({"role": "assistant", "content": text})
+        for word in text.split(" "):
+            yield f"event: token\ndata: {json.dumps({'text': word + ' '})}\n\n"
         yield "event: done\ndata: {}\n\n"
