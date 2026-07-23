@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.12.5 - 23 July 2026
+
+### Server
+- feat: traceable session ids — `make_session_id()` now yields `sess_2026-07-23_140905_a1b2` (UTC date-time + short suffix) instead of an opaque hex string
+- feat: raise tool budget to 10 everywhere — `MAX_TOOLS` default, `MAX_TOOL_CALLS_PER_TURN` in docker-compose, and all tenants in `tenants.json.example` (deployed `data/tenants.json` must be updated manually on the server)
+
 ## 0.12.4 - 23 July 2026
 
 ### Server
