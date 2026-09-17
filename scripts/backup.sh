@@ -19,7 +19,8 @@
 # RESTIC_PASSWORD_FILE in the environment or in /etc/secondbrain-backup.env.
 set -euo pipefail
 
-DATA_DIR="${SECONDBRAIN_DATA:-$HOME/SecondBrain/agent-api/data}"
+# Matches the deploy layout in .github/workflows/deploy_agent_api.yml (~/data/...).
+DATA_DIR="${SECONDBRAIN_DATA:-$HOME/data/SecondBrain/agent-api/data}"
 RESTIC_REPOSITORY="${RESTIC_REPOSITORY:-}"
 RESTIC_PASSWORD_FILE="${RESTIC_PASSWORD_FILE:-/etc/secondbrain-restic.pass}"
 RETENTION_DAILY="${RETENTION_DAILY:-7}"
@@ -103,8 +104,8 @@ verify() {
 }
 
 case "${1:-backup}" in
-  backup)  backup ;;
-  verify)  verify ;;
+  backup|--backup)  backup ;;
+  verify|--verify)  verify ;;
   restore) preflight; shift; restic restore "${1:-latest}" --target "${2:?usage: restore <snapshot|latest> <target-dir>}" ;;
   *) echo "usage: $0 {backup|verify|restore <snapshot> <target>}" >&2; exit 2 ;;
 esac

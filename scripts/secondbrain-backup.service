@@ -5,7 +5,12 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-EnvironmentFile=/etc/secondbrain-backup.env
+# REQUIRED: set this to the account that owns ~/data/SecondBrain. Left as root,
+# DATA_DIR resolves under /root where the repo does not live and preflight dies.
+User=CHANGEME
+# Leading '-' so a missing file does not block the unit: the script also accepts
+# RESTIC_REPOSITORY / RESTIC_PASSWORD_FILE straight from the environment.
+EnvironmentFile=-/etc/secondbrain-backup.env
 ExecStart=/usr/local/bin/secondbrain-backup backup
 # Verify weekly rather than nightly: a restore drill is expensive but a backup
 # nobody has restored is theatre.

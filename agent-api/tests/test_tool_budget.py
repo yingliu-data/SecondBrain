@@ -256,7 +256,9 @@ def test_new_name_wins_when_both_are_set():
 
 def test_rounds_and_context_ceilings_are_independent():
     from app import config
-    assert config.MAX_TOOL_ROUNDS != config.MAX_TOOLS_IN_CONTEXT or True
-    # The point is that both exist and are separately settable.
+    # (An earlier version asserted `A != B or True`, which is `assert True`.
+    # Both default to 10, so inequality is the wrong property to assert --
+    # separate SETTABILITY is the point.)
     assert isinstance(config.MAX_TOOLS_IN_CONTEXT, int)
+    assert isinstance(config.MAX_TOOL_ROUNDS, int)
     assert config.MAX_TOOLS == config.MAX_TOOL_ROUNDS, "deprecated alias must track rounds"

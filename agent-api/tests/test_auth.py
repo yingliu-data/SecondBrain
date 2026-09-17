@@ -50,11 +50,12 @@ def signed_headers_v2(
     method: str = "POST",
     path: str = "/probe",
     ts: int | None = None,
+    query: str = "",
 ) -> dict:
-    """v2 signing: HMAC over method + "\n" + path + "\n" + ts + "\n" + body."""
+    """v2 signing: METHOD \n PATH \n QUERY \n TS \n + raw body bytes."""
     ts = ts if ts is not None else int(time.time())
     raw = body.encode() if isinstance(body, str) else body
-    msg = f"{method}\n{path}\n{ts}\n".encode() + raw
+    msg = f"{method}\n{path}\n{query}\n{ts}\n".encode() + raw
     sig = hmac.new(key.encode(), msg, hashlib.sha256).hexdigest()
     return {
         "Authorization": f"Bearer {key}",
@@ -205,3 +206,23 @@ def test_non_utf8_body_signed_correctly_authenticates(tenant_registry):
         headers=signed_headers_v2("wcc-key", NON_UTF8, "POST", "/probe"),
     )
     assert r2.status_code == 200
+
+
+# ── Review F9(b): the query string must be covered ───────────────────────
+# Without it, ?limit=200 and ?limit=999999 share a signature. The session and
+# trace routes take exactly those parameters, so an attacker who captured one
+# signed request could widen its result set arbitrarily within the 300s window.
+
+def test_v2_signature_covers_the_query_string(tenant_registry):
+    client = make_app(tenant_registry)
+    ts = int(time.time())
+    h = signed_headers_v2("wcc-key", BODY, path="/probe", query="limit=1", ts=ts)
+    assert client.post("/probe?limit=1", content=BODY, headers=h).status_code == 200
+    # Same signature, different query -> must be rejected.
+    assert client.post("/probe?limit=999999", content=BODY, headers=h).status_code == 401
+
+
+def test_v2_signature_with_no_query_still_works(tenant_registry):
+    client = make_app(tenant_registry)
+    h = signed_headers_v2("wcc-key", BODY, path="/probe")
+    assert client.post("/probe", content=BODY, headers=h).status_code == 200

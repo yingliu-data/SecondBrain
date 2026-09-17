@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["httpx>=0.28", "pyjwt[crypto]>=2.8"]
+# dependencies = ["httpx[http2]>=0.28", "pyjwt[crypto]>=2.8"]
 # ///
 """PW-4 — THROWAWAY SPIKE. Delete this directory when the experiment ends.
 

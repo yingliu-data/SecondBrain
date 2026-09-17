@@ -1,12 +1,18 @@
 """Guest session management — unauthenticated, rate-limited, skill-restricted.
 
 Client IP resolution
---------------------
-``client_ip()`` trusts forwarding headers rather than the socket peer, because
-in production every request reaches this app through the pose-spatial-studio
-proxy and the Cloudflare tunnel — ``request.client.host`` is therefore the
-proxy's address for every visitor on earth, which would collapse the per-IP
-rate limit into a single global bucket.
+-------------------
+CF-Connecting-IP is set by Cloudflare's edge and cannot be forged past it.
+
+X-Forwarded-For is a WEAKER signal and the fallback is best-effort only:
+Cloudflare APPENDS to a client-supplied X-Forwarded-For rather than replacing
+it, so the first entry can be attacker-chosen even through the edge. Reading
+the last entry instead is NOT the fix -- behind this proxy chain
+(pose-spatial-studio -> cloudflared -> app) the last hop is the tunnel, which
+would key every visitor into one bucket again, which is the bug this function
+was written to fix. The fallback is acceptable only because CF-Connecting-IP
+is checked first and is present in this deployment; if that ever stops being
+true, per-IP limiting degrades to best-effort and this needs revisiting.
 
 This is only trustworthy because the edge rewrites the header: Cloudflare
 *overwrites* ``CF-Connecting-IP`` on every request it forwards, so a browser

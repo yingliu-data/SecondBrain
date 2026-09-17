@@ -275,3 +275,38 @@ async def test_wellformed_arguments_still_execute():
     reg, llm = ArgRecordingRegistry(), TwoStepLLM('{"title": "Dentist"}')
     await collect(run_agent_loop("book it", [], reg, llm))
     assert reg.calls == [("create_calendar_event", {"title": "Dentist"})]
+
+
+# ── Review F2/F13: falsy and dict-shaped arguments ───────────────────────
+# A previous version read `tc["function"].get("arguments") or "{}"`, which
+# short-circuits on EVERY falsy value -- "", None and an absent key all became
+# "{}", parsed cleanly, and executed the tool with no arguments. That is the
+# precise failure the guard exists to prevent. Separately, json.loads() on an
+# already-parsed dict raises TypeError, not ValueError, so it escaped the
+# except clause and killed the SSE stream with no terminating event.
+
+@pytest.mark.parametrize("raw_args", ["", None, "__ABSENT__", {"title": "Dentist"}])
+async def test_falsy_and_dict_arguments_never_execute_the_tool(raw_args):
+    from app.agent.loop import run_agent_loop
+
+    reg, llm = ArgRecordingRegistry(), TwoStepLLM(raw_args)
+    if raw_args == "__ABSENT__":
+        # An arguments key that is missing entirely.
+        original = llm.chat_completion
+
+        async def absent(messages, **kwargs):
+            r = await original(messages, **kwargs)
+            tcs = r["choices"][0]["message"].get("tool_calls")
+            if tcs:
+                tcs[0]["function"].pop("arguments", None)
+            return r
+
+        llm.chat_completion = absent
+
+    events = await collect(run_agent_loop("book it", [], reg, llm))
+
+    assert reg.calls == [], (
+        f"tool executed as {reg.calls!r} for arguments={raw_args!r} -- "
+        f"an argument-less side effect")
+    assert any("event: done" in e for e in events), (
+        "stream ended with no done event -- an uncaught exception escaped the generator")

@@ -43,9 +43,20 @@ def _expected_v1(key: str, ts: str, body: bytes) -> str:
     return hmac.new(key.encode(), ts.encode() + body, hashlib.sha256).hexdigest()
 
 
-def _expected_v2(key: str, method: str, path: str, ts: str, body: bytes) -> str:
-    """Current scheme: signature is bound to the method and path as well."""
-    prefix = f"{method}\n{path}\n{ts}\n".encode()
+def _expected_v2(key: str, method: str, path: str, query: str, ts: str,
+                 body: bytes) -> str:
+    """Current scheme: signature is bound to method, path and query too.
+
+    Canonical signing string, for whoever implements the client:
+
+        METHOD \n PATH \n QUERY \n TIMESTAMP \n  +  raw body bytes
+
+    PATH is the ASGI-decoded path (percent-escapes already resolved) and QUERY
+    is the raw query string without the leading "?", empty when there is none.
+    Without QUERY, ?limit=200 and ?limit=999999 share a signature -- the
+    session/trace routes take exactly those parameters.
+    """
+    prefix = f"{method}\n{path}\n{query}\n{ts}\n".encode()
     return hmac.new(key.encode(), prefix + body, hashlib.sha256).hexdigest()
 
 
@@ -53,7 +64,8 @@ def _signature_ok(request: Request, tenant: Tenant, ts: str, body: bytes, sig: s
     version = request.headers.get("X-Sig-Version", "1") or "1"
     if version == "2":
         expected = _expected_v2(
-            tenant.api_key, request.method, request.url.path, ts, body
+            tenant.api_key, request.method, request.url.path,
+            request.url.query, ts, body
         )
         return hmac.compare_digest(sig, expected)
     if version == "1":

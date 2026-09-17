@@ -165,13 +165,19 @@ async def run_agent_loop(message: str, history: list, registry, llm, *,
                 # partial argument JSON, so this is reachable in normal operation,
                 # and a silently argument-less side effect is worse than a failed
                 # one. The model sees the error and can re-issue the call.
-                raw_args = tc["function"].get("arguments") or "{}"
+                # No `or "{}"` fallback: that short-circuits on every falsy value,
+                # so "", None and an absent key would all parse cleanly and execute
+                # the tool with no arguments -- the exact failure this guard exists
+                # to stop. TypeError covers an already-parsed dict, which json.loads
+                # rejects with TypeError rather than ValueError. (JSONDecodeError is
+                # a ValueError subclass, so naming it here would be redundant.)
+                raw_args = tc["function"].get("arguments", "")
                 try:
                     arguments = json.loads(raw_args)
                     if not isinstance(arguments, dict):
                         raise ValueError(
                             f"expected a JSON object, got {type(arguments).__name__}")
-                except (json.JSONDecodeError, ValueError) as e:
+                except (TypeError, ValueError) as e:
                     result = (f"Error: arguments for '{tool_name}' were not valid JSON "
                               f"({e}). The tool was NOT run. Re-issue the call with "
                               f"well-formed arguments.")
