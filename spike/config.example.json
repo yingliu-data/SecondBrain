@@ -1,0 +1,14 @@
+{
+  "_comment": "cp to config.json (gitignored) and fill in. Throwaway — do not reuse these creds in the real Phase 2/3 build.",
+  "origin_crs": "WOK",
+  "origin_name": "Woking",
+  "destination_crs": "WAT",
+  "destination_name": "Waterloo",
+  "darwin_api_key": "<Rail Data Marketplace consumer key — REST product, not SOAP>",
+  "apns_key_file": "/etc/secondbrain/AuthKey_XXXXXXXXXX.p8",
+  "apns_key_id": "<10-char key id>",
+  "apns_team_id": "<10-char team id>",
+  "bundle_id": "<your IndexApp bundle id>",
+  "device_token": "<64-hex device token IndexApp registers>",
+  "apns_sandbox": true
+}

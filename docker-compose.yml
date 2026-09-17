@@ -57,7 +57,11 @@ services:
       - API_SECRET_KEY=${API_SECRET_KEY}
       - SESSION_SECRET=${SESSION_SECRET}
       - LOG_LEVEL=warning
-      - MAX_TOOL_CALLS_PER_TURN=10
+      # Agent-loop iterations per turn (SYSTEM_DESIGN 8.3 suggests 3 for voice).
+      - MAX_TOOL_ROUNDS=10
+      # Tool schemas offered to the model at once. Separate ceiling: past ~10
+      # Qwen3-14B's selection accuracy degrades. Enforced once P2-0 lands.
+      - MAX_TOOLS_IN_CONTEXT=10
       - MAX_INPUT_LENGTH=4096
       - RATE_LIMIT_PER_MINUTE=30
     volumes:

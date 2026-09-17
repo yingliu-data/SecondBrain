@@ -1,4 +1,6 @@
 import logging
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.skills.registry import SkillRegistry
@@ -12,8 +14,12 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
 )
-# Security events to file
-sec_handler = logging.FileHandler("data/security.log")
+# Security events to file. Rotating, not plain: every failed unauthenticated
+# request appends here and the endpoint is internet-reachable, so an unbounded
+# handler is a remote disk-fill vector.
+Path("data").mkdir(parents=True, exist_ok=True)
+sec_handler = RotatingFileHandler(
+    "data/security.log", maxBytes=10_000_000, backupCount=5)
 sec_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
 logging.getLogger("security").addHandler(sec_handler)
 
@@ -37,7 +43,10 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=sorted(set(GUEST_ORIGINS) | set(tenant_registry.all_origins())),
     allow_methods=["POST", "GET", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization", "X-Timestamp", "X-Signature"],
+    # X-Sig-Version selects the request-signing scheme (see auth/middleware.py).
+    # Omitting it here would fail CORS preflight for any browser client on v2.
+    allow_headers=["Content-Type", "Authorization", "X-Timestamp", "X-Signature",
+                   "X-Sig-Version"],
 )
 
 # Initialize core components

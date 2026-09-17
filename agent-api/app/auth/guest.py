@@ -1,9 +1,28 @@
-"""Guest session management — unauthenticated, rate-limited, skill-restricted."""
+"""Guest session management — unauthenticated, rate-limited, skill-restricted.
+
+Client IP resolution
+--------------------
+``client_ip()`` trusts forwarding headers rather than the socket peer, because
+in production every request reaches this app through the pose-spatial-studio
+proxy and the Cloudflare tunnel — ``request.client.host`` is therefore the
+proxy's address for every visitor on earth, which would collapse the per-IP
+rate limit into a single global bucket.
+
+This is only trustworthy because the edge rewrites the header: Cloudflare
+*overwrites* ``CF-Connecting-IP`` on every request it forwards, so a browser
+cannot forge it past their edge. An attacker able to reach the origin directly
+could forge both ``CF-Connecting-IP`` and ``X-Forwarded-For`` and evade the
+rate limit. That is accepted here: the origin is not directly reachable (it is
+exposed only through the Cloudflare tunnel), and these limits protect a public
+demo, not authenticated data.
+"""
 
 import asyncio
 import logging
 import time
 from collections import defaultdict
+
+from fastapi import Request
 
 logger = logging.getLogger("guest")
 
@@ -55,6 +74,32 @@ ALLOWED_ORIGINS = {
     "http://localhost:5173",
     "http://localhost:4173",
 }
+
+
+def client_ip(request: Request) -> str:
+    """Resolve the real client IP behind the proxy + Cloudflare tunnel.
+
+    Precedence:
+      1. ``CF-Connecting-IP`` — set (and overwritten) by the Cloudflare edge.
+      2. ``X-Forwarded-For`` — first entry, i.e. the original client.
+      3. ``request.client.host`` — direct connection / local development.
+      4. ``"unknown"`` — nothing usable available.
+
+    See the module docstring for the trust assumptions behind 1 and 2.
+    """
+    cf = request.headers.get("cf-connecting-ip", "").strip()
+    if cf:
+        return cf
+
+    forwarded = request.headers.get("x-forwarded-for", "")
+    first_hop = forwarded.split(",")[0].strip()
+    if first_hop:
+        return first_hop
+
+    if request.client and request.client.host:
+        return request.client.host
+
+    return "unknown"
 
 
 class GuestSession:

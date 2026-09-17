@@ -35,7 +35,9 @@ jobs:
       - name: Run tests
         working-directory: agent-api
         env:
-          API_SECRET_KEY: ci-test
+          # Must be >= 32 chars: app/config.py:require_strong_secret rejects
+          # short keys, so the previous 'ci-test' would fail every CI run.
+          API_SECRET_KEY: ci-dummy-not-a-real-secret-0000000000000000
         run: |
           uv sync --frozen
           uv run --frozen pytest -q

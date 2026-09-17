@@ -5,6 +5,19 @@ from .base import BaseSkill
 logger = logging.getLogger("skills")
 SKILLS_STATE_FILE = Path("data/skills.json")
 
+# Skills whose runtime dependency is not shipped in the deployed image. Their
+# tools would occupy the (small) tool budget while being unable to execute, so
+# they start disabled. See ANALYSIS.md 1.2 and SYSTEM_DESIGN.md 8.3
+# (max_tools_in_context = 10; Qwen3-14B degrades past roughly 10-15 tools).
+#   email       docker-compose.yml passes no EMAIL_* vars (no env_file:), so
+#               EMAIL_ACCOUNTS is always [] and every tool is a dead end.
+#   github_cli  `gh` is never installed into the python:3.12-slim base image.
+#   gitlab_cli  `glab` likewise.
+# This is a DEFAULT only: an explicit entry in data/skills.json (i.e. a prior
+# PATCH /api/v1/skills/{name}) always wins, so each skill is re-enablable the
+# moment its dependency actually ships. The packages stay in the tree.
+DEFAULT_DISABLED = frozenset({"email", "github_cli", "gitlab_cli"})
+
 
 class SkillRegistry:
     """Discovers skills from the skills/ folder, manages enabled/disabled state."""
@@ -44,7 +57,9 @@ class SkillRegistry:
                         skill = obj()
                         self._skills[skill.name] = skill
                         if skill.name not in self._enabled:
-                            self._enabled[skill.name] = True  # enabled by default
+                            # Enabled by default, except skills whose deps the
+                            # deployed image does not ship (DEFAULT_DISABLED).
+                            self._enabled[skill.name] = skill.name not in DEFAULT_DISABLED
                         logger.info(f"Discovered skill: {skill.name} v{skill.version} ({skill.execution_side})")
             except Exception as e:
                 logger.error(f"Failed to load skill '{modname}': {e}")

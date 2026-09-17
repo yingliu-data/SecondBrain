@@ -81,7 +81,7 @@ async def _dir_turn(tenant: Tenant, session_id: str, message: str):
             async for event in run_agent_loop(
                 message, turn_history, _registry, _llm,
                 system_prompt=system,
-                max_tools=tenant.max_tools,
+                max_tools=tenant.max_tool_rounds,
                 max_tokens=tenant.max_tokens,
                 allowed_skills=tenant.allowed_skill_names(),
                 trace=trace,
@@ -106,16 +106,32 @@ async def _dir_turn(tenant: Tenant, session_id: str, message: str):
 
 
 async def _legacy_turn(tenant: Tenant, session_id: str, message: str):
-    """sqlite/dict fallback — original behavior."""
+    """SESSION_BACKEND=sqlite|memory fallback (see app/session/factory.py).
+
+    Degraded by design relative to _dir_turn: no ticket, no trace, no per-session
+    queue and no ContextBuilder — those are DirStore features. It is kept because
+    the factory still offers the other two backends; it is not reachable in the
+    deployed stack, which leaves SESSION_BACKEND at its "dir" default.
+
+    Persistence mirrors _dir_turn: run_agent_loop mutates `history` in place, so
+    saving in a finally block keeps the assistant reply when the client
+    disconnects mid-stream and the generator is closed early.
+    """
     store_key = tenant.session_key(session_id)
     history = sessions.setdefault(store_key, [])
-    async for event in run_agent_loop(
-        message, history, _registry, _llm,
-        system_prompt=tenant.system_prompt,
-        max_tools=tenant.max_tools,
-        max_tokens=tenant.max_tokens,
-        allowed_skills=tenant.allowed_skill_names(),
-    ):
-        yield event
-    if hasattr(sessions, "save"):
-        sessions.save(store_key, history)
+    try:
+        async for event in run_agent_loop(
+            message, history, _registry, _llm,
+            system_prompt=tenant.system_prompt,
+            max_tools=tenant.max_tool_rounds,
+            max_tokens=tenant.max_tokens,
+            allowed_skills=tenant.allowed_skill_names(),
+        ):
+            yield event
+    finally:
+        # Persist whatever the loop appended, even on client disconnect.
+        if hasattr(sessions, "save"):
+            try:
+                sessions.save(store_key, history)
+            except Exception as e:  # never mask the original failure
+                logger.warning(f"legacy session save failed: {e}")

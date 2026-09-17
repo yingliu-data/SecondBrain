@@ -10,6 +10,7 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from app.agent.loop import SSE_HEADERS, _AVATAR_TOOLS
 from app.agent.sanitize import sanitize
 from app.auth.guest import (
+    client_ip,
     guest_manager,
     GUEST_SYSTEM_PROMPT,
     ALLOWED_ORIGINS,
@@ -18,6 +19,7 @@ from app.auth.guest import (
 )
 
 logger = logging.getLogger("guest")
+sec_log = logging.getLogger("security")
 router = APIRouter()
 
 _registry = None
@@ -32,9 +34,17 @@ def set_dependencies(registry, llm):
 
 @router.post("/api/v1/guest/chat")
 async def guest_chat(request: Request):
-    # Origin check
+    ip = client_ip(request)
+
+    # Origin check — best-effort CSRF hint, NOT an authentication control.
+    # The Origin header is supplied by the caller and the production proxy
+    # forwards it verbatim, so any non-browser client (curl) can set it to an
+    # allowed value. The real control is proxy-side: pinning the upstream
+    # Origin in pose-spatial-studio. Keep this as a cheap filter for casual
+    # cross-site use and as an abuse signal — never rely on it for auth.
     origin = request.headers.get("origin", "")
     if origin not in ALLOWED_ORIGINS:
+        sec_log.warning(f"GUEST_ORIGIN_REJECT ip={ip} origin={origin!r}")
         return JSONResponse({"error": "Forbidden"}, status_code=403)
 
     body = await request.json()
@@ -44,7 +54,6 @@ async def guest_chat(request: Request):
     if not session_id or not message.strip():
         return JSONResponse({"error": "Missing session_id or message"}, status_code=400)
 
-    ip = request.client.host if request.client else "unknown"
     session, error = guest_manager.get_or_create(session_id, ip)
     if not session:
         return JSONResponse({"error": error}, status_code=429)
@@ -72,6 +81,13 @@ async def guest_chat(request: Request):
                 resp = await _llm.chat_completion(
                     messages,
                     tools=tool_defs,
+                    max_tokens=MAX_OUTPUT_TOKENS,
+                    # Same reason as the main agent loop (commit 58d66e3): with
+                    # thinking on, Qwen3 describes tools instead of calling them
+                    # -- fatal here, where every request is a tool request. It
+                    # also spends the MAX_OUTPUT_TOKENS budget on reasoning
+                    # traces and returns empty content.
+                    chat_template_kwargs={"enable_thinking": False},
                 )
             except Exception as e:
                 logger.error(f"Guest LLM error: {e}")
@@ -122,7 +138,9 @@ async def guest_chat(request: Request):
                 continue
 
             # Final text response
-            text = assistant_msg.get("content", "")
+            # vLLM sends content: null (key present -> .get(k, "") yields
+            # None, and None.split() kills the stream with no done event).
+            text = assistant_msg.get("content") or ""
             session.history.append({"role": "assistant", "content": text})
             for word in text.split(" "):
                 yield f"event: token\ndata: {json.dumps({'text': word + ' '})}\n\n"
