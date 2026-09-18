@@ -1,4 +1,6 @@
 import importlib, pkgutil, json, logging
+
+from sb_contracts.enums import ExecutionSide
 from pathlib import Path
 from .base import BaseSkill
 
@@ -156,7 +158,7 @@ class SkillRegistry:
         """Names of all tools that execute on the server."""
         names = set()
         for name, skill in self._skills.items():
-            if self._visible(name, allowed) and skill.execution_side == "server":
+            if self._visible(name, allowed) and skill.execution_side == ExecutionSide.SERVER:
                 for t in skill.get_tool_definitions():
                     names.add(t["function"]["name"])
         return names
@@ -165,7 +167,7 @@ class SkillRegistry:
         """Names of all tools that execute on the iPhone."""
         names = set()
         for name, skill in self._skills.items():
-            if self._visible(name, allowed) and skill.execution_side == "device":
+            if self._visible(name, allowed) and skill.execution_side == ExecutionSide.DEVICE:
                 for t in skill.get_tool_definitions():
                     names.add(t["function"]["name"])
         return names

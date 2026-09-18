@@ -4,6 +4,8 @@ from app.config import (LLM_ENABLE_THINKING, MAX_TOOL_ROUNDS, SYSTEM_PROMPT,
                         TOOL_TIMEOUT)
 from app.agent.sanitize import sanitize
 from app.agent.enums import FinishReason, ToolOutcome
+from sb_contracts.models import (AvatarEvent, CompletionResponse, DoneEvent,
+                                 TokenEvent, ToolCallEvent)
 
 logger = logging.getLogger("agent")
 
@@ -97,7 +99,7 @@ async def run_agent_loop(message: str, history: list, registry, llm, *,
                 chat_template_kwargs=(
                     None if LLM_ENABLE_THINKING else {"enable_thinking": False}),
             )
-            text = (resp["choices"][0]["message"].get("content") or "").strip()
+            text = CompletionResponse.from_payload(resp).content.strip()
         except Exception as e:
             logger.error(f"Wrap-up summary LLM call failed: {e}")
             trace("llm_error", {"error": str(e)[:500], "stage": "wrap_up"})
@@ -108,8 +110,8 @@ async def run_agent_loop(message: str, history: list, registry, llm, *,
               {"chars": len(text), "loops": loops, "wrap_up": True})
         history.append({"role": "assistant", "content": text})
         for word in text.split(" "):
-            yield f"event: token\ndata: {json.dumps({'text': word + ' '})}\n\n"
-        yield "event: done\ndata: {}\n\n"
+            yield TokenEvent.of(word + " ").to_sse()
+        yield DoneEvent.of().to_sse()
 
     for loop_idx in range(tool_budget):
         # Call LLM via provider abstraction (local → cloud fallback)
@@ -128,12 +130,19 @@ async def run_agent_loop(message: str, history: list, registry, llm, *,
                              + _tool_outcome_line(tool_runs)
                              + " Please try again in a moment.")
             history.append({"role": "assistant", "content": error_msg})
-            yield f"event: token\ndata: {json.dumps({'text': error_msg})}\n\n"
-            yield "event: done\ndata: {}\n\n"
+            yield TokenEvent.of(error_msg).to_sse()
+            yield DoneEvent.of().to_sse()
             return
-        choice = resp["choices"][0]
-        assistant_msg = choice["message"]
-        finish_reason = choice.get("finish_reason", "stop")
+        # One place that knows the provider payload shape: handles content:
+        # null, coerces finish_reason to the enum, and carries usage (which was
+        # previously discarded on every response).
+        parsed_resp = CompletionResponse.from_payload(resp)
+        assistant_msg = resp["choices"][0]["message"]
+        finish_reason = parsed_resp.finish_reason
+        if parsed_resp.usage.total:
+            trace("llm_usage", {"input": parsed_resp.usage.input,
+                                "output": parsed_resp.usage.output,
+                                "total": parsed_resp.usage.total})
 
         # ── Truncated response ──────────────────────────
         # The token cap cut generation off mid-message. Discard it entirely
@@ -214,7 +223,7 @@ async def run_agent_loop(message: str, history: list, registry, llm, *,
                     if tool_name in _AVATAR_TOOLS:
                         try:
                             parsed = json.loads(result)
-                            yield f"event: avatar_command\ndata: {json.dumps({'name': tool_name, 'result': parsed})}\n\n"
+                            yield AvatarEvent.of(tool_name, parsed).to_sse()
                             # For plan_movement, feed compact summary to LLM
                             # instead of full frame data to save context tokens.
                             if tool_name == "plan_movement":
@@ -228,7 +237,7 @@ async def run_agent_loop(message: str, history: list, registry, llm, *,
                             pass
                 elif tool_name in device_tools:
                     # Device skill — delegate to iPhone via SSE
-                    yield f"event: tool_call\ndata: {json.dumps({'id': tc_id, 'name': tool_name, 'arguments': arguments})}\n\n"
+                    yield ToolCallEvent.of(tc_id, tool_name, arguments).to_sse()
 
                     evt = asyncio.Event()
                     tool_result_events[tc_id] = evt
@@ -261,7 +270,7 @@ async def run_agent_loop(message: str, history: list, registry, llm, *,
             continue
 
         # ── Final text response ─────────────────────────
-        text = (assistant_msg.get("content") or "").strip()
+        text = parsed_resp.content.strip()
         if not text:
             logger.warning("LLM returned empty final content")
             text = ("I finished but couldn't produce an answer. "
@@ -269,8 +278,8 @@ async def run_agent_loop(message: str, history: list, registry, llm, *,
         trace("assistant_response", {"chars": len(text), "loops": loop_idx + 1})
         history.append({"role": "assistant", "content": text})
         for word in text.split(" "):
-            yield f"event: token\ndata: {json.dumps({'text': word + ' '})}\n\n"
-        yield "event: done\ndata: {}\n\n"
+            yield TokenEvent.of(word + " ").to_sse()
+        yield DoneEvent.of().to_sse()
         return
     else:
         # Tool loop exhausted without a final text response. One last no-tools

@@ -1,0 +1,17 @@
+# Build context is the repo root (agent-api needs packages/sb-contracts).
+# agent-api/.dockerignore no longer applies, so its rules live here.
+**/__pycache__/
+**/*.pyc
+**/.pytest_cache/
+**/.venv/
+agent-api/data/
+agent-api/tests/
+.git/
+.github/
+.idea/
+.claude/
+spike/
+scripts/
+docs/
+*.md
+bug.output
