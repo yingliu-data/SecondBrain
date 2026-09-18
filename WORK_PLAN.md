@@ -376,7 +376,7 @@ class GatewayPolicy(ABC):
 
 **Sequencing, if this phase ever runs.** PA-0 first or the image stops building. PA-1…PA-3 are one PR; PA-4…PA-8 are one PR each and each must be behaviour-preserving — if a PR in this phase changes what the system does, it is the wrong PR.
 
-`FinishReason` and `ToolOutcome` are **no longer part of this phase** — they moved to P0, where they belong on correctness grounds without waiting for a contracts package. PA-8 is correspondingly smaller: it is now only the `CompletionRequest`/`CompletionResponse`/`Usage` payload modelling.
+`FinishReason` and `ToolOutcome` moved to **P0**, where they belong on correctness grounds without waiting for a contracts package — they were added as `app/agent/enums.py`. Phase 0.5 then consolidated the definitions into `sb_contracts.enums` and left `app/agent/enums.py` as a **re-export shim**. *(Corrected 18 Sept: an earlier version of this line said they were "no longer part of this phase", while the shipped package re-declared both — two structurally identical StrEnum classes that compare equal by value but not by identity, which made `ToolResult.ok` report a successful call as failed. Caught in review, fixed, and now guarded by `test_agent_enums_is_a_shim_not_a_second_definition`.)* PA-8 is correspondingly smaller: it is now only the `CompletionRequest`/`CompletionResponse`/`Usage` payload modelling.
 
 ---
 

@@ -20,8 +20,7 @@ what it supports.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator
-from typing import Any
+from collections.abc import AsyncIterator, Mapping
 
 from sb_contracts.models import (
     AuditRecord,
@@ -165,7 +164,8 @@ class InteractiveHarness(Harness):
         """Inject a mid-turn correction, delivered at the next round boundary."""
 
 
-def require_dev_opt_in(component: str, env_var: str, environ: dict[str, str] | Any) -> None:
+def require_dev_opt_in(component: str, env_var: str,
+                       environ: Mapping[str, str]) -> None:
     """Guard for in-process stand-ins that bypass a real boundary.
 
     A DirectToolGateway that runs policy inside agent-api is a fine local

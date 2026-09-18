@@ -3,7 +3,7 @@ from datetime import datetime
 from app.config import (LLM_ENABLE_THINKING, MAX_TOOL_ROUNDS, SYSTEM_PROMPT,
                         TOOL_TIMEOUT)
 from app.agent.sanitize import sanitize
-from app.agent.enums import FinishReason, ToolOutcome
+from sb_contracts.enums import FinishReason, ToolOutcome
 from sb_contracts.models import (AvatarEvent, CompletionResponse, DoneEvent,
                                  TokenEvent, ToolCallEvent)
 

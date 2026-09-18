@@ -44,8 +44,19 @@ class ChatHarness(Harness):
         self._trace = trace
 
     async def run(self, turn: TurnRequest) -> AsyncIterator[HarnessEvent]:
-        """One turn. History is owned by the caller's session store, not here --
-        the harness is stateless so that two devices can share one conversation.
+        """One turn.
+
+        HISTORY IS NOT THREADED YET, and this is the thing to fix before
+        pointing a route at this class. `TurnRequest` carries no history and
+        this list is allocated fresh per call, so a turn run through here has
+        no prior context. The live chat route does not use ChatHarness -- it
+        reads `session.read_history()` and calls `run_agent_loop` directly --
+        so nothing in production loses context today.
+
+        `TurnRequest.session_id` is the intended hook: when a route is
+        migrated, look the history up from the session store here rather than
+        widening `Harness.run()`, which would break the signature this class
+        exists to satisfy.
         """
         history: list[dict] = []
         kwargs = {

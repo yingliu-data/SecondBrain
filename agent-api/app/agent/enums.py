@@ -1,26 +1,20 @@
-"""Small vocabulary of protocol/outcome constants used by the agent loop.
+"""Re-export shim. The definitions live in `sb_contracts.enums`.
 
-StrEnum (3.11+) members are real `str`s: they serialise to JSON as their
-value and compare equal to plain strings, so dict-shaped LLM payloads and
-existing string comparisons keep working unchanged.
+These two enums were added here during P0, before the shared contracts package
+existed, because they fix live bugs (an unhandled `finish_reason == "length"`,
+and a `result.startswith("Error")` sentinel) and should not have waited on a
+refactor. Phase 0.5 moved the definitions into `sb_contracts` so agent-api and
+mcp-gateway share one vocabulary.
+
+Keeping this module as a shim rather than deleting it is deliberate: two
+structurally identical StrEnum classes compare equal by value but NOT by
+identity, so a stale import here plus an `is` comparison in
+`sb_contracts.models.ToolResult.ok` would silently report a successful tool
+call as failed. A shim makes that impossible to reintroduce by accident.
+
+Import from `sb_contracts.enums` in new code.
 """
 
-from enum import StrEnum
+from sb_contracts.enums import FinishReason, ToolOutcome
 
-
-class FinishReason(StrEnum):
-    """OpenAI-compatible `choices[].finish_reason` values."""
-
-    STOP = "stop"
-    TOOL_CALLS = "tool_calls"
-    LENGTH = "length"
-    ERROR = "error"
-
-
-class ToolOutcome(StrEnum):
-    """How a single tool run ended, for end-of-turn outcome summaries."""
-
-    OK = "ok"
-    ERROR = "error"
-    TIMEOUT = "timeout"
-    INVALID_ARGUMENTS = "invalid_arguments"
+__all__ = ["FinishReason", "ToolOutcome"]
