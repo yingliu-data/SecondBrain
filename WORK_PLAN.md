@@ -176,7 +176,23 @@ Six findings changed the plan below; three are flagged as judgment calls. These 
 **Goal:** four abstract base classes and one enum/dataclass vocabulary that every later phase builds against, so the gateway, the harness variants and the tool servers are implementations of a stated contract rather than four independently-invented shapes.
 **Effort:** ~5–6 days, not the 3 first estimated — see review finding #8; PA-6 and PA-8 alone are plausibly a day or two each once tests are included. **Exit:** `mypy --strict` clean on `packages/sb-contracts/`; every existing concrete class in the table below declares its base; `pytest` green with no behaviour change; the Docker image still builds (PA-0).
 
-> **⚠️ Demoted off the critical path — read objection 6 before starting this phase.**
+> ## ✅ Built 18 Sept 2026 — `7041a4d`. The demotion argument below still stands and was partly vindicated; read it before extending this phase.
+>
+> Shipped: `packages/sb-contracts/` (12 StrEnums, the model split, 8 ABCs, `errors.py`), PA-0 build-context fix, PA-4/5/6/7/8/9. Tests 138 → 146.
+>
+> **Two reversals of the plan below, both forced by the code:**
+> 1. **`Harness` is split.** `abort()`/`steer()` moved to a separate `InteractiveHarness`, because `ScheduledHarness` has neither a turn to abort nor a user to steer. Tactical finding #9 called this an interface-segregation wart to live with; building it proved it was the interface being wrong. `ChatHarness` implements the *narrow* `Harness` — declaring no-op turn control would make the interface claim a capability the system lacks. Swapping its base class is the Phase 6 signal.
+> 2. **Path dependency, not a uv workspace.** `agent-api` sets `package = false`; a path source works with that untouched, a workspace would mean restructuring it.
+>
+> **The demotion argument was right about one thing and wrong about another.** Right: the interface *was* wrong before it was written, exactly as predicted — and the fix only became visible while adopting it. Wrong: PA-6 turned out to be worth doing on its own merits, independent of the ABCs, because it put the SSE wire contract under a byte-level golden test for the first time.
+>
+> **Still deferred, deliberately:** `DirectToolGateway` (PA-3b — only `require_dev_opt_in()` shipped; the class needs Phase 1's gateway to exist), and any second `Harness` implementation. The rule is written at the top of `interfaces.py`: an ABC earns its place when a *second* real implementation shares the method.
+>
+> **⚠️ Unverified:** the Docker build. Path resolution was checked statically but no daemon was available — `docker build -f agent-api/Dockerfile .` from the repo root before merging.
+>
+> ---
+>
+> **Original demotion note — read objection 6 before extending this phase.**
 > The original instruction here was "land this before Phase 1." That was wrong. You cannot design a good `Harness` ABC from one concrete implementation and two imagined ones — and tactical finding #9, which notes that `abort()`/`steer()` are meaningless for `ScheduledHarness`, is that error showing up *before any implementation exists*. The same applies to `ToolGateway`: its real shape will be obvious once the gateway is written, and retrofitting the ABC onto working code is an afternoon.
 >
 > **What to do instead:**
