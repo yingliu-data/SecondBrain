@@ -14,14 +14,51 @@ LLM_TEMPERATURE = float(os.environ.get("LLM_TEMPERATURE", 0.7))
 LLM_ENABLE_THINKING = os.environ.get("LLM_ENABLE_THINKING", "false").lower() in ("1", "true", "yes")
 
 # ── API ──
-API_SECRET_KEY = os.environ["API_SECRET_KEY"]
+MIN_SECRET_LEN = 32
+
+
+def require_strong_secret(value: str | None, name: str = "API_SECRET_KEY") -> str:
+    """Reject absent, empty or short secrets at import.
+
+    os.environ[...] already raises when the variable is missing, but
+    docker-compose substitutes an EMPTY STRING when .env is absent -- and an
+    empty key authenticates, because the HMAC is then simply keyed on b"".
+    Every request with `Authorization: Bearer ` and a signature computed over
+    the empty key would pass. Fail loudly at boot instead.
+
+    Kept a module-level function so it is testable; an import-time raise is not.
+    """
+    if not value or not value.strip():
+        raise RuntimeError(
+            f"{name} is empty or unset. docker-compose substitutes an empty "
+            f"string when .env is missing, and an empty key authenticates every "
+            f"request. Generate one with: openssl rand -hex 32")
+    if len(value) < MIN_SECRET_LEN:
+        raise RuntimeError(
+            f"{name} is {len(value)} chars; minimum is {MIN_SECRET_LEN}. "
+            f"Generate one with: openssl rand -hex 32")
+    return value
+
+
+API_SECRET_KEY = require_strong_secret(os.environ.get("API_SECRET_KEY"))
 TENANTS_FILE = os.environ.get("TENANTS_FILE", "data/tenants.json")
 # Hostnames allowed to resolve to private/loopback addresses for MCP servers
 MCP_ALLOWED_PRIVATE_HOSTS = [
     h for h in os.environ.get("MCP_ALLOWED_PRIVATE_HOSTS", "host.docker.internal").split(",") if h
 ]
 MAX_INPUT = int(os.environ.get("MAX_INPUT_LENGTH", 4096))
-MAX_TOOLS = int(os.environ.get("MAX_TOOL_CALLS_PER_TURN", 10))
+# Two different ceilings that shared one name until 17 Sept 2026. MAX_TOOLS was
+# spent as *loop iterations* in agent/loop.py, but SYSTEM_DESIGN also needs a
+# *tool-count* ceiling (§8.3: keep tools in context under ~10, past which
+# Qwen3-14B's selection accuracy degrades). Conflating them meant the design's
+# "cap tool rounds at three per voice turn" and "keep the tool count under ten"
+# were one variable pulling in two directions.
+MAX_TOOL_ROUNDS = int(os.environ.get("MAX_TOOL_ROUNDS",
+                                     os.environ.get("MAX_TOOL_CALLS_PER_TURN", 10)))
+MAX_TOOLS_IN_CONTEXT = int(os.environ.get("MAX_TOOLS_IN_CONTEXT", 10))
+# Deprecated alias, kept one release so existing deploys and tenants.json do not
+# break. Remove once MAX_TOOL_CALLS_PER_TURN is gone from compose and the VM env.
+MAX_TOOLS = MAX_TOOL_ROUNDS
 TOOL_TIMEOUT = int(os.environ.get("TOOL_TIMEOUT", 60))        # seconds for device tool response
 
 # ── Session Store (swap backend without touching agent code) ──

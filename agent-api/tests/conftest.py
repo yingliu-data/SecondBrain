@@ -1,7 +1,9 @@
 import os
 
 # Must be set before any app.* import — config.py reads it at import time.
-os.environ.setdefault("API_SECRET_KEY", "test-default-key")
+# 64 chars: must satisfy config.require_strong_secret. Obviously fake on
+# purpose -- a real-looking dummy invites someone to wonder if it is real.
+os.environ.setdefault("API_SECRET_KEY", "test-default-key-" + "0" * 47)
 
 import json
 

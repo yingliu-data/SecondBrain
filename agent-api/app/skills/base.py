@@ -1,6 +1,8 @@
 from abc import ABC, abstractmethod
 from contextvars import ContextVar
 
+from sb_contracts.enums import ExecutionMode, ExecutionSide
+
 # Per-request context so skills (e.g. remember) can find the active session
 # and user without racing on shared singleton state. Set by routes/chat.py.
 _current_session: ContextVar = ContextVar("current_session", default=None)
@@ -45,8 +47,24 @@ class BaseSkill(ABC):
 
     @property
     @abstractmethod
-    def execution_side(self) -> str:
-        """'server' — runs on the server. 'device' — delegates to iPhone."""
+    def execution_side(self) -> ExecutionSide:
+        """Where this skill's tools run.
+
+        ExecutionSide is a StrEnum, so subclasses returning the bare strings
+        "server" / "device" remain correct -- the enum compares equal to them.
+        """
+
+    @property
+    def execution_mode(self) -> ExecutionMode:
+        """Whether this skill's tools may run concurrently with batch siblings.
+
+        SEQUENTIAL by default, which is the safe answer: device tools must not
+        raise two EventKit prompts at once, and anything with a side effect
+        should not race a sibling. A read-only lookup can opt into PARALLEL.
+        """
+        return (ExecutionMode.SEQUENTIAL
+                if self.execution_side == ExecutionSide.DEVICE
+                else ExecutionMode.PARALLEL)
 
     @property
     def keywords(self) -> list[str]:

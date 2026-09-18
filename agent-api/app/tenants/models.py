@@ -33,7 +33,8 @@ class Tenant(BaseModel):
     system_prompt: str | None = None      # None -> global SYSTEM_PROMPT
     local_skills: list[str] | None = None  # None -> all local skills
     mcp_servers: list[str] = []            # names from the top-level mcp_servers map
-    max_tools: int | None = None           # None -> config.MAX_TOOLS
+    max_tool_rounds: int | None = None     # None -> config.MAX_TOOL_ROUNDS
+    max_tools: int | None = None           # deprecated alias for max_tool_rounds
     max_tokens: int | None = None          # None -> LLM default
     is_default: bool = False
 
@@ -47,6 +48,11 @@ class Tenant(BaseModel):
     def model_post_init(self, __context) -> None:
         if not self.user:
             self.user = self.name
+        # max_tools was renamed to max_tool_rounds when the two ceilings were
+        # split (see config.py). Accept the old key from existing tenants.json
+        # files; the new name wins if both are set.
+        if self.max_tool_rounds is None and self.max_tools is not None:
+            self.max_tool_rounds = self.max_tools
         from app.session.ids import is_safe_id
         if not is_safe_id(self.user) or not is_safe_id(self.name):
             raise ValueError(

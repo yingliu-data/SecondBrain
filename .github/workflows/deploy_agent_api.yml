@@ -5,6 +5,7 @@ on:
   pull_request:
     paths:
       - 'agent-api/**'
+      - 'packages/**'
       - 'docker-compose.yml'
       - '.github/workflows/deploy_agent_api.yml'
   push:
@@ -12,6 +13,7 @@ on:
       - main
     paths:
       - 'agent-api/**'
+      - 'packages/**'
       - 'docker-compose.yml'
       - '.github/workflows/deploy_agent_api.yml'
 
@@ -32,10 +34,23 @@ jobs:
           enable-cache: true
           cache-dependency-glob: agent-api/uv.lock
 
+      # Strict on the contracts package only. It is the vocabulary two services
+      # parse, so a wrong type here is a wire bug; strict over all of app/ is a
+      # different project and would gate this one on unrelated work.
+      - name: Type-check contracts (strict)
+        working-directory: agent-api
+        env:
+          API_SECRET_KEY: ci-dummy-not-a-real-secret-0000000000000000
+        run: |
+          uv sync --frozen
+          uv run --frozen mypy --strict ../packages/sb-contracts/src/sb_contracts
+
       - name: Run tests
         working-directory: agent-api
         env:
-          API_SECRET_KEY: ci-test
+          # Must be >= 32 chars: app/config.py:require_strong_secret rejects
+          # short keys, so the previous 'ci-test' would fail every CI run.
+          API_SECRET_KEY: ci-dummy-not-a-real-secret-0000000000000000
         run: |
           uv sync --frozen
           uv run --frozen pytest -q
@@ -60,7 +75,11 @@ jobs:
       - name: Build and push image
         uses: docker/build-push-action@v6
         with:
-          context: agent-api
+          # Repo root, not agent-api/: the image needs packages/sb-contracts,
+          # which is a sibling. With context: agent-api, `uv sync` inside the
+          # container cannot see a directory that was never sent to the daemon.
+          context: .
+          file: agent-api/Dockerfile
           platforms: linux/amd64
           # Only publish from main; PRs just prove the image builds.
           push: ${{ github.event_name != 'pull_request' }}
