@@ -35,6 +35,7 @@ class Tenant(BaseModel):
     mcp_servers: list[str] = []            # names from the top-level mcp_servers map
     max_tools: int | None = None           # None -> config.MAX_TOOLS
     max_tokens: int | None = None          # None -> LLM default
+    engine: str | None = None              # None -> config.AGENT_ENGINE; "legacy" | "harness"
     is_default: bool = False
 
     @field_validator("name")
@@ -42,6 +43,13 @@ class Tenant(BaseModel):
     def _valid_name(cls, v: str) -> str:
         if ":" in v or not v:
             raise ValueError("tenant name must be non-empty and must not contain ':'")
+        return v
+
+    @field_validator("engine")
+    @classmethod
+    def _valid_engine(cls, v: str | None) -> str | None:
+        if v is not None and v not in ("legacy", "harness"):
+            raise ValueError("engine must be 'legacy' or 'harness'")
         return v
 
     def model_post_init(self, __context) -> None:

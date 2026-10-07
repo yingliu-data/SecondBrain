@@ -52,3 +52,30 @@ Rules:
 - When using tools, use the function calling capability. Do not write tool calls as text.
 - Current time: {current_time}
 """
+
+# ── Agent engine (PLAN.md D3) ──
+# "legacy": app/agent/loop.py in-process. "harness": the guest harness in a
+# sandbox per session, driven by app/host/. A tenant may override with
+# `engine` in tenants.json.
+AGENT_ENGINE = os.environ.get("AGENT_ENGINE", "legacy")
+
+# ── Harness host half (app/host/) ──
+# Where harness/guest + harness/protocol live. The guest is run from this
+# directory by the local sandbox (python -m guest.main); the microVM image is
+# built from it. In the container this is the COPY of ../harness.
+HARNESS_GUEST_ROOT = os.environ.get(
+    "HARNESS_GUEST_ROOT",
+    os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "harness")),
+)
+HARNESS_SANDBOX = os.environ.get("HARNESS_SANDBOX", "local")       # "local" | "firecracker"
+HARNESS_PORTS = {"control": 5000, "bulk": 5001, "llm": 5010}      # fixed (PROTOCOL.md 1)
+HARNESS_HELLO_TIMEOUT_S = int(os.environ.get("HARNESS_HELLO_TIMEOUT_S", 30))   # guest connect
+HARNESS_HEARTBEAT_S = int(os.environ.get("HARNESS_HEARTBEAT_S", 60))            # host → guest
+HARNESS_KEEPALIVE_S = int(os.environ.get("HARNESS_KEEPALIVE_S", 15))            # SSE comment
+HARNESS_WALL_CLOCK_S = int(os.environ.get("HARNESS_WALL_CLOCK_S", 600))        # per task
+HARNESS_MAX_TURNS = int(os.environ.get("HARNESS_MAX_TURNS", 12))
+HARNESS_QUESTION_TIMEOUT_S = int(os.environ.get("HARNESS_QUESTION_TIMEOUT_S", 300))
+HARNESS_HOST_TOOL_TIMEOUT_S = int(os.environ.get("HARNESS_HOST_TOOL_TIMEOUT_S", 120))
+HARNESS_SPILL_THRESHOLD = int(os.environ.get("HARNESS_SPILL_THRESHOLD", 2000))
+HARNESS_SEGMENT_EVENTS = int(os.environ.get("HARNESS_SEGMENT_EVENTS", 1000))   # events per segment
+HARNESS_STOP_AT_SETTLE = os.environ.get("HARNESS_STOP_AT_SETTLE", "true").lower() in ("1", "true", "yes")

@@ -91,3 +91,10 @@ async def _start_mcp_refresh():
     import asyncio
     for proxy in mcp_proxies:
         asyncio.create_task(proxy.start_background_refresh())
+
+
+@app.on_event("shutdown")
+async def _stop_harness_workers():
+    # Harness engine (AGENT_ENGINE=harness or a tenant's `engine`): stop every
+    # session's sandbox, LLM proxy and Unix-socket listeners.
+    await chat.workers.shutdown()

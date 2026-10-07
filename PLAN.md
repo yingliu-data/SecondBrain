@@ -82,6 +82,7 @@ What this buys SecondBrain:
 | D4 | Canonical store | `Sink` interface; `local_dir` sink = the session directory on the bind-mounted `data/` volume. No bucket. | The store this deployment has. |
 | D5 | Guard slot ⑦ | `before_tool` priority chain, pass-through, still emits `guard_decision` | Policy later; OpenShell holds the enforcement. |
 | D6 | Async tool calls | Coordinator built for it; `async_tools=False` default | Qwen3-14B is not trusted with placeholders yet; measured in M6. |
+| D6a | **Guest runtime from M1** | **Firecracker microVM from the first milestone; there is no Docker box.** Unix sockets named after the vsock ports are the test double for the transport (fake host, fake vLLM, guest as a subprocess) and nothing else. The build machine has no KVM, so every live run is on the server. | One runtime to debug; the image, the sandbox manager and the vsock transport are built with the loop instead of after it. |
 | D7 | Provider wire shape in the guest | OpenAI chat-completions as vLLM serves it, streamed over :5010; `llm_response` records the assembled message verbatim | The guest speaks the one shape the model speaks. The proxy records usage and enforces budgets. |
 | D8 | Guest concurrency | One coordinator thread per session, one transport-writer, one log-writer; I/O threads feed a `queue.Queue` | Single writer without asyncio. |
 | D9 | Reviewer stratum | Placeholder in the `before_tool` chain | No design yet. |
@@ -125,7 +126,7 @@ agent-api/app/
     llm_proxy.py            :5010 → vLLM; stream pass-through; budgets; usage events
     gateway_forwarder.py    :5011 → mcp-gateway (HTTP); tenant and session asserted by the forwarder
     state_sync.py           acks after append; checkpoints; bulk → session dir; projections
-    sandbox/firecracker.py  restore, snapshot, destroy; docker.py for the dev box
+    sandbox/firecracker.py  boot, snapshot, restore, destroy over the Firecracker API; sandbox/local.py = guest as a subprocess, tests only
     sides.py                host-side execution of BaseSkill tools; device relay; mcp relay
     stream.py               events → SSE (token, tool_call, avatar_command, question, done, seq, error)
     sinks/                  sink.py, local_dir.py
@@ -176,7 +177,7 @@ Compose additions: `temporal` (gRPC 7233 internal; its bundled UI on 8233, local
 | :5011 gateway | guest → host | HTTP/1.1, MCP streamable HTTP to the gateway forwarder |
 | 5020–5029 | — | reserved |
 
-No web proxy: the guest has no network device; `web_search` and `webfetch` are host-side skills. Dev transport: Unix sockets named after the ports, with today's Docker `box.py`-style container as the guest (M1).
+No web proxy: the guest has no network device; `web_search` and `webfetch` are host-side skills. Test transport: Unix sockets named after the ports, used by the unit tests and the fake host only; every live run is a microVM (D6a).
 
 ### 4.2 Sequenced messages
 
@@ -228,6 +229,8 @@ Every event: `session_id`, `seq`, `ts`, `schema`, `type`, `body`. `ts` is data, 
 Host-session events (written by the worker into a sibling log `events/host-*.jsonl`, linked by session): `workflow{task_signal/activity_start/heartbeat/completed/parked}`, `side_call{host/device/mcp}`, `gateway{list/call/quarantine}`, `vm{restore/snapshot/destroy}`, `usage`. These are the diagram's purple ▶ wiring.
 
 Schema rules as draft 5, plus: a `tool_call.side` must match `session_start.tools`; `side_result` for an unknown or terminal `call_id` is recorded `input{dedupe: late}` and ignored.
+
+Confirmed fold rules (M0 review): a first `tool_result` for a call whose placeholder was already committed must carry `late: true` (the strict reading: `late` always equals the state-derived predicate); `queues.follow_up` and `queues.steer` are both lists of seqs, so logs with those inputs hash differently from the first fold draft (no golden has them).
 
 Canonical form for hashing (`protocol/canonical.py`): sorted keys, no whitespace, NFC strings; ints as digits, finite floats by their shortest round-trip text (tool arguments carry floats), NaN and infinity rejected; a body that cannot be canonicalised is a schema error. Ids: `derive_id(user, tenant, session_id, seq, kind)` → `<kind>_<24 hex>`.
 
@@ -340,14 +343,14 @@ Sizes: S ≈ days, M ≈ 1–2 weeks, L ≈ several weeks of one person.
 ### M0 — contracts and spikes (M)
 `harness/protocol/` with tests and the purity test; `docs/PROTOCOL.md`, `EVENTS.md`, `REPLAY.md`; three golden logs (text answer; device tool with a late duplicate; mcp tool via gateway). Spikes recorded as findings: Temporal dev server on the box, a heartbeating activity that survives a worker restart, and a 24-hour timer on a parked workflow; Firecracker + vsock on the RTX 5080 server (`/dev/kvm` inside the agent-api container); OpenShell integration points (section 11). **Exit:** fold passes goldens; validator rejects every schema rule; three spike notes in `docs/`.
 
-### M1 — the loop in a Docker box, four sides (M)
-`harness/guest/` main, Unix-socket transport, inbox, coordinator, log-writer, context builder, provider over :5010 (non-streamed), guest built-ins, operation manager; `app/host/` worker (no Temporal yet: direct call), vsock server on UDS, LLM proxy, `sides.py` for host and device tools, state sync, `stream.py`, `AGENT_ENGINE` switch, projections for `history.jsonl` and `trace.jsonl`. **Exit:** the owner's phone runs a calendar query and a web search through the box on `harness`; redelivered POST runs once; goldens reproduced live; existing tests green under both engines.
+### M1 — the loop in a microVM, four sides (L)
+`harness/guest/`: main (idle-wait, connect out, hello, run, settle), transport over `AF_VSOCK` with a Unix-socket connector for tests, inbox, coordinator, log-writer, context builder, provider over :5010 (non-streamed), guest built-ins, operation manager. `agent-api/app/host/`: worker (no Temporal yet: direct call), per-session UDS endpoints (the same listener serves Firecracker's host-side vsock sockets and the test double), LLM proxy, `sides.py` for host and device tools, state sync, `stream.py`, `AGENT_ENGINE` switch, projections for `history.jsonl` and `trace.jsonl`. `sandbox/firecracker.py`: boot from rootfs over the Firecracker API (vsock device, read-only rootfs, `/workspace` drive, kill); `harness/image/`: zipapp of guest + protocol, rootfs build, kernel fetch. Fakes: scripted vLLM server, fake host, guest as a subprocess. **Exit:** on the server, the owner's phone runs a calendar query and a web search through a Firecracker VM on `harness`; the no-TAP VM cannot reach the network; redelivered POST runs once; goldens reproduced live by the fake-host end-to-end test; existing tests green under both engines.
 
 ### M2 — context and streaming (M)
 Fixed system block, prefix with tool messages, preamble, compaction turn, memory events, streamed provider through the proxy, `LLM_STREAM` fallback. **Exit:** vLLM prefix-cache metrics show hits from turn 2; a 40-turn session compacts and replays; streamed hermes tool calls verified on vLLM 0.11 or the fallback documented.
 
-### M3 — microVM (L)
-`AF_VSOCK` transport; `sandbox/firecracker.py` (restore, snapshot, destroy); `harness/image/` (PEX, RO rootfs, `/workspace` virtio-blk from `vm/workspace.img`); base snapshot with the harness idle; per-session park and idle snapshots; resume with log return; workspace manifest at settle; compose devices. **Exit:** M1–M2 scenarios in Firecracker; `act()`→`ready` < 200 ms from snapshot; park and resume a session across an hour with the same `seq`; kill the VM mid bash → resume with `op_state{lost}`; `AGENT_ENGINE` default flips to `harness` for the default tenant.
+### M3 — snapshots, park and resume (M)
+Base snapshot with the harness idle before it connects out, and restore from it; per-session park and idle snapshots; resume with log return; workspace manifest at settle; compose devices and the `vm/` cache volume. **Exit:** `act()`→`ready` < 200 ms from snapshot; park and resume a session across an hour with the same `seq`; kill the VM mid bash → resume with `op_state{lost}`; two VMs from one snapshot produce distinct ids; `AGENT_ENGINE` default flips to `harness` for the default tenant.
 
 ### M4 — MCP gateway (M)
 `mcp-gateway/` tool server, upstreams, policy, pins and quarantine, promoted tools, elicitation relay, gateway events; `gateway_forwarder.py`; `MCPProxySkill` removed; WCC config migrated. **Exit:** a WCC events task completes through the gateway from inside the VM; a changed upstream definition quarantines the pinned session and a new session sees the new tool; `search_tools`/`call_tool` and a promoted tool both work; the gateway restarts mid-session without losing a pin.
