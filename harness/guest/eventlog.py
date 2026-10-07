@@ -41,6 +41,19 @@ def segment_name(index: int) -> str:
     return f"{index:06d}{SEGMENT_SUFFIX}"
 
 
+def _torn_tail(path: Path) -> bool:
+    """True when `path` is non-empty and does not end with a newline."""
+    try:
+        with path.open("rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            if fh.tell() == 0:
+                return False
+            fh.seek(-1, os.SEEK_END)
+            return fh.read(1) != b"\n"
+    except OSError:
+        return False
+
+
 class EventLog:
     def __init__(self, dir, segment_events: int = SEGMENT_EVENTS):
         if not is_int(segment_events, 1):
@@ -131,8 +144,10 @@ class EventLog:
             if self._count >= self.segment_events or self._segment == 0:
                 self._open_next()
             elif self._fh is None:      # reopened after a restart or close(): continue it
-                self._fh = (self.events_dir / segment_name(self._segment)).open(
-                    "a", encoding="utf-8")
+                path = self.events_dir / segment_name(self._segment)
+                self._fh = path.open("a", encoding="utf-8")
+                if _torn_tail(path):   # a crash mid-write left a partial line: end it
+                    self._fh.write("\n")
             self._fh.write(encode(event))
             self._fh.flush()
             os.fsync(self._fh.fileno())

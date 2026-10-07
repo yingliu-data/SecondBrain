@@ -102,7 +102,10 @@ async def test_b3_carried_parked_task_resumes_in_new_run(make_session):
     )
     st = await s.wait_state("parked")
     assert st.question_id == "q-in-q" and st.generation == 1
-    assert len(s.calls("park_vm")) == 1 and s.calls("run_task") == []
+    # the status says parked before park_vm has run (so an early answer is not
+    # dropped); wait for the call itself before counting
+    await s.wait_for(lambda: len(s.calls("park_vm")) == 1, what="park_vm called")
+    assert s.calls("run_task") == []
 
     await signal_answer(s.client, s.ref, AnswerSignal(question_id="q-in-q", text="42"))
     delivered = await s.wait_delivered(1)

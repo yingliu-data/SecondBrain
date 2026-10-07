@@ -130,8 +130,7 @@ def run_session(cfg: GuestConfig, inbound: queue.Queue, transport: Transport,
     eventlog = EventLog(log_dir)
     log_writer = LogWriter(eventlog, transport)
     log_writer.start()
-    provider = Provider(transport.connector, port=cfg.ports["llm"], model=cfg.model,
-                        timeout_s=cfg.limits.wall_clock_s)
+    provider = Provider(transport.connector, port=cfg.ports["llm"], model=cfg.model)
     ops = OperationManager(workspace, cfg.limits, inbound)
     coordinator = coordinator_mod.Coordinator(
         cfg, State(), inbound, log_writer, transport, provider, ops,

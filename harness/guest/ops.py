@@ -67,6 +67,7 @@ class _Job:
     submitted: float
     proc: subprocess.Popen | None = None
     killed: bool = False
+    held: bool = False                # keys are in OperationManager._busy
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
@@ -211,6 +212,7 @@ class OperationManager:
                 still.append(job)
             else:
                 self._busy |= job.keys
+                job.held = True
                 self._pool.submit(self._run, job)
         self._pending = still
 
@@ -255,7 +257,7 @@ class OperationManager:
             out, _ = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
             _killpg(proc)
-            out, _ = proc.communicate()
+            out = _reap(proc)
             state = "timeout"
         text = (out or b"").decode("utf-8", errors="replace")
         if job.killed:
@@ -272,7 +274,8 @@ class OperationManager:
         content, spill = self._spill(job.call_id, content)
         with self._lock:
             self._jobs.pop(job.call_id, None)
-            if job.keys:
+            if job.held:
+                job.held = False
                 self._busy -= job.keys
                 self._dispatch_locked()
         self._post(job.call_id, ok, content, state, job.submitted, spill)
@@ -325,6 +328,27 @@ def _note(text: str, note: str) -> str:
     if text and not text.endswith("\n"):
         text += "\n"
     return text + note
+
+
+def _reap(proc: subprocess.Popen, grace_s: float = 2.0) -> bytes:
+    """Collect a killed process's output without waiting forever: a daemonised
+    grandchild (setsid, nohup) can keep the stdout pipe open after the group is
+    dead, so the read is bounded and the pipe is closed instead."""
+    try:
+        out, _ = proc.communicate(timeout=grace_s)
+        return out or b""
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        if proc.stdout is not None:
+            proc.stdout.close()
+    except OSError:
+        pass
+    try:
+        proc.wait(timeout=grace_s)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+    return b""
 
 
 def _killpg(proc: subprocess.Popen) -> None:

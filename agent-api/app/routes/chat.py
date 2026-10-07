@@ -38,13 +38,19 @@ def engine_for(tenant: Tenant) -> str:
     return tenant.engine or AGENT_ENGINE
 
 
+def uses_harness(tenant: Tenant) -> bool:
+    """The harness engine needs the directory session store; otherwise the
+    tenant falls back to the legacy loop (and its tool-result path)."""
+    return engine_for(tenant) == "harness" and isinstance(sessions, DirStore)
+
+
 @router.post("/api/v1/chat")
 async def chat(request: Request, tenant: Tenant = Depends(verify)):
     body = await request.json()
     message = body.get("message", "")[:MAX_INPUT]
     session_id = body.get("session_id", "default")
 
-    if engine_for(tenant) == "harness" and isinstance(sessions, DirStore):
+    if uses_harness(tenant):
         input_id = body.get("input_id") or new_input_id()
         generator = _harness_turn(tenant, session_id, message, input_id,
                                   answer_to=body.get("answer_to"))
@@ -148,7 +154,7 @@ async def _harness_turn(tenant: Tenant, session_id: str, message: str, input_id:
                               inputs={"message": message, "input_id": input_id})
         set_current_context(session, tenant.user)
         worker = workers.get_or_create(session, tenant, _registry)
-        sink = worker.attach()
+        sink = worker.attach(input_id)
         task_input = {"input_id": input_id, "text": message, "ticket_id": ticket.ticket_id}
         if answer_to:
             task_input["answer_to"] = answer_to

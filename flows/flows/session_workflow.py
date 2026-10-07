@@ -127,6 +127,10 @@ def _activity_kwargs(opts: ActivityOptions, *, timeout_s: int | None = None) -> 
     }
     if opts.heartbeat_s is not None:
         kwargs["heartbeat_timeout"] = timedelta(seconds=opts.heartbeat_s)
+    if timeout_s:
+        # The task's wall clock bounds all attempts together: a retry of a
+        # timed-out attempt would otherwise get a second full wall clock.
+        kwargs["schedule_to_close_timeout"] = timedelta(seconds=timeout_s)
     return kwargs
 
 
@@ -208,11 +212,15 @@ class SessionWorkflow:
     async def run(self, state: SessionState) -> None:
         self._state = state
         self._cfg = state.config
-        for iid in state.seen:
+        # Signals delivered before run() started are already in _pending and
+        # were deduped against an empty seen set: re-filter them against the
+        # carried one, then put the carried queue in front.
+        carried_seen = set(state.seen)
+        early = [t for t in self._pending if t.input_id not in carried_seen]
+        self._seen = {}
+        for iid in [*state.seen, *(t.input_id for t in early)]:
             self._remember(iid)
-        # Signals delivered before run() started are already in _pending;
-        # the carried queue goes in front of them.
-        self._pending = deque([*state.pending, *self._pending])
+        self._pending = deque([*state.pending, *early])
 
         if state.in_flight is not None:
             await self._run_one(*state.in_flight)
@@ -232,18 +240,29 @@ class SessionWorkflow:
         self._current = task
         live = self._live = _Live()
         try:
-            result = carried or await self._start(task)
-            while result.outcome == "parked":
-                qid = result.question_id or ""
-                # Idempotent: re-called for a carried parked task.
-                await self._activity("park_vm", ParkVM(
-                    session=self.session, input_id=task.input_id, question_id=qid))
-                live.question_id = qid
-                self._phase = "parked"
-                result = await self._wait_answer_and_resume(task, qid)
-            await self._activity("deliver", Deliver(
-                session=self.session, input_id=task.input_id,
-                outcome=result.outcome, question_id=result.question_id))
+            try:
+                result = carried or await self._start(task)
+                while result.outcome == "parked":
+                    qid = result.question_id or ""
+                    # The answer may arrive while the VM is still being parked:
+                    # the signal handler must already know the question.
+                    live.question_id = qid
+                    self._phase = "parked"
+                    # Idempotent: re-called for a carried parked task.
+                    await self._activity("park_vm", ParkVM(
+                        session=self.session, input_id=task.input_id, question_id=qid))
+                    result = await self._wait_answer_and_resume(task, qid)
+            except ActivityError as err:
+                # prepare_vm/park_vm out of retries: this task failed; the
+                # workflow stays signalable for the next one (PLAN 10).
+                workflow.logger.warning("task %s failed: %s", task.input_id, err)
+                result = RunResult(outcome="failed", question_id=live.question_id)
+            try:
+                await self._activity("deliver", Deliver(
+                    session=self.session, input_id=task.input_id,
+                    outcome=result.outcome, question_id=result.question_id))
+            except ActivityError as err:
+                workflow.logger.error("deliver %s failed: %s", task.input_id, err)
         finally:
             self._tasks_run += 1
             self._live = None

@@ -70,6 +70,16 @@ def _append_line(path: Path, obj: dict) -> None:
         os.fsync(f.fileno())
 
 
+def _truncate(path: Path, size: int) -> None:
+    try:
+        with path.open("r+b") as f:
+            f.truncate(size)
+            f.flush()
+            os.fsync(f.fileno())
+    except OSError as e:
+        logger.error("could not roll back %s to %d bytes: %s", path, size, e)
+
+
 class StateSync:
     def __init__(self, session_dir: SessionDir | Path, *,
                  segment_events: int = HARNESS_SEGMENT_EVENTS) -> None:
@@ -179,13 +189,17 @@ class StateSync:
             errors = validate_event(event)
             if errors:
                 raise StateSyncError(f"seq {seq}: {errors[0]}")
+            # Append before applying: the ack that follows promises durability,
+            # so a failed write (ENOSPC, EIO) must leave last_seq where it was.
+            self.run_dir.mkdir(parents=True, exist_ok=True)
+            path = self.run_dir / _segment_name((seq - 1) // self.segment_events + 1)
+            offset = path.stat().st_size if path.exists() else 0
+            _append_line(path, event)
             try:
                 apply(self.state, event)
             except FoldError as e:
+                _truncate(path, offset)     # keep the on-disk run foldable
                 raise StateSyncError(str(e)) from e
-            self.run_dir.mkdir(parents=True, exist_ok=True)
-            path = self.run_dir / _segment_name((seq - 1) // self.segment_events + 1)
-            _append_line(path, event)
             self._index(event)
             try:
                 self._project(event)

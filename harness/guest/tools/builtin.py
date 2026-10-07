@@ -472,7 +472,10 @@ def skill(workspace: Path, args: dict, limits=None) -> str:
     name = args["name"]
     if not name or "/" in name or "\\" in name or name in (".", "..") or "\0" in name:
         return f"Error: invalid skill name {name!r}"
-    path = workspace / ".agent" / "skills" / name / "SKILL.md"
+    try:
+        path = resolve_path(workspace, f".agent/skills/{name}/SKILL.md")
+    except PathError as e:
+        return f"Error: skill {name!r}: {e}"
     if not path.is_file():
         return (f"Error: skill {name!r} not found "
                 f"(expected .agent/skills/{name}/SKILL.md)")

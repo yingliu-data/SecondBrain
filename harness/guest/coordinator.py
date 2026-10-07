@@ -56,7 +56,7 @@ import time
 from datetime import datetime, timezone
 
 from protocol.allowlist import is_allowed
-from protocol.canonical import canonical_json, derive_id, hash_value
+from protocol.canonical import canonical_json, canonicalisable_error, derive_id, hash_value
 from protocol.events import UNANSWERED, make_event
 from protocol.fold import State, apply
 from guest import hooks as default_hooks
@@ -143,6 +143,9 @@ def _parse_arguments(raw):
         return {}, f"arguments are not valid JSON: {exc}"
     if not isinstance(parsed, dict):
         return {}, f"arguments must be a JSON object, got {type(parsed).__name__}"
+    bad = canonicalisable_error(parsed, "arguments")
+    if bad is not None:         # json.loads accepts NaN/Infinity; the log cannot hold them
+        return {}, f"arguments are not valid JSON: {bad}"
     return parsed, None
 
 
@@ -596,6 +599,8 @@ class Coordinator:
         self._suppress_wake = True
         try:
             for tc in calls:
+                if self.settled is not None:    # e.g. a denied question escalated
+                    break
                 self._run_tool_call(turn_id, tc, max_tools)
         finally:
             self._suppress_wake = False

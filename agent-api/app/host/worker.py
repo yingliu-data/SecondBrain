@@ -104,6 +104,7 @@ class Worker:
         self.registry = registry
         self.sandbox = sandbox
         self.sinks: list[asyncio.Queue] = list(sinks or [])
+        self._sink_input: dict[int, str] = {}     # id(queue) -> the input it streams
         self.device_calls = device_calls
         self.llm_url = llm_url
         self.ports = dict(ports)
@@ -138,9 +139,15 @@ class Worker:
         self.closed = False
 
     # ------------------------------------------------------------ sinks
-    def attach(self) -> asyncio.Queue:
+    def attach(self, input_id: str | None = None) -> asyncio.Queue:
+        """A new sink. With `input_id` it only receives that input's stream
+        (tokens, error, done, end-of-stream): two requests can be queued on
+        one worker, and the earlier task's end must not close the later
+        request's stream (chat.py: a task outlives a client disconnect)."""
         q: asyncio.Queue = asyncio.Queue()
         self.sinks.append(q)
+        if input_id is not None:
+            self._sink_input[id(q)] = input_id
         for call in self.device_calls.open_for(self.session_key):
             # PLAN.md 8: an open device call is re-emitted to the stream that attaches
             q.put_nowait(sse("tool_call", call))
@@ -151,17 +158,28 @@ class Worker:
             self.sinks.remove(q)
         except ValueError:
             pass
+        self._sink_input.pop(id(q), None)
 
-    def _emit(self, item) -> None:
+    def _emit(self, item, input_id: str | None = None) -> None:
+        """Put `item` on every sink of `input_id` (default: the running input;
+        no input -> every sink)."""
+        if input_id is None and self._current is not None:
+            input_id = self._current[0]
         for q in list(self.sinks):
-            q.put_nowait(item)
+            scope = self._sink_input.get(id(q))
+            if scope is None or input_id is None or scope == input_id:
+                q.put_nowait(item)
 
-    def _emit_many(self, items) -> None:
+    def _emit_many(self, items, input_id: str | None = None) -> None:
         for s in items:
-            self._emit(s)
+            self._emit(s, input_id)
 
-    def _end_stream(self) -> None:
-        self._emit(None)
+    def _end_stream(self, input_id: str | None = None) -> None:
+        self._emit(None, input_id)
+
+    def _end_all_streams(self) -> None:
+        for q in list(self.sinks):
+            q.put_nowait(None)
 
     # ------------------------------------------------------------ hello
     def tool_entries(self) -> list[dict]:
@@ -336,7 +354,13 @@ class Worker:
         if self.closed:
             raise GuestError("worker closed")
         input_id = task_input["input_id"]
-        self._ensure_plumbing()
+        try:
+            self._ensure_plumbing()
+        except Exception as e:      # e.g. the unix socket path is too long
+            logger.exception("session %s: host plumbing failed", self.session_key)
+            self._fail(input_id, "failed", f"The agent sandbox failed: {e}", input_id_scope=input_id)
+            self._end_stream(input_id)
+            raise GuestError(f"host plumbing failed: {e}") from e
 
         cur = self._current
         if cur is not None and cur[0] == input_id and not cur[1].done():
@@ -379,9 +403,9 @@ class Worker:
         self.sync.host_event("workflow", {"kind": "task_signal", "input_id": input_id,
                                           "dedupe": "settled"})
         if body.get("answer"):
-            self._emit_many(tokens(body["answer"].strip()))
-        self._emit(DONE)
-        self._end_stream()
+            self._emit_many(tokens(body["answer"].strip()), input_id)
+        self._emit(DONE, input_id)
+        self._end_stream(input_id)
         return body
 
     async def _run(self, task_input: dict, fut: asyncio.Future) -> dict:
@@ -415,11 +439,12 @@ class Worker:
         self.sync.ticket_id = None
         return result
 
-    def _fail(self, input_id: str, outcome: str, message: str) -> dict:
+    def _fail(self, input_id: str, outcome: str, message: str, *,
+              input_id_scope: str | None = None) -> dict:
         logger.error("task %s: %s (%s)", input_id, message, outcome)
-        self._emit_many(tokens(message))
-        self._emit(sse("error", {"class": "fatal", "message": message}))
-        self._emit(DONE)
+        self._emit_many(tokens(message), input_id_scope)
+        self._emit(sse("error", {"class": "fatal", "message": message}), input_id_scope)
+        self._emit(DONE, input_id_scope)
         try:
             self.session.append_history("assistant", message, ticket_id=self.sync.ticket_id)
             self.session.append_trace("llm_error", {"error": message[:500], "outcome": outcome},
@@ -559,7 +584,7 @@ class Worker:
             self.endpoints.close()
         if self._accept_thread is not None:
             self._accept_thread.join(timeout=2)
-        self._end_stream()
+        self._end_all_streams()
 
 
 class Workers:
