@@ -101,7 +101,7 @@ M3 (docs/M3-CONTRACTS.md sections 3–5, docs/GUEST.md "M3"):
     a bounded wait until the host acked parked, transport.park() (close the
     link, back to idle-wait). The next ("link", "up") resumes: timers re-armed
     with what they had left, a deferred turn starts. Nothing is emitted on
-    resume. With exit_on_park, run() returns None once parked instead.
+    resume.
   - checkpoint chain: prev_hash = hash_value(session_start event) for the
     first, the previous checkpoint's state_hash after (fold.verify_checkpoints).
   - restore(events) before run(): the log the host returned on :5001 after a
@@ -113,12 +113,12 @@ M3 (docs/M3-CONTRACTS.md sections 3–5, docs/GUEST.md "M3"):
     round was open, the settle a dead guest owed when the last response had
     no tool calls, otherwise a new turn (a turn whose response never came is
     first recorded as error{transient}). No second session_start. When the
-    returned log ends with `parked` (a fresh process after a park), nothing
-    is lost: side calls and questions wait again.
+    returned log ends with `parked` (a fresh process after the host stopped a
+    parked guest), nothing is lost: side calls and questions wait again.
   - settle: with a workspace, settle.manifest = guest.bulk.settle_manifest
     (changed files and the manifest put on :5001 when there is a bulk client).
-  - run() may be called again after a settle (multi-task guests): each call
-    handles one task.
+  - run() may be called again after a settle: each call handles one task
+    (the guest stays up for the next one).
 """
 from __future__ import annotations
 
@@ -250,8 +250,7 @@ def _validate_args(name: str, side: str, args: dict) -> list[str]:
 class Coordinator:
     def __init__(self, cfg, state: State, inbound, log_writer, transport, provider, ops, clock,
                  *, hooks=None, image_version: str = "dev", workflow_run_id: str | None = None,
-                 harness_version: str = HARNESS_VERSION, workspace=None, bulk=None,
-                 exit_on_park: bool = False):
+                 harness_version: str = HARNESS_VERSION, workspace=None, bulk=None):
         self.cfg = cfg
         self.state = state
         self.inbound = inbound
@@ -294,7 +293,7 @@ class Coordinator:
         # waits
         self._side_calls: dict[str, dict] = {}        # call_id -> {side, started_ms}
         self._questions: dict[str, dict] = {}         # question_id -> {call_id, name, args, kind}
-        self._timers: dict[str, object] = {}          # token -> handle
+        self._timers: dict[str, tuple] = {}           # token -> (handle, kind, due ms)
         self._link_up = True
         self._turn_deferred = False
         self._suppress_wake = False       # while dispatching a round or abandoning work
@@ -304,14 +303,13 @@ class Coordinator:
         # M3: park, resume, settle manifest
         self.workspace = workspace
         self.bulk = bulk
-        self.exit_on_park = exit_on_park
-        self._timer_due: dict[str, tuple] = {}        # token -> (kind, due ms)
         self._paused: dict[str, tuple] = {}           # token -> (kind, remaining s) while parked
         self._park_reason: str | None = None          # a park waiting for its moment
         self.parked = False                           # parked: idle until the link comes back
         self._session_start: dict | None = None       # the event (head of the checkpoint chain)
         self._last_checkpoint_hash: str | None = None
         self._uploaded: dict[str, str] = {}           # workspace path -> sha256 the host holds
+        self._digests: dict[str, tuple] = {}          # workspace path -> (stat key, sha256)
         self._restored: dict | None = None            # set by restore(): what run() must finish
 
     # ------------------------------------------------------------ emit
@@ -319,12 +317,16 @@ class Coordinator:
         seq = self.state.last_seq + 1
         event = make_event(self.cfg.session_id, seq, self.clock.now_iso(), type, body)
         apply(self.state, event)        # FoldError here is a coordinator bug: let it surface
-        if type == "session_start":
-            self._session_start = event
-        elif type == "checkpoint":
-            self._last_checkpoint_hash = body["state_hash"]
+        self._track(event)
         self.log_writer.put(event)
         return event
+
+    def _track(self, event: dict) -> None:
+        """The checkpoint chain's bookkeeping, for emitted and restored events."""
+        if event["type"] == "session_start":
+            self._session_start = event
+        elif event["type"] == "checkpoint":
+            self._last_checkpoint_hash = event["body"]["state_hash"]
 
     def live(self, type: str, body: dict) -> None:
         try:
@@ -347,17 +349,25 @@ class Coordinator:
     # ------------------------------------------------------------ timers
     def _arm(self, kind: str, token: str, delay_s: float) -> None:
         self._cancel(token)
-        self._timer_due[token] = (kind, self.clock.now_ms() + int(float(delay_s) * 1000))
-        self._timers[token] = self.clock.timer(
-            delay_s, lambda: self.inbound.put(("timer", kind, token)))
+        handle = self.clock.timer(delay_s, lambda: self.inbound.put(("timer", kind, token)))
+        self._timers[token] = (handle, kind, self.clock.now_ms() + int(float(delay_s) * 1000))
+
+    def _arm_op_timeout(self, call_id: str, side: str) -> None:
+        timeout = _side_timeout(self.limits, side)
+        if timeout:
+            self._arm("op_timeout", f"op:{call_id}", timeout)
+
+    def _arm_question(self, qid: str) -> None:
+        timeout_s = getattr(self.cfg, "question_timeout_s", 0) or 0
+        if timeout_s > 0:
+            self._arm("question_deadline", f"question:{qid}", float(timeout_s))
 
     def _cancel(self, token: str) -> None:
-        self._timer_due.pop(token, None)
         self._paused.pop(token, None)
-        handle = self._timers.pop(token, None)
-        if handle is not None:
+        entry = self._timers.pop(token, None)
+        if entry is not None:
             try:
-                handle.cancel()
+                entry[0].cancel()
             except Exception:
                 pass
 
@@ -371,8 +381,7 @@ class Coordinator:
         left (the parked time does not count, as in a VM snapshot)."""
         now = self.clock.now_ms()
         kept = {}
-        for token in list(self._timers):
-            kind, due = self._timer_due.get(token, (None, now))
+        for token, (_, kind, due) in list(self._timers.items()):
             if kind in PAUSED_ON_PARK:
                 kept[token] = (kind, max(0, due - now) / 1000.0)
             self._cancel(token)
@@ -385,8 +394,8 @@ class Coordinator:
 
     # ------------------------------------------------------------ run
     def run(self) -> dict | None:
-        """One task: returns its settle body (None when exit_on_park parked
-        the guest first). May be called again for the next task."""
+        """One task: returns its settle body. May be called again for the
+        next task."""
         if self.settled is not None:          # the previous task's: start the next one
             self.settled = None
             self.task_input_id = None
@@ -400,10 +409,8 @@ class Coordinator:
             if self._restored is not None:
                 restored, self._restored = self._restored, None
                 self._resume_restored(restored)
-            while self.settled is None and not (self.parked and self.exit_on_park):
+            while self.settled is None:
                 self._maybe_park()
-                if self.parked and self.exit_on_park:
-                    break
                 item = self.inbound.get()
                 self._dispatch(item)
         finally:
@@ -424,7 +431,7 @@ class Coordinator:
             "resumed": bool(getattr(self.cfg, "resume", False)),
         })
         at = getattr(self.cfg, "at", None)
-        if isinstance(at, int) and not isinstance(at, bool):
+        if is_int(at):
             self.emit("clock", {"kind": "host_hello", "at": at})
 
     def _dispatch(self, item) -> None:
@@ -456,7 +463,7 @@ class Coordinator:
             self._on_side_result(body)
         elif mtype == "heartbeat":
             at = body.get("at")
-            if isinstance(at, int) and not isinstance(at, bool):
+            if is_int(at):
                 self.emit("clock", {"kind": "host_heartbeat", "at": at})
             else:
                 self.emit("clock", {"kind": "host_heartbeat", "at": self.clock.now_ms()})
@@ -569,7 +576,7 @@ class Coordinator:
         self.log(f"link {status}", level="info")
         if self._link_up and self.parked:
             self._unpark()
-        if self._link_up and self._turn_deferred and not self.parked and self._park_reason is None:
+        if self._link_up and self._turn_deferred and self._park_reason is None:
             self._turn_deferred = False
             self._start_turn()
 
@@ -577,7 +584,6 @@ class Coordinator:
         if token not in self._timers:
             return                      # stale (cancelled or already fired)
         self._timers.pop(token, None)
-        self._timer_due.pop(token, None)
         if kind == "wall_clock":
             self.emit("clock", {"kind": "wall_clock", "at": self.clock.now_ms()})
             self._abandon_open_work("timeout")
@@ -1026,9 +1032,7 @@ class Coordinator:
             return
         self.emit("op_state", {"call_id": call_id, "state": "running", "side_ref": side})
         self._side_calls[call_id] = {"side": side, "started_ms": self.clock.now_ms()}
-        timeout = _side_timeout(self.limits, side)
-        if timeout:
-            self._arm("op_timeout", f"op:{call_id}", timeout)
+        self._arm_op_timeout(call_id, side)
 
     def _ask(self, call_id: str, kind: str, name: str, args: dict, side: str, *,
              text: str, options: list) -> None:
@@ -1044,8 +1048,7 @@ class Coordinator:
         if timeout_s <= 0 and not ui_attached:
             self._deny_question(qid)
             return
-        if timeout_s > 0:
-            self._arm("question_deadline", f"question:{qid}", float(timeout_s))
+        self._arm_question(qid)
 
     def _deny_question(self, qid: str) -> None:
         pending = self._questions.pop(qid, None)
@@ -1175,7 +1178,7 @@ class Coordinator:
             return {}
         from guest.bulk import settle_manifest
         try:
-            return settle_manifest(self.workspace, self.bulk, self._uploaded)
+            return settle_manifest(self.workspace, self.bulk, self._uploaded, self._digests)
         except Exception as exc:    # noqa: BLE001 - a manifest problem must not block the settle
             self.log(f"workspace manifest failed: {exc}", level="warning")
             return {}
@@ -1220,17 +1223,12 @@ class Coordinator:
         parked = self.emit("parked", {"checkpoint_seq": cp["seq"], "reason": reason})
         self.parked = True
         self.log("parked", level="info", reason=reason, seq=parked["seq"])
-        flush = getattr(self.log_writer, "flush", None)
-        if callable(flush):
-            flush(PARK_ACK_WAIT_S)
-        wait = getattr(self.transport, "wait_acked", None)
-        if callable(wait) and not wait(parked["seq"], PARK_ACK_WAIT_S):
+        self.log_writer.flush(PARK_ACK_WAIT_S)
+        if not self.transport.wait_acked(parked["seq"], PARK_ACK_WAIT_S):
             self.log(f"parked (seq {parked['seq']}) not acked within {PARK_ACK_WAIT_S:g}s; "
                      f"going idle anyway (it is resent on reconnect)", level="warning")
-        self._on_ack(getattr(self.transport, "acked_seq", 0) or 0)
-        go_idle = getattr(self.transport, "park", None)
-        if callable(go_idle) and not self.exit_on_park:
-            go_idle()
+        self._on_ack(self.transport.acked_seq)
+        self.transport.park()
 
     def _unpark(self) -> None:
         self.parked = False
@@ -1258,11 +1256,8 @@ class Coordinator:
             if etype == "turn_start" and body["type"] == "regular":
                 self._register_preamble(body)
             apply(self.state, ev)
-            if etype == "session_start":
-                self._session_start = ev
-            elif etype == "checkpoint":
-                self._last_checkpoint_hash = body["state_hash"]
-            elif etype == "input" and body["dedupe"] == "new" and body["kind"] in INPUT_KINDS:
+            self._track(ev)
+            if etype == "input" and body["dedupe"] == "new" and body["kind"] in INPUT_KINDS:
                 if isinstance(body.get("attachments"), list):
                     self._attachments[body["input_id"]] = body["attachments"]
                 self._pending_inputs.append(body["input_id"])
@@ -1356,7 +1351,7 @@ class Coordinator:
         """After restore(): record the host's time, settle what the dead guest
         left open and wake the task (module doc, M3)."""
         at = getattr(self.cfg, "at", None)
-        if isinstance(at, int) and not isinstance(at, bool) and at > 0:
+        if is_int(at, 1):
             self.emit("clock", {"kind": "host_hello", "at": at})
         if self.task_input_id is not None:
             self._cancel("idle")
@@ -1369,13 +1364,9 @@ class Coordinator:
         if restored.get("after_park"):
             # a fresh process after a park: nothing was lost; wait for the host again
             for call_id, pending in self._side_calls.items():
-                timeout = _side_timeout(self.limits, pending["side"])
-                if timeout:
-                    self._arm("op_timeout", f"op:{call_id}", timeout)
+                self._arm_op_timeout(call_id, pending["side"])
             for qid in self._questions:
-                timeout_s = getattr(self.cfg, "question_timeout_s", 0) or 0
-                if timeout_s > 0:
-                    self._arm("question_deadline", f"question:{qid}", float(timeout_s))
+                self._arm_question(qid)
             if self.task_input_id is not None and self.current_turn is None and not self._turn_pending:
                 if self._last_response_had_calls:
                     self._after_round()

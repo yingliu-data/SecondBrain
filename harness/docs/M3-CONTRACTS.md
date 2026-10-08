@@ -29,8 +29,11 @@ version}. Per-session snapshot: `{session_dir}/vm/snapshot/{vmstate,mem,META.jso
 Snapshots record paths **relative** to the Firecracker process cwd (= the
 session's `vm/` dir), so one base snapshot serves every session (its drive
 `workspace.img` and vsock `../ipc/v.sock` resolve per session).
-`LocalSandbox` emulates restore/snapshot (restore = start a guest process;
-snapshot = wait for the process to exit after `parked`).
+`LocalSandbox` emulates restore/snapshot (snapshot = SIGSTOP the parked
+guest, restore = SIGCONT it, or start a guest process when none is kept); its
+guest workspace is the private `{session}/vm/workspace`, so nothing the host
+writes shows up in the guest's walk. The guest has one lifecycle: it stays up
+across settles and parks until the host stops it or aborts.
 
 ## 3. Park (worker → guest)
 
@@ -68,8 +71,10 @@ snapshot = wait for the process to exit after `parked`).
 
 ## 5. Settle manifest (guest → host, :5001)
 
-At settle the guest walks `/workspace` (excluding `.spill/`, `.git/`), builds
-`protocol.bulk.manifest(files)`, puts it with kind `manifest`, and puts each
+At settle the guest walks `/workspace` (excluding `.spill/`, `.git/`: the rule
+and the sort live in `protocol.bulk.manifest()`), builds
+`protocol.bulk.manifest(files)`, puts it with kind `manifest` (wire path
+`manifest.json`; the host stores it at `{session}/manifest.json`), and puts each
 changed file with kind `workspace` (files under 8 MiB; larger ones listed in
 the manifest only). `settle.manifest` = the manifest dict. Spill files go as
 kind `spill` when they are created (bulk event already exists in M1/M2).

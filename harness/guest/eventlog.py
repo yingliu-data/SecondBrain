@@ -5,7 +5,8 @@ EventLog(dir)
   JSONL segments `events/000001.jsonl`, `events/000002.jsonl`, ... of at most
   SEGMENT_EVENTS (1000) events each; a new segment opens when the current one
   is full (or after rotate()). append(event) writes one line, flushes and
-  fsyncs; the event must be the next seq. mark_acked(seq) records the host's
+  fsyncs; the event must be the next seq. extend(events) writes several and
+  fsyncs once per segment. mark_acked(seq) records the host's
   ack in the marker file `events/acked` (written atomically) so a restarted
   guest knows what the host already holds. read(after_seq=0) returns the
   events in seq order. On open, last_seq and acked_seq are recovered from
@@ -127,6 +128,7 @@ class EventLog:
 
     def _open_next(self) -> None:
         if self._fh is not None:
+            self._sync()
             self._fh.close()
         self._segment += 1
         self._count = 0
@@ -135,24 +137,40 @@ class EventLog:
 
     def append(self, event: dict) -> None:
         """Write one event (the next seq). Durable on disk when this returns."""
+        self.extend([event])
+
+    def extend(self, events: list[dict]) -> None:
+        """Write events (consecutive, starting at the next seq), fsyncing
+        once per segment instead of per event. Durable when this returns; on
+        a bad seq the events before it are written."""
+        with self._lock:
+            try:
+                for event in events:
+                    self._write(event)
+            finally:
+                if self._fh is not None:
+                    self._sync()
+
+    def _write(self, event: dict) -> None:
         seq = event.get("seq") if isinstance(event, dict) else None
         if not is_int(seq, 1):
             raise ValueError(f"event.seq must be a positive int, got {seq!r}")
-        with self._lock:
-            if seq != self._last_seq + 1:
-                raise ValueError(f"event seq {seq} out of order: expected {self._last_seq + 1}")
-            if self._count >= self.segment_events or self._segment == 0:
-                self._open_next()
-            elif self._fh is None:      # reopened after a restart or close(): continue it
-                path = self.events_dir / segment_name(self._segment)
-                self._fh = path.open("a", encoding="utf-8")
-                if _torn_tail(path):   # a crash mid-write left a partial line: end it
-                    self._fh.write("\n")
-            self._fh.write(encode(event))
-            self._fh.flush()
-            os.fsync(self._fh.fileno())
-            self._count += 1
-            self._last_seq = seq
+        if seq != self._last_seq + 1:
+            raise ValueError(f"event seq {seq} out of order: expected {self._last_seq + 1}")
+        if self._count >= self.segment_events or self._segment == 0:
+            self._open_next()
+        elif self._fh is None:      # reopened after a restart or close(): continue it
+            path = self.events_dir / segment_name(self._segment)
+            self._fh = path.open("a", encoding="utf-8")
+            if _torn_tail(path):   # a crash mid-write left a partial line: end it
+                self._fh.write("\n")
+        self._fh.write(encode(event))
+        self._count += 1
+        self._last_seq = seq
+
+    def _sync(self) -> None:
+        self._fh.flush()
+        os.fsync(self._fh.fileno())
 
     def rotate(self) -> None:
         """Close the current segment; the next append starts a new one."""

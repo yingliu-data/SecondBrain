@@ -43,10 +43,10 @@ total bytes spilled in the session (files already in the spill dir count);
 over quota no file is written and the note says so.
 
 M3: with a `bulk` client (guest.bulk.BulkClient) every spill file is also put
-on :5001 as kind "spill", path `.spill/{call_id}.txt`, from the operation's
-worker thread before the result is posted; `spill` then carries
-`bulk_path` (that path) and `uploaded` (bool). The coordinator records the
-`bulk` event and `spill_ref` with `bulk_path`.
+on :5001 as kind "spill", path `.spill/{call_id}.txt` (protocol.bulk.spill_path),
+from the operation's worker thread before the result is posted; `spill` then
+carries `bulk_path` (that path). An upload failure is logged only. The
+coordinator records the `bulk` event and `spill_ref` with `bulk_path`.
 
 Only `inbound.put` touches the coordinator; `State` is never read here.
 """
@@ -67,11 +67,12 @@ from pathlib import Path
 
 from guest import tools
 from guest.tools import builtin
+from protocol.bulk import spill_path as bulk_spill_path
 
 log = logging.getLogger("guest.ops")
 
-HARNESS_DIR = ".harness"
-SPILL_DIR = "spill"
+HARNESS_DIR = builtin.HARNESS_DIR     # the guest's own top-level dir (spill, todo.json)
+LOCAL_SPILL_DIR = "spill"             # local spill copies: {workspace}/.harness/spill/
 DEFAULT_SPILL_THRESHOLD = 2000
 DEFAULT_SPILL_QUOTA = 50_000_000
 DEFAULT_OP_TIMEOUT = 120.0
@@ -388,7 +389,7 @@ class OperationManager:
     # -------------------------------------------------------------- spill
 
     def _existing_spill_bytes(self) -> int:
-        d = self.workspace / HARNESS_DIR / SPILL_DIR
+        d = self.workspace / HARNESS_DIR / LOCAL_SPILL_DIR
         if not d.is_dir():
             return 0
         return sum(p.stat().st_size for p in d.iterdir() if p.is_file())
@@ -405,7 +406,7 @@ class OperationManager:
                 self._spill_used += len(data)
         if over:
             return head + f"\n[truncated: {dropped} chars; spill quota exhausted, full output lost]", None
-        spill_dir = self.workspace / HARNESS_DIR / SPILL_DIR
+        spill_dir = self.workspace / HARNESS_DIR / LOCAL_SPILL_DIR
         path = spill_dir / f"{call_id}.txt"
         try:
             spill_dir.mkdir(parents=True, exist_ok=True)
@@ -416,13 +417,11 @@ class OperationManager:
             return head + f"\n[truncated: {dropped} chars; spill failed: {e.strerror or e}]", None
         spill = {"path": str(path), "sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data)}
         if self.bulk is not None:
-            spill["bulk_path"] = f".spill/{call_id}.txt"
+            spill["bulk_path"] = bulk_spill_path(f"{call_id}.txt")
             try:
-                self.bulk.put("spill", spill["bulk_path"], data)
-                spill["uploaded"] = True
+                self.bulk.put("spill", spill["bulk_path"], data, sha256=spill["sha256"])
             except Exception as e:   # noqa: BLE001 - the local file is still there
                 log.warning("spill upload of %s failed: %s", call_id, e)
-                spill["uploaded"] = False
         return head + f"\n[truncated: {dropped} chars; spill {call_id}]", spill
 
 

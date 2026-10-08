@@ -24,11 +24,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from protocol.allowlist import effective_tools
-from protocol.bulk import decode_line, encode_line, get_header, read_exact, read_line, sha256_hex
+from guest.bulk import BulkClient
+from guest.transport import UnixConnector
 from protocol.messages import ack, encode, parse
 from protocol.sse import DONE_FRAME, response_chunks, sse_frame
 
-from app.host.sandbox import Sandbox
+from app.host.sandbox import Sandbox, SandboxError
 
 HASH = "0" * 64
 LOST_TEXT = "error: operation lost (VM restarted)"
@@ -95,7 +96,6 @@ class FakeGuest:
         self._suspending = False
         self.parks = 0
         self.returned: list[dict] | None = None   # the log return, if any
-        self.log_return_reply: dict | None = None
 
     # ---------------------------------------------------------------- wire
     def connect(self, ipc: Path, port: int = 5000, timeout: float = 5.0) -> None:
@@ -268,20 +268,8 @@ class FakeGuest:
 
     def _log_return(self) -> None:
         """M3-CONTRACTS §4.4: bulk get of the acked log, fold, op_state{lost}."""
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.connect(str(self.ipc / "v.sock_5001"))
-        try:
-            s.sendall(encode_line(get_header(self.session_id, 0)))
-            f = s.makefile("rb")
-            reply = decode_line(read_line(f))
-            self.log_return_reply = reply
-            payload = read_exact(f, reply["bytes"])
-            assert sha256_hex(payload) == reply["sha256"]
-        finally:
-            s.close()
-        events = [json.loads(l) for l in payload.decode().splitlines() if l.strip()]
+        events, self.seq = BulkClient(UnixConnector(self.ipc), self.session_id).get_log(0)
         self.returned = events
-        self.seq = reply["last_seq"]
         settled = {e["body"]["input_id"] for e in events if e["type"] == "settle"}
         open_input = None
         calls: dict[str, bool] = {}
@@ -456,13 +444,15 @@ class FakeSandbox(Sandbox):
             time.sleep(self.restore_delay)
         if snapshot_dir is None:
             if not self.base:
-                raise RuntimeError("no base snapshot")
+                raise SandboxError("no base snapshot")
             self.restores.append("base")
             self._spawn(session_dir)
             return
         g = self._parked_guest
-        if g is None or not (Path(snapshot_dir) / "META.json").exists():
-            raise RuntimeError("no session snapshot")
+        meta = Path(snapshot_dir) / "META.json"
+        if g is None or not meta.exists():
+            raise SandboxError("no session snapshot")
+        meta.unlink()              # a session snapshot is consumed by its restore
         self._parked_guest = None
         self.restores.append("session")
         self.guest = g

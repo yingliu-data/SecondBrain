@@ -1,9 +1,14 @@
 """local — the guest harness as a subprocess (tests, no-KVM machines).
 
 Runs `python -m guest.main --connect unix:{session_dir}/ipc --log-dir
-{session_dir}/guest --workspace {session_dir}/workspace` with the harness
+{session_dir}/guest --workspace {session_dir}/vm/workspace` with the harness
 directory on its path. The guest then connects to the same
 `{session_dir}/ipc/v.sock_{port}` listeners Firecracker would (Endpoints).
+
+`{session_dir}/vm/workspace` is the guest's PRIVATE /workspace, the analogue
+of Firecracker's `vm/workspace.img`: the host's copy `{session_dir}/workspace`
+is written only by the bulk server (the guest's settle uploads), so a bulk put
+never lands in the directory the guest walks.
 
 M3 emulation of snapshots (docs/M3-CONTRACTS.md §2–4):
 
@@ -38,18 +43,12 @@ import time
 from pathlib import Path
 
 from app.config import HARNESS_GUEST_ROOT
-from app.host.sandbox import Sandbox
+from app.host.sandbox import Sandbox, SandboxError
+from app.host.sandbox.firecracker import _ms_since, _now_ms, _unlink, _write_json
 
 logger = logging.getLogger("host.sandbox")
 
 LOCAL_SNAPSHOT_MARKER = "LOCAL_SNAPSHOT.json"
-
-
-def _sandbox_error(msg: str) -> Exception:
-    # The worker catches SandboxError from either backend; the class lives in
-    # firecracker.py (stdlib-only, safe to import here).
-    from app.host.sandbox.firecracker import SandboxError
-    return SandboxError(msg)
 
 
 class _Frozen:
@@ -128,8 +127,6 @@ class LocalSandbox(Sandbox):
         self.session_dir: Path | None = None
         self._log = None
         self._frozen = None          # Popen or _Frozen while snapshotted
-        self.last_restore_ms: float | None = None
-        self.last_snapshot_ms: float | None = None
         self.last_vm_event: dict | None = None
 
     def start(self, session_dir: Path) -> None:
@@ -139,12 +136,13 @@ class LocalSandbox(Sandbox):
         self.session_dir = session_dir
         log_dir = session_dir / "guest"
         log_dir.mkdir(parents=True, exist_ok=True)
-        (session_dir / "workspace").mkdir(parents=True, exist_ok=True)
+        workspace = session_dir / "vm" / "workspace"     # private: see the module doc
+        workspace.mkdir(parents=True, exist_ok=True)
         cmd = [
             self.python, "-m", "guest.main",
             "--connect", f"unix:{session_dir / 'ipc'}",
             "--log-dir", str(log_dir),
-            "--workspace", str(session_dir / "workspace"),
+            "--workspace", str(workspace),
             *self.extra_args,
         ]
         env = dict(os.environ)
@@ -191,44 +189,36 @@ class LocalSandbox(Sandbox):
 
     def restore(self, session_dir: Path, snapshot_dir: Path | None = None) -> None:
         if self.is_alive():
-            raise _sandbox_error("sandbox already started")
+            raise SandboxError("sandbox already started")
         t0 = time.monotonic()
         if snapshot_dir is None:
             self.stop()                          # drop any stale frozen process
             self.start(session_dir)
             source = "base"
         else:
-            marker = Path(snapshot_dir) / LOCAL_SNAPSHOT_MARKER
             frozen = self._frozen_for(Path(snapshot_dir))
             if frozen is None:
-                raise _sandbox_error(f"no local snapshot in {snapshot_dir} (process gone)")
+                raise SandboxError(f"no local snapshot in {snapshot_dir} (process gone)")
             _signal_group(frozen.pid, signal.SIGCONT)
             self.proc, self._frozen = frozen, None   # type: ignore[assignment]
             self.session_dir = Path(session_dir)
-            try:
-                marker.unlink()                  # single-use, like a Firecracker session snapshot
-            except FileNotFoundError:
-                pass
+            _unlink(Path(snapshot_dir) / LOCAL_SNAPSHOT_MARKER)   # consumed (single-use)
             source = "session"
-        self.last_restore_ms = round((time.monotonic() - t0) * 1000, 1)
-        self.last_vm_event = {"op": "restore", "source": source, "ms": self.last_restore_ms}
+        self.last_vm_event = {"op": "restore", "source": source, "ms": _ms_since(t0)}
 
     def snapshot(self, snapshot_dir: Path) -> None:
         t0 = time.monotonic()
         proc = self.proc
         if proc is None or proc.poll() is not None:
-            raise _sandbox_error("local snapshot: the guest process has exited; no state to keep")
+            raise SandboxError("local snapshot: the guest process has exited; no state to keep")
         if self.snapshot_grace_s:
             time.sleep(self.snapshot_grace_s)
         _signal_group(proc.pid, signal.SIGSTOP)
         snapshot_dir = Path(snapshot_dir)
         snapshot_dir.mkdir(parents=True, exist_ok=True)
-        tmp = snapshot_dir / (LOCAL_SNAPSHOT_MARKER + ".tmp")
-        tmp.write_text(json.dumps({"pid": proc.pid, "created_ms": int(time.time() * 1000)}))
-        os.replace(tmp, snapshot_dir / LOCAL_SNAPSHOT_MARKER)
+        _write_json(snapshot_dir / LOCAL_SNAPSHOT_MARKER, {"pid": proc.pid, "created_ms": _now_ms()})
         self._frozen, self.proc = proc, None
-        self.last_snapshot_ms = round((time.monotonic() - t0) * 1000, 1)
-        self.last_vm_event = {"op": "snapshot", "source": "session", "ms": self.last_snapshot_ms}
+        self.last_vm_event = {"op": "snapshot", "source": "session", "ms": _ms_since(t0)}
 
     def has_snapshot(self, snapshot_dir: Path | None = None) -> bool:
         if snapshot_dir is None:

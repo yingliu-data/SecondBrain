@@ -18,7 +18,7 @@ guest dedupes - and the caller attaches to the running stream; one that
 already settled gets its answer replayed from the stored settle, no guest.
 
 M3 (harness/docs/M3-CONTRACTS.md): one long-lived guest per session.
-  vm_state      none -> running -> parking -> parked -> running ...
+  vm_state      none -> booting -> running -> parking -> parked -> booting ...
   boot          a fresh session restores the BASE snapshot when the sandbox
                 has one (else a rootfs start) and sends hello{resume: false}
   .park(reason) control `park`, wait for the acked `parked`, snapshot to
@@ -49,6 +49,7 @@ import re
 import threading
 import time
 import uuid
+from pathlib import Path
 
 from protocol.allowlist import effective_tools
 from protocol.messages import Outbox, ProtocolError, ack, control_message
@@ -66,11 +67,12 @@ from app.config import (
 from app.host.bulk_server import BulkServer
 from app.host.endpoints import ControlChannel, Endpoints
 from app.host.llm_proxy import LLMProxy
-from app.host.sandbox import Sandbox
+from app.host.sandbox import Sandbox, SandboxError
 from app.host.sides import DEVICE_CALLS, DeviceCalls, Sides
 from app.host.state_sync import StateSync, StateSyncError
 from app.host.stream import DONE, Projector, sse, tokens
 from app.user.context_builder import ContextBuilder
+from app.util.ipc import atomic_write_json
 
 logger = logging.getLogger("host.worker")
 
@@ -112,8 +114,7 @@ def make_sandbox() -> Sandbox:
         from app.host.sandbox.firecracker import FirecrackerSandbox  # type: ignore
         return FirecrackerSandbox()
     from app.host.sandbox.local import LocalSandbox
-    # --multi-task: the guest outlives a settle (the idle/park model, M3)
-    return LocalSandbox(HARNESS_GUEST_ROOT, extra_args=["--multi-task"])
+    return LocalSandbox(HARNESS_GUEST_ROOT)
 
 
 class Worker:
@@ -126,7 +127,7 @@ class Worker:
                  session_idle_s: float | None = HARNESS_SESSION_IDLE_S,
                  park_timeout_s: float = HARNESS_PARK_TIMEOUT_S,
                  max_resumes: int = HARNESS_MAX_RESUMES,
-                 park_grace_s: float | None = HARNESS_PARK_GRACE_S) -> None:
+                 park_grace_s: float = HARNESS_PARK_GRACE_S) -> None:
         self.session = session
         self.tenant = tenant
         self.registry = registry
@@ -161,7 +162,6 @@ class Worker:
         self._channel: ControlChannel | None = None
         self._link_up = asyncio.Event()
         self._outbox: Outbox | None = None
-        self._hello_run = 0          # guest run number hello was sent for
         self._guest_run = 0          # increments on every sandbox start
         self._stop_accept = threading.Event()
         self._accept_thread: threading.Thread | None = None
@@ -171,10 +171,11 @@ class Worker:
         self.closed = False
         # M3: park, resume, idle, death
         self.bulk: BulkServer | None = None
-        self.vm_state = "none"                      # none | running | parking | parked
+        # none | booting | running | parking | parked; the session snapshot
+        # itself is the sandbox's business (has_snapshot / restore)
+        self.vm_state = "none"
         self.snapshot_dir = session.root / "vm" / "snapshot"
         self.parked_file = session.root / "vm" / "parked.json"
-        self._session_snapshot = False              # snapshot_dir holds the parked guest
         self._parked_evt = asyncio.Event()
         self._vm_lock = asyncio.Lock()
         self._deferred: list[tuple[str, dict]] = []  # controls held while parked
@@ -184,7 +185,15 @@ class Worker:
         self._lost_calls: set[str] = set()
         self._side_tasks: dict[str, asyncio.Task] = {}
         self._joined: dict[str, str] = {}           # answer input_id -> the task it joins
+        self._bg: set[asyncio.Task] = set()         # fire-and-forget tasks (strong refs)
         self._load_parked()
+
+    def _spawn(self, coro) -> asyncio.Task:
+        """A background task the loop would otherwise only hold weakly."""
+        task = self._loop.create_task(coro)
+        self._bg.add(task)
+        task.add_done_callback(self._bg.discard)
+        return task
 
     # ------------------------------------------------------------ sinks
     def attach(self, input_id: str | None = None) -> asyncio.Queue:
@@ -290,7 +299,7 @@ class Worker:
             "context_window_tokens": HARNESS_CONTEXT_WINDOW_TOKENS,
             "reserve_tokens": HARNESS_RESERVE_TOKENS,
             # M3: running guest ops get this long after `park`, then killed
-            **({"park_grace_s": self.park_grace_s} if self.park_grace_s is not None else {}),
+            "park_grace_s": self.park_grace_s,
         }
 
     def build_hello(self, resume: bool = False) -> dict:
@@ -343,8 +352,7 @@ class Worker:
         assert self._outbox is not None
         msg = control_message(self.session_id, self._outbox.next_number(), type, body)
         self._outbox.push(msg)
-        if self._channel is not None and not self._channel.closed:
-            self._channel.send(msg)
+        self._send_raw(msg)
         return msg
 
     def _send_raw(self, msg: dict) -> None:
@@ -356,21 +364,12 @@ class Worker:
         for t, b in sorted(items, key=lambda tb: tb[0] != "ui_response"):
             self.send_control(t, b)
 
-    def _rebased_outbox(self, highest: int) -> Outbox:
-        """A cseq outbox continuing after `highest` with nothing pending: cseq
-        belongs to the session and is never reused (PROTOCOL.md 3)."""
-        ob = Outbox(self.session_id, "cseq")
-        ob._reserved = ob.highest_sent = ob.highest_acked = highest
-        return ob
-
     # ------------------------------------------------------------ plumbing
     def _ensure_plumbing(self) -> None:
         loop = asyncio.get_running_loop()
         if self._loop is None:
             self._loop = loop
             self._inbound = asyncio.Queue()
-            self._link_up = asyncio.Event()
-            self._parked_evt = asyncio.Event()
         if self.endpoints is None:
             self.endpoints = Endpoints(self.session.root, self.ports)
             self.proxy = LLMProxy(self.endpoints.listener(self.ports["llm"]), self.llm_url,
@@ -415,7 +414,7 @@ class Worker:
                 "sandbox": type(self.sandbox).__name__, **extra}
         if source is not None:
             body["source"] = source
-        sb = getattr(self.sandbox, "last_vm_event", None)
+        sb = self.sandbox.last_vm_event
         if isinstance(sb, dict) and sb.get("op") == op and isinstance(sb.get("ms"), (int, float)):
             body["ms"] = int(sb["ms"])
             if sb.get("source") and source is None:
@@ -441,7 +440,7 @@ class Worker:
         self.endpoints.reopen(self.ports["control"])
         if "bulk" in self.ports and self.bulk is None:
             self.bulk = BulkServer(self.endpoints.reopen(self.ports["bulk"]), self.session.root,
-                                   self.session_id, self.sync.log_after,
+                                   self.session_id, self.sync.read,
                                    on_put=self._on_bulk_put).start()
 
     def _drop_link(self) -> None:
@@ -457,6 +456,45 @@ class Worker:
         except asyncio.TimeoutError:
             return False
 
+    async def _start_guest(self, snapshot_dir: Path | None) -> tuple[str, str, float] | None:
+        """Start a guest run: restore `snapshot_dir` (None: the BASE snapshot)
+        and wait for its link. A base that cannot be restored falls back to a
+        rootfs start; a session snapshot that cannot be restored, or a guest
+        that never connects, gives None (vm{ok: false} logged, sandbox
+        stopped). Returns (op, source, t0) for _mark_running."""
+        t0 = time.monotonic()
+        self._drop_link()
+        if self.sandbox.is_alive():
+            await asyncio.to_thread(self.sandbox.stop)
+        self._guest_run += 1
+        self.vm_state = "booting"
+        self._open_guest_ports()
+        op, source = "restore", "base" if snapshot_dir is None else "session"
+        try:
+            # restore validates before launching: no has_snapshot() pre-check
+            await asyncio.to_thread(self.sandbox.restore, self.session.root, snapshot_dir)
+        except SandboxError as e:
+            logger.warning("session %s: %s restore failed (%s)", self.session_key, source, e)
+            if snapshot_dir is not None:
+                self._vm_event(op, source, t0, ok=False, error=str(e)[:200])
+                return None
+            op, source = "boot", "rootfs"
+            await asyncio.to_thread(self.sandbox.start, self.session.root)
+        if not await self._wait_link():
+            self._vm_event(op, source, t0, ok=False, error="no connection")
+            await asyncio.to_thread(self.sandbox.stop)
+            return None
+        return op, source, t0
+
+    def _mark_running(self, op: str, source: str, t0: float,
+                      held: list[tuple[str, dict]], **extra) -> None:
+        """The shared tail of a boot and a wake: running, no parked file, the
+        vm event, then the held controls `ui_response` first."""
+        self.vm_state = "running"
+        self._clear_parked_file()
+        self._vm_event(op, source, t0, **extra)
+        self._send_ui_first(held)
+
     async def _boot(self, *, resume: bool) -> None:
         """Start a guest run and send hello. Fresh (resume=False): a new log
         run, cseq from 1. Resume (death, or a park whose snapshot is gone):
@@ -464,46 +502,33 @@ class Worker:
         on :5001 and continues the run's seq; the unacked controls of the
         previous guest are numbered again after the hello. Base snapshot
         restore when the sandbox has one, else a rootfs boot (start)."""
-        t0 = time.monotonic()
         carried: list[tuple[str, dict]] = []
-        if resume and self._outbox is not None:
-            carried = [(m["type"], m["body"]) for m in self._outbox.pending
-                       if m["type"] not in ("hello", "heartbeat", "park")]
-            self._outbox = self._rebased_outbox(self._outbox.highest_sent)
-        elif resume:
-            self._outbox = self._rebased_outbox(0)
+        if resume:
+            highest = 0
+            if self._outbox is not None:
+                carried = [(m["type"], m["body"]) for m in self._outbox.pending
+                           if m["type"] not in ("hello", "heartbeat", "park")]
+                highest = self._outbox.highest_sent
+            self._outbox = Outbox(self.session_id, "cseq")
+            self._outbox.resume_from(highest)
         else:
             self.sync.begin_run()
             self._outbox = Outbox(self.session_id, "cseq")   # a fresh guest's inbox starts at 0
         held, self._deferred = self._deferred, []
-        self._drop_link()
-        if self.sandbox.is_alive():
-            await asyncio.to_thread(self.sandbox.stop)
-        self._guest_run += 1
-        self._open_guest_ports()
-        op, source = "boot", "rootfs"
-        if self.sandbox.has_snapshot():
-            try:
-                await asyncio.to_thread(self.sandbox.restore, self.session.root, None)
-                op, source = "restore", "base"
-            except Exception as e:      # SandboxError, NotImplementedError: boot instead
-                logger.warning("session %s: base restore failed (%s); rootfs boot",
-                               self.session_key, e)
-        if source == "rootfs":
-            await asyncio.to_thread(self.sandbox.start, self.session.root)
-        if not await self._wait_link():
+        try:
+            started = await self._start_guest(None)
+        except BaseException:
+            self.vm_state = "none"
             self._deferred = held + self._deferred
-            await self._destroy("no connection")
+            raise
+        if started is None:
+            self.vm_state = "none"
+            self._deferred = held + self._deferred
             raise GuestError(f"guest did not connect within {self.hello_timeout_s}s")
         hello = self.build_hello(resume=resume)
         self.last_hello = hello
-        self.vm_state = "running"
         self.send_control("hello", hello)
-        self._hello_run = self._guest_run
-        self._session_snapshot = False
-        self._clear_parked_file()
-        self._vm_event(op, source, t0, resume=resume)
-        self._send_ui_first(carried + held)
+        self._mark_running(*started, carried + held, resume=resume)
 
     async def _destroy(self, reason: str) -> None:
         """Stop the VM. A parked session stays parked (its snapshot is on disk)."""
@@ -515,41 +540,46 @@ class Worker:
         self._vm_event("destroy", None, t0, reason=reason)
 
     def _guest_ready(self) -> bool:
+        # "running" is set only once hello went to this run's guest (or a
+        # restored guest that keeps its hello reconnected): see _mark_running
         return (self.vm_state == "running" and self.sandbox.is_alive()
-                and self._channel is not None and not self._channel.closed
-                and self._hello_run == self._guest_run)
+                and self._channel is not None and not self._channel.closed)
 
     # ------------------------------------------------------------ park / wake
-    async def park(self, reason: str = "requested") -> bool:
+    async def park(self, reason: str = "requested", *, idle: bool = False) -> bool:
         """Park the guest (M3-CONTRACTS §3): send `park`, wait for the acked
         `parked`, snapshot the VM to {session}/vm/snapshot. True when parked.
-        The next act()/ui_response/side_result restores it."""
+        The next act()/ui_response/side_result restores it.
+
+        idle=True (the idle timer, D18): only while no task runs, and the VM
+        is destroyed afterwards (also a guest that could not park)."""
         self._ensure_plumbing()
         async with self._vm_lock:
-            if reason == "idle" and (self._task_lock.locked() or self._current_future()):
+            if idle and (self._task_lock.locked() or self._current_future() is not None):
                 return False            # a task arrived: not idle any more
-            if self.vm_state != "running" or not self._guest_ready():
-                return False
-            self.vm_state = "parking"
-            self._parked_evt.clear()
-            self.send_control("park", {"reason": reason})
-            return await self._park_locked(reason)
+            parked = False
+            if self._guest_ready():
+                self.vm_state = "parking"
+                self._parked_evt.clear()
+                self.send_control("park", {"reason": reason})
+                parked = await self._park_locked(reason)
+            if idle and not self._task_lock.locked() and (parked or self.sandbox.is_alive()):
+                await self._destroy("idle")
+            return parked
 
     async def _park_locked(self, reason: str) -> bool:
-        deadline = time.monotonic() + self.park_timeout_s
-        while not self._parked_evt.is_set():
-            if self.vm_state != "parking":
-                return False            # the guest died meanwhile: the death path owns it
-            if time.monotonic() > deadline:
-                logger.warning("session %s: no parked within %ss", self.session_key,
-                               self.park_timeout_s)
-                self.sync.host_event("workflow", {"kind": "park_timeout", "reason": reason})
-                self.vm_state = "running"
-                return False
-            try:
-                await asyncio.wait_for(self._parked_evt.wait(), timeout=0.1)
-            except asyncio.TimeoutError:
-                pass
+        try:
+            await asyncio.wait_for(self._parked_evt.wait(), timeout=self.park_timeout_s)
+        except asyncio.TimeoutError:
+            pass
+        if self.vm_state != "parking":
+            return False                # the guest died meanwhile: the death path owns it
+        if not self._parked_evt.is_set():
+            logger.warning("session %s: no parked within %ss", self.session_key,
+                           self.park_timeout_s)
+            self.sync.host_event("workflow", {"kind": "park_timeout", "reason": reason})
+            self.vm_state = "running"
+            return False
         t0 = time.monotonic()
         ok, error = True, None
         try:
@@ -563,7 +593,6 @@ class Worker:
         if not ok:
             await asyncio.to_thread(self.sandbox.stop)   # its memory is lost: resume from the log
         self._drop_link()
-        self._session_snapshot = ok
         self.vm_state = "parked"
         cp = self.sync.state.parked_at
         self._write_parked_file(reason, cp)
@@ -581,7 +610,7 @@ class Worker:
         if self._loop is None or self.closed:
             return
         if self._wake_task is None or self._wake_task.done():
-            self._wake_task = self._loop.create_task(self._wake_guarded())
+            self._wake_task = self._spawn(self._wake_guarded())
 
     async def _wake_guarded(self) -> None:
         try:
@@ -599,37 +628,18 @@ class Worker:
     async def _wake_locked(self) -> None:
         """Resume a parked guest: restore its session snapshot (no hello, seq
         and cseq continue; the link handshake resends what it has not acked),
-        then send the held controls `ui_response` first. Fallback: base
-        restore (or rootfs boot) + hello{resume: true} + the log return."""
+        then send the held controls `ui_response` first. Fallback (no usable
+        session snapshot, or no link): base restore (or rootfs boot) +
+        hello{resume: true} + the log return."""
         if self.vm_state != "parked":
             return
         self._cancel_idle()
-        t0 = time.monotonic()
-        if self._session_snapshot and self.sandbox.has_snapshot(self.snapshot_dir):
-            self._drop_link()
-            self._guest_run += 1
-            self._open_guest_ports()
-            restored = True
-            try:
-                await asyncio.to_thread(self.sandbox.restore, self.session.root, self.snapshot_dir)
-            except Exception as e:
-                restored = False
-                logger.warning("session %s: snapshot restore failed (%s)", self.session_key, e)
-                self._vm_event("restore", "session", t0, ok=False, error=str(e)[:200])
-            self._session_snapshot = False        # a snapshot is restored once
-            if restored and await self._wait_link():
-                self._hello_run = self._guest_run     # the guest keeps its hello
-                self.vm_state = "running"
-                self._clear_parked_file()
-                self._vm_event("restore", "session", t0)
-                held, self._deferred = self._deferred, []
-                self._send_ui_first(held)
-                return
-            if restored:
-                self._vm_event("restore", "session", t0, ok=False, error="no connection")
-                await asyncio.to_thread(self.sandbox.stop)
-        self.vm_state = "none"
-        await self._boot(resume=True)
+        started = await self._start_guest(self.snapshot_dir)
+        if started is None:
+            await self._boot(resume=True)
+            return
+        held, self._deferred = self._deferred, []
+        self._mark_running(*started, held)
 
     # ------------------------------------------------------------ idle
     def _cancel_idle(self) -> None:
@@ -642,36 +652,29 @@ class Worker:
         if self.session_idle_s is None or self.session_idle_s <= 0 or self._loop is None:
             return
         self._idle_handle = self._loop.call_later(
-            self.session_idle_s, lambda: self._loop.create_task(self._idle_park()))
+            self.session_idle_s, lambda: self._spawn(self._idle_park()))
 
     async def _idle_park(self) -> None:
         """session_idle_s after a settle: park + snapshot + destroy (D18)."""
         self._idle_handle = None
-        if self.closed or self._task_lock.locked():
+        if self.closed:
             return
         self.sync.host_event("workflow", {"kind": "idle", "idle_s": self.session_idle_s})
         try:
-            parked = await self.park("idle")
-            async with self._vm_lock:
-                if self._task_lock.locked() or self.vm_state not in ("parked", "running"):
-                    return
-                if parked or self.sandbox.is_alive():
-                    # not parked (a guest without park support): a fresh run next time
-                    await self._destroy("idle")
+            await self.park("idle", idle=True)
         except Exception:
             logger.exception("session %s: idle park failed", self.session_key)
 
     # ------------------------------------------------------------ parked file
     def _write_parked_file(self, reason: str, checkpoint_seq) -> None:
         """What a new Worker (agent-api restart) needs to resume the parked
-        guest: cseq continues; whether the session snapshot is usable."""
+        guest: cseq continues. Whether the session snapshot is still usable
+        is the sandbox's to say (restore() refuses one that is not)."""
         try:
-            self.parked_file.parent.mkdir(parents=True, exist_ok=True)
-            self.parked_file.write_text(json.dumps({
+            atomic_write_json(self.parked_file, {
                 "cseq": self._outbox.highest_sent if self._outbox is not None else 0,
-                "snapshot": self._session_snapshot, "reason": reason,
-                "checkpoint_seq": checkpoint_seq, "last_seq": self.sync.last_seq,
-                "at": now_ms()}))
+                "reason": reason, "checkpoint_seq": checkpoint_seq,
+                "last_seq": self.sync.last_seq, "at": now_ms()})
         except OSError as e:
             logger.warning("could not write %s: %s", self.parked_file, e)
 
@@ -687,9 +690,8 @@ class Worker:
         except (OSError, ValueError):
             return
         self.vm_state = "parked"
-        self._outbox = self._rebased_outbox(int(info.get("cseq", 0)))
-        self._session_snapshot = bool(info.get("snapshot")) and self.sandbox.has_snapshot(
-            self.snapshot_dir)
+        self._outbox = Outbox(self.session_id, "cseq")
+        self._outbox.resume_from(int(info.get("cseq", 0)))
 
     # ------------------------------------------------------------ act
     async def act(self, task_input: dict) -> dict:
@@ -719,6 +721,17 @@ class Worker:
                                                   "question_id": task_input["answer_to"]})
                 self.send_control(*self._task_message(task_input))
                 return await asyncio.shield(cur[1])
+        elif task_input.get("answer_to"):
+            # no task is waiting for this answer (it settled, timed out or
+            # never asked): a ui_response run as a task never settles, would
+            # hold the task lock for the wall clock and then kill the guest
+            self.sync.host_event("workflow", {"kind": "answer_signal", "input_id": input_id,
+                                              "question_id": task_input["answer_to"],
+                                              "dedupe": "no_task"})
+            result = self._fail(input_id, "failed", "No question is waiting for this answer.",
+                                input_id_scope=input_id)
+            self._end_stream(input_id)
+            return result
 
         async with self._task_lock:
             if input_id in self.sync.settled:
@@ -903,13 +916,14 @@ class Worker:
         # death mid-task (M3-CONTRACTS §4)
         if self.vm_state == "parking":
             self.vm_state = "running"   # the waiting park() gives up
+            self._parked_evt.set()      # ... at once
         if self._resumes >= self.max_resumes:
             msg = ("the guest died again after a resume" if self._resumes
                    else "the guest exited before settling the task")
             fut.set_exception(GuestError(msg))
             return
         self._resumes += 1
-        self._loop.create_task(self._death_resume(fut))
+        self._spawn(self._death_resume(fut))
 
     async def _death_resume(self, fut: asyncio.Future) -> None:
         """Restore the base snapshot on the same workspace, hello{resume:
@@ -922,7 +936,6 @@ class Worker:
             async with self._vm_lock:
                 if self._current_future() is not fut:
                     return
-                self.vm_state = "none"
                 await self._boot(resume=True)
         except Exception as e:
             logger.exception("session %s: resume after death failed", self.session_key)
@@ -960,7 +973,7 @@ class Worker:
             self._parked_evt.set()
             if self.vm_state == "running":      # not asked for: the guest parked itself
                 self.vm_state = "parking"
-                self._loop.create_task(self._adopt_park(body["reason"]))
+                self._spawn(self._adopt_park(body["reason"]))
         elif etype == "settle":
             fut = self._current_future()
             if fut is not None and body["input_id"] == self._current[0]:
@@ -1036,7 +1049,8 @@ class Workers:
         self.worker_kwargs = worker_kwargs
 
     def get_or_create(self, session, tenant, registry, **kwargs) -> Worker:
-        key = f"{tenant.user}/{tenant.name}_{session.read_meta().get('session_id', session.root.name)}"
+        # the same fallback as Worker.session_key, so a key always finds its worker
+        key = f"{tenant.user}/{tenant.name}_{session.read_meta().get('session_id') or session.root.name}"
         w = self._workers.get(key)
         if w is None or w.closed:
             w = Worker(session, tenant, registry, self.sandbox_factory(),

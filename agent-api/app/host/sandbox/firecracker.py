@@ -47,7 +47,7 @@ Public API:
                                  restore(session_dir, snapshot_dir=None),
                                  snapshot(snapshot_dir), has_snapshot(snapshot_dir=None);
                                  plus guest_cid, api_socket, vsock_uds, workspace_image,
-                                 pid, returncode, wait(timeout), last_restore_ms,
+                                 pid, returncode, wait(timeout),
                                  last_vm_event ({op, source, ms} for the `vm` host event)
     build_base_snapshot(config)  boot the rootfs, wait for the guest's idle-wait, snapshot
     derive_guest_cid(name)       a per-session CID (>= 3) for cold boots
@@ -77,8 +77,18 @@ from pathlib import Path
 
 try:  # the worker's interface (owned elsewhere); standalone when absent
     from app.host.sandbox import Sandbox as _SandboxBase
+    from app.host.sandbox import SandboxError
 except ImportError:  # pragma: no cover
     _SandboxBase = object  # type: ignore[assignment,misc]
+
+    class SandboxError(RuntimeError):  # type: ignore[no-redef]
+        """Launch, API, snapshot or lifecycle failure (standalone copy of
+        app.host.sandbox.SandboxError)."""
+
+        def __init__(self, message: str, *, status: int | None = None, body: str = ""):
+            super().__init__(message)
+            self.status = status
+            self.body = body
 
 __all__ = [
     "API_ORDER",
@@ -157,16 +167,6 @@ _VERSION_RE = re.compile(r"v\d+\.\d+\.\d+\S*")
 # handed to Firecracker is made relative to its cwd ({session_dir}/vm) when the
 # absolute form is too long, and the host side connects through /proc/self/fd.
 UNIX_PATH_MAX = 100   # leave room for Firecracker's own "_PORT" suffixes
-
-
-class SandboxError(RuntimeError):
-    """Launch, API, snapshot or lifecycle failure. API failures carry
-    Firecracker's response body verbatim (`status`, `body`)."""
-
-    def __init__(self, message: str, *, status: int | None = None, body: str = ""):
-        super().__init__(message)
-        self.status = status
-        self.body = body
 
 
 def derive_guest_cid(name: str) -> int:
@@ -380,11 +380,11 @@ class FirecrackerSandbox(_SandboxBase):
         self.guest_cid: int | None = None
         self._proc: subprocess.Popen | None = None
         self._last_returncode: int | None = None
-        # M3: timings for the worker's `vm{op, source, ms}` host event (§6)
-        self.last_restore_ms: float | None = None
-        self.last_snapshot_ms: float | None = None
-        self.last_boot_ms: float | None = None
+        # M3: {op, source, ms} for the worker's `vm` host event (§6)
         self.last_vm_event: dict | None = None
+        # resolved once (the first snapshot check), not per check
+        self._image_ver: str | None = None
+        self._fc_ver: str | None = None
 
     # ------------------------------------------------------------ interface
 
@@ -412,8 +412,7 @@ class FirecrackerSandbox(_SandboxBase):
         except BaseException:
             self._kill()
             raise
-        self.last_boot_ms = _ms_since(t0)
-        self.last_vm_event = {"op": "boot", "source": "rootfs", "ms": self.last_boot_ms}
+        self.last_vm_event = {"op": "boot", "source": "rootfs", "ms": _ms_since(t0)}
 
     def restore(self, session_dir, snapshot_dir=None) -> None:
         """Start from a snapshot: `snapshot_dir=None` -> the BASE snapshot in
@@ -426,8 +425,7 @@ class FirecrackerSandbox(_SandboxBase):
             raise SandboxError("sandbox already started")
         self._proc = None
         self.config.validate(restore=True)
-        source = "base" if snapshot_dir is None else "session"
-        snap = self.config.base_snapshot_dir if snapshot_dir is None else Path(snapshot_dir)
+        snap, source = self._resolve_snapshot(snapshot_dir)
         meta = self._check_snapshot(snap, source)
 
         self._prepare(Path(session_dir))
@@ -461,8 +459,7 @@ class FirecrackerSandbox(_SandboxBase):
         except BaseException:
             self._kill()
             raise
-        self.last_restore_ms = _ms_since(t0)
-        self.last_vm_event = {"op": "restore", "source": source, "ms": self.last_restore_ms}
+        self.last_vm_event = {"op": "restore", "source": source, "ms": _ms_since(t0)}
         if source == "session":
             # A session snapshot is single-use: the VM now runs on and changes
             # workspace.img, so restoring the same vmstate again would hand the
@@ -480,7 +477,7 @@ class FirecrackerSandbox(_SandboxBase):
         a snapshot this VM was restored from is never truncated under it."""
         meta = {
             "format": SNAPSHOT_FORMAT,
-            "image_version": image_version(self.config),
+            "image_version": self._image_version(),
             "firecracker_version": self._fc_version(),
             "guest_cid": self.guest_cid,
             "session": self.session_dir.name if self.session_dir else None,
@@ -488,10 +485,8 @@ class FirecrackerSandbox(_SandboxBase):
         self._snapshot_into(Path(snapshot_dir), META_NAME, meta, source="session")
 
     def has_snapshot(self, snapshot_dir=None) -> bool:
-        source = "base" if snapshot_dir is None else "session"
-        snap = self.config.base_snapshot_dir if snapshot_dir is None else Path(snapshot_dir)
         try:
-            self._check_snapshot(snap, source)
+            self._check_snapshot(*self._resolve_snapshot(snapshot_dir))
         except SandboxError:
             return False
         return True
@@ -511,10 +506,8 @@ class FirecrackerSandbox(_SandboxBase):
             try:
                 proc.wait(timeout=self.config.stop_grace_s)
             except subprocess.TimeoutExpired:
-                self._kill()
-        self._last_returncode = proc.returncode
-        self._proc = None
-        self._cleanup_sockets()
+                pass
+        self._reap()
         self.last_vm_event = {"op": "destroy", "source": "session", "ms": _ms_since(t0)}
 
     def is_alive(self) -> bool:
@@ -605,7 +598,21 @@ class FirecrackerSandbox(_SandboxBase):
         os.symlink(target, link)
 
     def _fc_version(self) -> str:
-        return self.config.firecracker_version or firecracker_version(self.config.firecracker_bin)
+        if self._fc_ver is None:
+            self._fc_ver = (self.config.firecracker_version
+                            or firecracker_version(self.config.firecracker_bin))
+        return self._fc_ver
+
+    def _image_version(self) -> str:
+        if self._image_ver is None:
+            self._image_ver = image_version(self.config)
+        return self._image_ver
+
+    def _resolve_snapshot(self, snapshot_dir) -> tuple[Path, str]:
+        """(snapshot dir, source): None -> the BASE snapshot, else a session one."""
+        if snapshot_dir is None:
+            return self.config.base_snapshot_dir, "base"
+        return Path(snapshot_dir), "session"
 
     def _check_snapshot(self, snap: Path, source: str) -> dict:
         meta_name = MANIFEST_NAME if source == "base" else META_NAME
@@ -621,7 +628,7 @@ class FirecrackerSandbox(_SandboxBase):
             raise SandboxError(f"{snap / meta_name} is not an object")
         if meta.get("format", SNAPSHOT_FORMAT) != SNAPSHOT_FORMAT:
             raise SandboxError(f"{source} snapshot format {meta.get('format')} != {SNAPSHOT_FORMAT}")
-        want_img = image_version(self.config)
+        want_img = self._image_version()
         if meta.get("image_version") != want_img:
             raise SandboxError(
                 f"{source} snapshot image_version {meta.get('image_version')!r} != "
@@ -662,14 +669,9 @@ class FirecrackerSandbox(_SandboxBase):
         meta = dict(meta, created_ms=_now_ms())
         _write_json(staging / meta_name, meta)
         # The VM is paused and its block files fsynced by Firecracker: kill it.
-        proc = self._proc
-        self._kill()
-        self._last_returncode = proc.returncode if proc is not None else None
-        self._proc = None
-        self._cleanup_sockets()
+        self._reap()
         _swap_dir(staging, dest)
-        self.last_snapshot_ms = _ms_since(t0)
-        self.last_vm_event = {"op": "snapshot", "source": source, "ms": self.last_snapshot_ms}
+        self.last_vm_event = {"op": "snapshot", "source": source, "ms": _ms_since(t0)}
 
     def _ensure_workspace_image(self) -> None:
         img = self.workspace_image
@@ -816,6 +818,15 @@ class FirecrackerSandbox(_SandboxBase):
         except subprocess.TimeoutExpired:
             pass
 
+    def _reap(self) -> None:
+        """Kill the process if it still runs, keep its exit code, forget it,
+        remove its sockets (after stop, and after a snapshot)."""
+        proc = self._proc
+        self._kill()
+        self._last_returncode = proc.returncode if proc is not None else None
+        self._proc = None
+        self._cleanup_sockets()
+
     def _cleanup_sockets(self) -> None:
         _unlink(self.api_socket)
         _unlink(self.vsock_uds)
@@ -896,7 +907,7 @@ def build_base_snapshot(config: FirecrackerConfig, cache_dir: str | Path | None 
     try:
         say(f"booting rootfs in {build_dir}")
         sb.start(build_dir)
-        say(f"booted in {sb.last_boot_ms} ms; waiting for the guest's idle-wait")
+        say(f"booted in {sb.last_vm_event['ms']} ms; waiting for the guest's idle-wait")
         how = wait_guest_idle(sb, timeout_s=idle_timeout_s, settle_s=settle_s,
                               fixed_delay_s=fixed_delay_s, log=say)
         manifest = {
@@ -914,7 +925,7 @@ def build_base_snapshot(config: FirecrackerConfig, cache_dir: str | Path | None 
         }
         sb._snapshot_into(cfg.base_snapshot_dir, MANIFEST_NAME, manifest, source="base")
         manifest = json.loads((cfg.base_snapshot_dir / MANIFEST_NAME).read_text())
-        say(f"base snapshot written to {cfg.base_snapshot_dir} in {sb.last_snapshot_ms} ms")
+        say(f"base snapshot written to {cfg.base_snapshot_dir} in {sb.last_vm_event['ms']} ms")
         return manifest
     finally:
         sb._kill()

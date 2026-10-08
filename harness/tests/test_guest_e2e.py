@@ -90,7 +90,11 @@ class Guest:
         return self
 
     def finish(self, timeout=15.0) -> int:
+        """End the session the way a host stop does (abort: the guest stays
+        up after a settle otherwise) and collect the exit code."""
         assert self.proc is not None
+        if self.proc.poll() is None and self.host.connected:
+            self.host.send("abort", {"reason": "test over"})
         try:
             out, err = self.proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:

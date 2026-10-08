@@ -166,8 +166,9 @@ def test_restore_from_session_snapshot(fake_fc, fake_mkfs, session_dir, tmp_path
         assert info["cwd"] == str(session_dir / "vm")
         assert info["workspace_exists"] is True
         assert sb2.guest_cid == cid
-        assert isinstance(sb2.last_restore_ms, float) and sb2.last_restore_ms >= 0
-        assert sb2.last_vm_event == {"op": "restore", "source": "session", "ms": sb2.last_restore_ms}
+        ms = sb2.last_vm_event["ms"]
+        assert isinstance(ms, float) and ms >= 0
+        assert sb2.last_vm_event == {"op": "restore", "source": "session", "ms": ms}
         # single-use: the running VM diverges from that vmstate
         assert not sb2.has_snapshot(snap)
         assert (snap / "META.json.consumed").exists()

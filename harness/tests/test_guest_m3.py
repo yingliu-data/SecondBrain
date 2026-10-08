@@ -19,8 +19,8 @@ import time
 
 import pytest
 
-from guest.bulk import manifest_bytes
 from guest.coordinator import LOST_CONTENT
+from protocol.canonical import canonical_json
 from protocol.fold import replay, state_hash, verify_checkpoints
 from tests.fakes.fake_host import HOLD, FakeHost
 from tests.fakes.fake_llm import FakeLLM, text, tool_calls
@@ -72,6 +72,10 @@ class Rig:
         proc.communicate()
 
     def finish(self, proc, timeout=20.0) -> int:
+        """End the session the way a host stop does (abort: the guest stays
+        up after a settle otherwise) and collect the exit code."""
+        if proc.poll() is None and self.host.connected:
+            self.host.send("abort", {"reason": "test over"})
         try:
             _, err = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -244,21 +248,22 @@ def test_park_while_a_host_op_runs_and_its_result_after_resume(rig):
     check_parked_log(r.host.events)
 
 
-def test_exit_on_park_then_resume_hello_keeps_the_host_op(rig):
-    """--exit-on-park (a sandbox that cannot snapshot a live process): exit
-    4 once parked; the next process gets hello{resume}, the log ends with
-    parked, so the device call is still waited for (not lost)."""
+def test_host_stops_a_parked_guest_then_resume_hello_keeps_the_host_op(rig):
+    """The host stops a parked guest (its snapshot is lost); the next process
+    gets hello{resume}, the log ends with parked, so the device call is still
+    waited for (not lost)."""
     r = rig(m3_hello(DEVICE), script=[
         tool_calls([("call_dev", "calendar", {"day": "today"})]),
         text("All good.")], side_results={"call_dev": HOLD})
-    proc = r.spawn("--exit-on-park")
+    proc = r.spawn()
     r.task()
     r.host.wait_for("op_state", timeout=10)
     r.host.send("park", {"reason": "idle"})
     r.host.wait_for("parked", timeout=10)
-    assert r.finish(proc) == 4, r.stderr
+    r.host.wait_disconnected(timeout=5)          # parked was acked; the guest idle-waits
+    r.kill(proc)                                  # the host stops the parked VM
     r.host.listen()
-    proc2 = r.spawn("--exit-on-park", wait_hello=False)
+    proc2 = r.spawn(wait_hello=False)
     r.host.wait_connected(timeout=10, count=r.host.connections + 1)
     hello = r.host.send("hello", dict(r.hello, resume=True))
     r.host.wait_acked_cseq(hello["cseq"], timeout=10)
@@ -333,7 +338,7 @@ def test_settle_manifest_and_spill_upload(rig):
     assert manifest["total_bytes"] == 3 + 3000
     assert r.host.bulk_files[("workspace", "a.txt")] == b"hi\n"
     assert r.host.bulk_files[("workspace", "sub/b.txt")] == big.encode()
-    assert r.host.bulk_files[("manifest", "manifest.json")] == manifest_bytes(manifest)
+    assert r.host.bulk_files[("manifest", "manifest.json")] == canonical_json(manifest).encode()
     # the spill went out as kind spill under .spill/, and the events name that path
     spill = r.host.bulk_files[("spill", ".spill/call_w.txt")]
     assert spill.decode().endswith(big)

@@ -2,10 +2,10 @@
 docs/PROTOCOL.md section 7, docs/M3-CONTRACTS.md sections 4–5).
 
   BulkClient(connector, session_id, port=5001, timeout_s=60)
-    put(kind, path, data: bytes) -> None       spill | workspace | manifest
+    put(kind, path, data: bytes, sha256=None) -> None   spill | workspace | manifest
     get_log(after_seq=0) -> (events, last_seq) the host's acked events, in seq order
-  workspace_files(workspace) -> list[{path, bytes, sha256, mode}]
-  settle_manifest(workspace, client=None, uploaded=None) -> manifest dict
+  workspace_files(workspace, digests=None) -> ([{path, bytes, sha256, mode}], {path: abs})
+  settle_manifest(workspace, client=None, uploaded=None, digests=None) -> manifest dict
   MAX_UPLOAD_BYTES                              files at or above this stay manifest-only
 
 One transfer per connection; the framing (header line, raw bytes, reply line)
@@ -14,31 +14,32 @@ read, a reply with ok false, a payload whose sha256 does not match): the
 callers decide whether it is fatal (the log return on resume is; a spill or a
 settle upload is logged and the task goes on).
 
-The workspace walk skips `.spill/` and `.git/` (protocol.bulk.MANIFEST_EXCLUDE)
-and the guest's own `.harness/` (the local spill files and other harness
-state; guest.ops.HARNESS_DIR), follows no symlinks and lists regular files
-only. Paths protocol.bulk.check_path rejects (a backslash in a name) are left
-out with a warning.
+The workspace walk does not descend into the trees protocol.bulk.manifest()
+excludes (`.spill/`, `.git/`; manifest() owns that rule and the sort) nor into
+the guest's own top-level `.harness/` (local spill files, todo.json;
+guest.ops.HARNESS_DIR). It follows no symlinks and lists regular files only.
+Paths protocol.bulk.check_path rejects (a backslash in a name) are left out
+with a warning. A digest cache keyed by (size, mtime_ns, ino) spares
+re-hashing unchanged files across settles.
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import os
 import socket
 import stat
 
+from guest.ops import HARNESS_DIR, _file_digest
 from protocol import bulk as proto
 from protocol.bulk import BulkError
+from protocol.canonical import canonical_json, is_int
 
 log = logging.getLogger("guest.bulk")
 
 BULK_PORT = 5001
 MAX_UPLOAD_BYTES = 8 * 1024 * 1024
 TIMEOUT_S = 60.0
-HARNESS_DIR = ".harness"          # guest.ops.HARNESS_DIR (not imported: ops imports this module)
-MANIFEST_PATH = "manifest.json"
 
 
 class BulkClient:
@@ -50,10 +51,11 @@ class BulkClient:
         self.timeout_s = timeout_s
 
     # ------------------------------------------------------------ transfers
-    def put(self, kind: str, path: str, data: bytes) -> None:
+    def put(self, kind: str, path: str, data: bytes, sha256: str | None = None) -> None:
         """Send one file; returns once the host replied ok (it verified the
-        byte count and sha256 and stored the file)."""
-        header = proto.put_header(self.session_id, kind, path, data)
+        byte count and sha256 and stored the file). `sha256`: the digest of
+        `data` when the caller already has it."""
+        header = proto.put_header(self.session_id, kind, path, data, sha256)
         with self._connect() as sock:
             send_error = None
             try:
@@ -82,7 +84,7 @@ class BulkClient:
                 if reply.get("ok") is not True:
                     raise BulkError(f"get log: host said {reply.get('error')!r}")
                 n = reply.get("bytes")
-                if not isinstance(n, int) or isinstance(n, bool) or n < 0:
+                if not is_int(n, 0):
                     raise BulkError(f"get log: bad reply.bytes {n!r}")
                 payload = proto.read_exact(rfile, n)
             except OSError as exc:
@@ -101,7 +103,7 @@ class BulkClient:
                 raise BulkError("get log: event line is not an object")
             events.append(ev)
         last_seq = reply.get("last_seq")
-        if not isinstance(last_seq, int) or isinstance(last_seq, bool) or last_seq < after_seq:
+        if not is_int(last_seq, after_seq):
             raise BulkError(f"get log: bad reply.last_seq {last_seq!r}")
         seqs = [e.get("seq") for e in events]
         if seqs != list(range(after_seq + 1, after_seq + 1 + len(events))) or (
@@ -119,21 +121,27 @@ class BulkClient:
 
 
 # ---------------------------------------------------------------- workspace
-def workspace_files(workspace) -> tuple[list[dict], dict[str, str]]:
+def workspace_files(workspace, digests: dict | None = None) -> tuple[list[dict], dict[str, str]]:
     """([{path, bytes, sha256, mode}], {path: absolute path}) for every regular
-    file under `workspace`, minus the excluded trees. Sorted by path."""
+    file under `workspace` except the guest's own top-level `.harness/`.
+    Excluded trees (protocol.bulk.excluded) are not descended into; filtering
+    and sorting are protocol.bulk.manifest()'s job.
+
+    `digests` ({path: ((size, mtime_ns, ino), sha256)}, kept by the caller
+    across settles) skips re-hashing files whose stat key is unchanged; it is
+    replaced in place by what this walk saw."""
     root = os.fspath(workspace)
     files: list[dict] = []
     where: dict[str, str] = {}
-    excluded = tuple(proto.MANIFEST_EXCLUDE) + (HARNESS_DIR + "/",)
+    cache = digests if digests is not None else {}
+    seen: dict[str, tuple] = {}
     for dirpath, dirnames, filenames in os.walk(root):
         rel_dir = os.path.relpath(dirpath, root)
         rel_dir = "" if rel_dir == "." else rel_dir.replace(os.sep, "/") + "/"
-        dirnames[:] = sorted(d for d in dirnames if (rel_dir + d + "/") not in excluded)
-        for name in sorted(filenames):
+        dirnames[:] = [d for d in dirnames if not proto.excluded(rel_dir + d + "/")
+                       and not (rel_dir == "" and d == HARNESS_DIR)]
+        for name in filenames:
             rel = rel_dir + name
-            if rel == MANIFEST_PATH:  # the host writes it here (LocalSandbox shares the dir)
-                continue
             full = os.path.join(dirpath, name)
             try:
                 st = os.lstat(full)
@@ -146,40 +154,30 @@ def workspace_files(workspace) -> tuple[list[dict], dict[str, str]]:
             except BulkError as exc:
                 log.warning("left out of the manifest: %s", exc)
                 continue
-            digest = _sha256_file(full)
+            key = (st.st_size, st.st_mtime_ns, st.st_ino)
+            cached = cache.get(rel)
+            digest = cached[1] if cached is not None and cached[0] == key else _file_digest(full)
             if digest is None:
                 continue
+            seen[rel] = (key, digest)
             files.append({"path": rel, "bytes": st.st_size, "sha256": digest,
                           "mode": stat.S_IMODE(st.st_mode)})
             where[rel] = full
-    files.sort(key=lambda f: f["path"])
+    if digests is not None:
+        digests.clear()
+        digests.update(seen)
     return files, where
 
 
-def _sha256_file(path: str) -> str | None:
-    h = hashlib.sha256()
-    try:
-        with open(path, "rb") as fh:
-            for chunk in iter(lambda: fh.read(1 << 20), b""):
-                h.update(chunk)
-    except OSError:
-        return None
-    return h.hexdigest()
-
-
-def manifest_bytes(manifest: dict) -> bytes:
-    return json.dumps(manifest, sort_keys=True, separators=(",", ":"),
-                      ensure_ascii=False).encode("utf-8")
-
-
 def settle_manifest(workspace, client: BulkClient | None = None,
-                    uploaded: dict[str, str] | None = None) -> dict:
+                    uploaded: dict[str, str] | None = None,
+                    digests: dict | None = None) -> dict:
     """The workspace manifest (protocol.bulk.manifest). With a client: puts
     every file whose sha256 differs from `uploaded` (path -> sha256 already
     on the host; updated in place) and is under MAX_UPLOAD_BYTES, then the
-    manifest itself. Upload failures are logged; the manifest is returned
-    either way."""
-    files, where = workspace_files(workspace)
+    manifest itself. `digests`: workspace_files' stat-keyed cache. Upload
+    failures are logged; the manifest is returned either way."""
+    files, where = workspace_files(workspace, digests)
     manifest = proto.manifest(files)
     if client is None:
         return manifest
@@ -190,14 +188,15 @@ def settle_manifest(workspace, client: BulkClient | None = None,
         try:
             with open(where[f["path"]], "rb") as fh:
                 data = fh.read()
-            if proto.sha256_hex(data) != f["sha256"]:
+            digest = proto.sha256_hex(data)
+            if digest != f["sha256"]:
                 log.warning("%s changed while uploading; sent as it is now", f["path"])
-            client.put("workspace", f["path"], data)
-            uploaded[f["path"]] = proto.sha256_hex(data)
+            client.put("workspace", f["path"], data, sha256=digest)
+            uploaded[f["path"]] = digest
         except (OSError, BulkError) as exc:
             log.warning("workspace upload of %s failed: %s", f["path"], exc)
     try:
-        client.put("manifest", MANIFEST_PATH, manifest_bytes(manifest))
+        client.put("manifest", proto.MANIFEST_PATH, canonical_json(manifest).encode())
     except BulkError as exc:
         log.warning("manifest upload failed: %s", exc)
     return manifest

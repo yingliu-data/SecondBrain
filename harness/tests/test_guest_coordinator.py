@@ -99,6 +99,7 @@ class FakeTransport:
         self.acks: list = []
         self.on_event: list = []
         self.wire: list = []          # (type, body) of events and live messages, in send order
+        self.parks = 0
         self._lock = threading.Lock()
 
     def send_event(self, event):
@@ -116,6 +117,17 @@ class FakeTransport:
     def send_ack(self, cseq):
         self.acks.append(cseq)
 
+    # park (M3): every event counts as acked at once; park() is recorded
+    def wait_acked(self, seq, timeout=None):
+        return True
+
+    @property
+    def acked_seq(self):
+        return self.events[-1]["seq"] if self.events else 0
+
+    def park(self):
+        self.parks += 1
+
     def live_of(self, type):
         return [b for t, b in self.live if t == type]
 
@@ -132,6 +144,9 @@ class FakeLogWriter:
 
     def mark_acked(self, seq):
         self.acked = max(self.acked, seq)
+
+    def flush(self, timeout=None):
+        return True
 
 
 class FakeOps:

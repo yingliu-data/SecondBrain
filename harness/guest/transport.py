@@ -36,8 +36,9 @@ Idle-wait (M3, the snapshot point): built with `idle=True`, the link thread
 tries to connect every `idle_poll_s` (IDLE_POLL_S, 50 ms), silently and
 without backoff, and stays in that loop until the host has sent a first line
 on a connection (any connect error, or a reset before that, e.g. the vsock
-reset a Firecracker snapshot causes, is retried the same way); `wait_up(timeout)`
-blocks until a connection is usable. `park()` closes the connection and puts
+reset a Firecracker snapshot causes, is retried the same way);
+`wait_awake(timeout)` blocks until that first line came, `wait_up(timeout)`
+until a connection is usable. `park()` closes the connection and puts
 the link thread back into that idle loop (the guest keeps its state, the
 worker snapshots the VM, and after a restore the first attempt reconnects
 with the normal handshake + resend). `seed_seq(n)` continues the event
@@ -162,6 +163,9 @@ class Transport:
         self._writer_thread: threading.Thread | None = None
         self.connections = 0                           # successful connects so far
         self._up_event = threading.Event()
+        self._awake = threading.Event()                # set while not idle-waiting
+        if not idle:
+            self._awake.set()
 
     # ------------------------------------------------------------ lifecycle
 
@@ -194,6 +198,11 @@ class Transport:
         """True while the link thread is in the idle-wait loop."""
         return self._idle
 
+    def wait_awake(self, timeout: float | None = None) -> bool:
+        """Block until idle-wait is over (the host sent its first line).
+        False on timeout."""
+        return self._awake.wait(timeout)
+
     def wait_up(self, timeout: float | None = None) -> bool:
         """Block until a connection is usable (handshake done). False on timeout."""
         return self._up_event.wait(timeout)
@@ -204,6 +213,7 @@ class Transport:
         opens with the handshake and resends whatever is unacked."""
         with self._lock:
             self._idle = True
+            self._awake.clear()
         sock = self._sock
         if sock is not None:
             _shutdown(sock)
@@ -315,6 +325,7 @@ class Transport:
             if self._idle:
                 with self._lock:
                     self._idle = False
+                    self._awake.set()
                 log.info("idle-wait over: the host answered on :%d", self.port)
             if not raw.strip():
                 continue

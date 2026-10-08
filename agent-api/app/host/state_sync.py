@@ -8,7 +8,8 @@
                                   (seq > last_seq + 1) are not appended; the ack
                                   is the highest contiguous seq either way.
     .host_event(type, body)       the worker's own log: events/host-NNNNNN.jsonl
-    .read(after_seq=0)            events from disk, in seq order
+    .read(after_seq=0)            events from disk, in seq order (safe from another
+                                  thread: the bulk server's log return)
     .state                        protocol.fold.State folded from the log
     .last_seq                     highest stored seq
 
@@ -162,12 +163,23 @@ class StateSync:
             return self.run
 
     def read(self, after_seq: int = 0, *, run: int | None = None) -> list[dict]:
-        """Events with seq > after_seq from disk (current run by default)."""
+        """Events with seq > after_seq from disk, current run by default.
+
+        For the current run the bound (the run and its last_seq) is taken
+        under the lock and the files are parsed outside it, stopping at that
+        seq: a line being appended meanwhile is never parsed. Every stored
+        event is acked (the host acks only after the append), so this is the
+        log return (M3-CONTRACTS §4) the bulk server calls from its thread."""
+        through = None
+        if run is None:
+            with self._lock:
+                run, through = self.run, self.state.last_seq
+            if through <= after_seq:
+                return []
         out: list[dict] = []
         start_segment = after_seq // self.segment_events + 1
         for path in self._segments(run=run):
-            n = int(path.stem)
-            if n < start_segment:
+            if int(path.stem) < start_segment:
                 continue
             with path.open("r", encoding="utf-8") as f:
                 for line in f:
@@ -175,18 +187,15 @@ class StateSync:
                     if not line:
                         continue
                     ev = json.loads(line)
-                    if ev.get("seq", 0) > after_seq:
+                    seq = ev.get("seq", 0)
+                    if seq > after_seq:
                         out.append(ev)
+                    if through is not None and seq >= through:
+                        break
+            if through is not None and out and out[-1].get("seq", 0) >= through:
+                break
         out.sort(key=lambda e: e["seq"])
         return out
-
-    def log_after(self, after_seq: int = 0) -> tuple[list[dict], int]:
-        """The log return (M3-CONTRACTS §4): the acked events of the current
-        run with seq > after_seq, and last_seq, read under the lock so the
-        two agree (the bulk server calls this from its own thread). Every
-        stored event is acked: the host acks only after the append."""
-        with self._lock:
-            return self.read(after_seq), self.state.last_seq
 
     @property
     def last_seq(self) -> int:

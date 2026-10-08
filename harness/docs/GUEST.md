@@ -195,12 +195,13 @@ Contracts: docs/M3-CONTRACTS.md. What the guest does, and the refinements:
   transport tries :5000 every 50 ms, silently, no backoff; idle-wait ends with
   the first line the host sends, so any connect error *or* a reset right after
   connecting, as a Firecracker snapshot causes, goes back to polling);
-  `--idle-wait FILE` (the M1 form, kept); `--mount-workspace DEV` (after
+  main waits on `Transport.wait_awake()`; `--mount-workspace DEV` (after
   idle-wait, before hello is read: `mount -o noatime DEV WORKSPACE` unless the
   workspace is already a mountpoint; a missing DEV is skipped; a failed mount
-  is logged and the guest goes on); `--exit-on-park` (exit 4 once parked);
-  `--multi-task` (stay up after a settle; `Coordinator.run()` handles one task
-  per call). Without `--multi-task` the guest still exits after one task.
+  is logged and the guest goes on). One lifecycle: the guest always stays up
+  after a settle (`Coordinator.run()` handles one task per call) and returns
+  to idle-wait after a park; it ends on an abort, a fatal error or when the
+  host stops it.
 - **Limits**: `park_grace_s` (default 30) joins `hello.config.limits`.
 - **Park** (`Coordinator`): honoured when no provider call is in flight and no
   guest operation runs; host/device/mcp calls and open questions do not hold
@@ -214,8 +215,7 @@ Contracts: docs/M3-CONTRACTS.md. What the guest does, and the refinements:
   `parked`, `Transport.park()` (close, back to idle-wait). The next
   `("link", "up")` resumes: timers re-armed with what they had left, a
   deferred turn starts (nothing is emitted for the resume itself). A second
-  `park` while parking is ignored. With `--exit-on-park` the process exits 4
-  instead of going idle. LocalSandbox's SIGSTOP/SIGCONT works on the same
+  `park` while parking is ignored. LocalSandbox's SIGSTOP/SIGCONT works on the same
   path (the stopped process resumes polling and reconnects).
 - **Death resume**: a fresh process gets `hello{resume: true}`; its transport
   takes the hello's cseq as its floor (`Inbox.resume_from(cseq - 1)`; controls
@@ -235,18 +235,23 @@ Contracts: docs/M3-CONTRACTS.md. What the guest does, and the refinements:
   dead guest owed when the last recorded response had no tool calls; a new
   turn otherwise. The wall clock gets what the task had left. No second
   `session_start`. A returned log whose last event is `parked` (a fresh
-  process after `--exit-on-park`) loses nothing: side calls and questions wait
+  process after the host stopped a parked guest) loses nothing: side calls and questions wait
   again with fresh timeouts. The usage correction restarts at 1.0.
 - **Bulk** (`guest/bulk.py`, :5001, one transfer per connection): `BulkClient
-  (connector, session_id, port).put(kind, path, data)` / `.get_log(after_seq)`
+  (connector, session_id, port).put(kind, path, data, sha256=None)` /
+  `.get_log(after_seq)`
   (checks bytes, sha256 and gapless seqs). Spill files are put by the
   operation manager's worker thread as `spill` `.spill/{call_id}.txt` before
   the result is posted; the `bulk` event and `tool_result.spill_ref` carry that
-  relative path (the local copy stays in `.harness/spill/`). An upload failure
-  is logged; the event is still written.
+  relative path (the local copy stays in `.harness/spill/`, which also holds
+  `todo.json`). The digest computed for the spill is passed to the put. An
+  upload failure is logged; the event is still written.
 - **Settle manifest**: `settle.manifest = guest.bulk.settle_manifest(...)`:
-  regular files under the workspace minus `.spill/`, `.git/` and the guest's
-  own `.harness/` (top level), symlinks skipped; each file whose sha256 the
+  regular files under the workspace minus `.spill/`, `.git/` (excluded and
+  sorted by `protocol.bulk.manifest()`; the walk only skips descending into
+  them) and the guest's own `.harness/` (top level), symlinks skipped; file
+  digests are cached by (size, mtime_ns, ino) across settles, and each file is
+  hashed once per settle (that digest goes in the put header); each file whose sha256 the
   host does not have yet (tracked per process, recovered from the last
   `settle.manifest` after a restore) and under 8 MiB is put as `workspace`,
   then the manifest as `manifest` `manifest.json` (canonical JSON: sorted keys,

@@ -77,7 +77,7 @@ finish() {
 trap finish INT TERM
 
 log "starting guest harness (idle-wait, then vsock -> CID 2)"
-python3 /opt/harness/guest.pyz --connect vsock --idle-wait vsock --multi-task "${MOUNT_ARGS[@]}" \
+python3 /opt/harness/guest.pyz --connect vsock --idle-wait vsock "${MOUNT_ARGS[@]}" \
     --log-dir /var/harness --workspace /workspace &
 GUEST_PID=$!
 wait "$GUEST_PID"

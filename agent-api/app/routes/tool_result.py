@@ -17,7 +17,8 @@ async def tool_result_endpoint(request: Request, tenant: Tenant = Depends(verify
         # Harness engine: the open call lives in DeviceCalls, not in the
         # stream, so it survives a dropped SSE connection. Unknown or
         # terminal call ids are 409 (PLAN.md 14).
-        if DEVICE_CALLS.resolve(call_id, result):
+        # only a call of this tenant's own sessions (Worker.session_key)
+        if DEVICE_CALLS.resolve(call_id, result, owner_prefix=f"{tenant.user}/{tenant.name}_"):
             return {"status": "ok"}
         raise HTTPException(409, detail="Unknown or already completed tool call ID.")
     if call_id in tool_result_events:

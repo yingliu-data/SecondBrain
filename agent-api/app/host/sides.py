@@ -30,7 +30,7 @@ import asyncio
 import json
 import logging
 import time
-from typing import Awaitable, Callable
+from typing import Callable
 
 from app.agent.loop import _AVATAR_TOOLS
 from app.agent.sanitize import sanitize
@@ -54,11 +54,15 @@ class DeviceCalls:
                                "session_key": session_key, "loop": loop}
         return fut
 
-    def resolve(self, call_id: str, result: str) -> bool:
+    def resolve(self, call_id: str, result: str, owner_prefix: str | None = None) -> bool:
         """Deliver the device's result. False when the call is unknown or
-        already terminal (timed out, resolved, or never opened)."""
+        already terminal (timed out, resolved, or never opened), or, with
+        `owner_prefix`, belongs to a session whose key does not start with it
+        (another tenant's call)."""
         entry = self._open.get(call_id)
         if entry is None:
+            return False
+        if owner_prefix is not None and not entry["session_key"].startswith(owner_prefix):
             return False
         fut: asyncio.Future = entry["future"]
         if fut.done():

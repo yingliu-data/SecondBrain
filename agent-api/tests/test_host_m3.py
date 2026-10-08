@@ -67,7 +67,7 @@ def _ev(seq, type_, body):
 def bulk(session):
     ep = Endpoints(session.root, {"bulk": 5001})
     sync = StateSync(session)
-    srv = BulkServer(ep.listener(5001), session.root, "s1", sync.log_after,
+    srv = BulkServer(ep.listener(5001), session.root, "s1", sync.read,
                      on_put=lambda *a: puts.append(a)).start()
     puts: list = []
     srv.puts = puts
@@ -105,7 +105,8 @@ def test_bulk_put_spill_workspace_and_manifest(bulk, session):
                       "total_bytes": len(data)}).encode()
     reply, _ = _transfer(bulk.path, put_header("s1", "manifest", "manifest.json", man), man)
     assert reply == {"ok": True}
-    assert json.loads((ws / "manifest.json").read_text())["files"][0]["path"] == "src/a.py"
+    assert json.loads((session.root / "manifest.json").read_text())["files"][0]["path"] == "src/a.py"
+    assert not (ws / "manifest.json").exists()
     assert [p[0] for p in bulk.puts] == ["spill", "workspace", "manifest"]
     assert not list(ws.rglob(".bulk-*"))                    # no temp file left
 
@@ -115,7 +116,7 @@ def test_bulk_put_rejects_sha_mismatch_escape_and_foreign_session(bulk, session,
     h = put_header("s1", "workspace", "a.txt", b"good")
     reply, _ = _transfer(bulk.path, h, b"evil")             # same length, other bytes
     assert reply["ok"] is False and "sha256" in reply["error"]
-    assert not (ws / "a.txt").exists()
+    assert not (ws / "a.txt").exists() and not list(ws.rglob(".bulk-*"))
     # ".." and absolute paths: refused by the header check, nothing read
     for bad in ("../x.txt", "/etc/passwd", "a/../../x"):
         h = {"op": "put", "session_id": "s1", "kind": "workspace", "path": bad,
@@ -137,12 +138,14 @@ def test_bulk_put_rejects_sha_mismatch_escape_and_foreign_session(bulk, session,
     assert reply["ok"] is False
     reply, _ = _transfer(bulk.path, put_header("s1", "workspace", ".spill/x", b"x"), b"x")
     assert reply["ok"] is False
+    reply, _ = _transfer(bulk.path, put_header("s1", "spill", "r1.txt", b"x"), b"x")
+    assert reply["ok"] is False and ".spill/" in reply["error"]     # spill needs the prefix
     assert bulk.puts == []
 
 
 def test_bulk_put_over_the_limit_is_refused(session):
     ep = Endpoints(session.root, {"bulk": 5001})
-    srv = BulkServer(ep.listener(5001), session.root, "s1", lambda n: ([], 0), max_bytes=10).start()
+    srv = BulkServer(ep.listener(5001), session.root, "s1", lambda n: [], max_bytes=10).start()
     try:
         reply, _ = _transfer(ep.path(5001), put_header("s1", "workspace", "a", b"x" * 11), b"x" * 11)
         assert reply["ok"] is False and "limit" in reply["error"]

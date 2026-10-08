@@ -8,7 +8,7 @@ import pytest
 from guest import main as guest_main
 from guest.config import GuestConfig
 from guest.main import (
-    EXIT_HELLO_TIMEOUT, EXIT_PROTOCOL, FatalProtocolError, HelloTimeout, idle_wait,
+    EXIT_HELLO_TIMEOUT, EXIT_PROTOCOL, FatalProtocolError, HelloTimeout,
     make_connector, parse_args, run_until_hello,
 )
 from guest.eventlog import EventLog
@@ -32,9 +32,10 @@ def args(tmp_path, *extra):
 
 
 def test_parse_args_and_connectors(tmp_path):
-    ns = parse_args(args(tmp_path, "--idle-wait", "/tmp/go", "--hello-timeout", "2"))
+    ns = parse_args(args(tmp_path, "--idle-wait", "vsock", "--hello-timeout", "2"))
     assert ns.connect == f"unix:{tmp_path}"
-    assert ns.idle_wait == "/tmp/go"
+    assert ns.idle_wait == "vsock"
+    assert parse_args(args(tmp_path)).idle_wait is None
     assert ns.hello_timeout == 2.0
     assert ns.control_port == 5000
     assert isinstance(make_connector(f"unix:{tmp_path}"), UnixConnector)
@@ -46,15 +47,8 @@ def test_parse_args_and_connectors(tmp_path):
             make_connector(bad)
     with pytest.raises(SystemExit):
         parse_args(["--connect", "vsock"])          # --log-dir and --workspace required
-
-
-def test_idle_wait_blocks_until_file_exists(tmp_path):
-    flag = tmp_path / "go"
-    assert idle_wait(str(flag), poll_s=0.01, timeout=0.05) is False
-    threading.Timer(0.1, flag.touch).start()
-    t0 = time.monotonic()
-    assert idle_wait(str(flag), poll_s=0.01, timeout=5) is True
-    assert time.monotonic() - t0 >= 0.05
+    with pytest.raises(SystemExit):
+        parse_args(args(tmp_path, "--idle-wait", "/tmp/go"))   # the M1 file form is gone
 
 
 # ---------------------------------------------------------------- hello phase
@@ -143,10 +137,8 @@ def test_main_hands_hello_config_to_run_session(tmp_path, monkeypatch):
         return 0
 
     monkeypatch.setattr(guest_main, "run_session", fake_run_session)
-    flag = tmp_path / "go"
     with FakeHost(tmp_path, HELLO) as host:
-        threading.Timer(0.1, flag.touch).start()
-        code = guest_main.main(args(tmp_path, "--idle-wait", str(flag), "--hello-timeout", "5"))
+        code = guest_main.main(args(tmp_path, "--idle-wait", "vsock", "--hello-timeout", "5"))
         host.wait_disconnected()
     assert code == 0
     assert seen["cfg"].session_id == SID
@@ -161,14 +153,16 @@ def test_main_hands_hello_config_to_run_session(tmp_path, monkeypatch):
 
 
 def test_main_runs_a_text_answer_to_settle(tmp_path):
-    """hello -> session_start -> task -> one turn on the fake LLM -> settle,
-    exit 0; the host's copy of the log replays clean and the local log knows
+    """hello -> session_start -> task -> one turn on the fake LLM -> settle;
+    the guest stays up until the host aborts, then exits 0; the host's copy of the log replays clean and the local log knows
     the host acked everything."""
     hello = dict(HELLO, config={"model": "fake", "limits": {"max_turns": 2}})
     with FakeHost(tmp_path, hello) as host, FakeLLM(str(tmp_path), [text("Hello there.")]) as llm:
         def send_task():
             host.wait_for("session_start", timeout=10)
             host.send("task", {"input_id": "in-1", "text": "say hi", "attachments": []})
+            host.wait_for("settle", timeout=10)
+            host.send("abort", {"reason": "test over"})
         threading.Thread(target=send_task, daemon=True).start()
         code = guest_main.main(args(tmp_path, "--hello-timeout", "5"))
         host.wait_disconnected()

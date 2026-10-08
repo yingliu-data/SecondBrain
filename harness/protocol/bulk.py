@@ -15,7 +15,7 @@ One transfer per connection. The guest always connects (it never listens):
         reply  {"ok":true} | {"ok":false,"error":str}
         The host verifies `bytes` and `sha256` before replying ok and writes
         under the session dir (spill -> workspace/.spill/, workspace ->
-        workspace/, manifest -> workspace/manifest.json).
+        workspace/, manifest -> manifest.json, beside workspace/).
 
   get   guest -> host   header line only; host answers a reply line, then
                         exactly reply.bytes raw bytes.
@@ -30,27 +30,30 @@ Lines are UTF-8 JSON terminated by "\n", at most MAX_HEADER bytes.
 
 Workspace manifest (settle.manifest and the "manifest" put):
   {"version":1,"files":[{"path","bytes","sha256","mode"}...],"total_bytes"}
-  files sorted by path; ".spill/" and ".git/" excluded.
+  files sorted by path; ".spill/" and ".git/" excluded. manifest() is the one
+  place that sorts and excludes: a walk hands it every file it found.
+
+Wire paths: SPILL_DIR (".spill", spill puts go under it) and MANIFEST_PATH
+("manifest.json", the manifest put's path).
 """
 from __future__ import annotations
 
-import hashlib
 import json
+
+from protocol.canonical import is_int, sha256_hex
 
 OPS = frozenset({"put", "get"})
 PUT_KINDS = frozenset({"spill", "workspace", "manifest"})
 GET_KINDS = frozenset({"log"})
 MAX_HEADER = 64 * 1024
 MANIFEST_VERSION = 1
-MANIFEST_EXCLUDE = (".spill/", ".git/")
+SPILL_DIR = ".spill"
+MANIFEST_PATH = "manifest.json"
+MANIFEST_EXCLUDE = (SPILL_DIR + "/", ".git/")
 
 
 class BulkError(ValueError):
     """A bulk header or reply breaks the contract."""
-
-
-def sha256_hex(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
 
 
 def check_path(path) -> str:
@@ -63,15 +66,17 @@ def check_path(path) -> str:
     return path
 
 
-def _int(v, name: str) -> int:
-    if not isinstance(v, int) or isinstance(v, bool) or v < 0:
-        raise BulkError(f"{name} must be an int >= 0")
-    return v
+def spill_path(name: str) -> str:
+    """The bulk path of a spill file: ".spill/<name>"."""
+    return f"{SPILL_DIR}/{name}"
 
 
-def put_header(session_id: str, kind: str, path: str, data: bytes) -> dict:
+def put_header(session_id: str, kind: str, path: str, data: bytes,
+               sha256: str | None = None) -> dict:
+    """`sha256`: the payload's digest when the caller already has it."""
     return check_header({"op": "put", "session_id": session_id, "kind": kind,
-                         "path": path, "bytes": len(data), "sha256": sha256_hex(data)})
+                         "path": path, "bytes": len(data),
+                         "sha256": sha256 if sha256 is not None else sha256_hex(data)})
 
 
 def get_header(session_id: str, after_seq: int = 0) -> dict:
@@ -91,14 +96,16 @@ def check_header(h) -> dict:
         if h.get("kind") not in PUT_KINDS:
             raise BulkError(f"unknown put kind {h.get('kind')!r}")
         check_path(h.get("path"))
-        _int(h.get("bytes"), "bytes")
+        if not is_int(h.get("bytes"), 0):
+            raise BulkError("bytes must be an int >= 0")
         sha = h.get("sha256")
         if not isinstance(sha, str) or len(sha) != 64:
             raise BulkError("sha256 must be 64 hex chars")
     else:
         if h.get("kind") not in GET_KINDS:
             raise BulkError(f"unknown get kind {h.get('kind')!r}")
-        _int(h.get("after_seq"), "after_seq")
+        if not is_int(h.get("after_seq"), 0):
+            raise BulkError("after_seq must be an int >= 0")
     return h
 
 
@@ -147,15 +154,24 @@ def read_exact(rfile, n: int) -> bytes:
     return bytes(buf)
 
 
+def excluded(path: str) -> bool:
+    """True for a path (or a directory path ending in "/") the manifest
+    leaves out. Walks may use it to skip whole trees."""
+    return path.startswith(MANIFEST_EXCLUDE)
+
+
 def manifest(files: list[dict]) -> dict:
-    """files: [{"path","bytes","sha256","mode"}]; returns the sorted manifest."""
+    """files: [{"path","bytes","sha256","mode"}] in any order; returns the
+    manifest, excluded paths dropped and files sorted by path."""
     out = []
     for f in files:
         p = check_path(f["path"])
-        if any(p.startswith(x) for x in MANIFEST_EXCLUDE):
+        if excluded(p):
             continue
-        out.append({"path": p, "bytes": _int(f["bytes"], "bytes"),
-                    "sha256": f["sha256"], "mode": _int(f.get("mode", 0o644), "mode")})
+        size, mode = f["bytes"], f.get("mode", 0o644)
+        if not (is_int(size, 0) and is_int(mode, 0)):
+            raise BulkError(f"{p}: bytes and mode must be ints >= 0")
+        out.append({"path": p, "bytes": size, "sha256": f["sha256"], "mode": mode})
     out.sort(key=lambda f: f["path"])
     return {"version": MANIFEST_VERSION, "files": out,
             "total_bytes": sum(f["bytes"] for f in out)}

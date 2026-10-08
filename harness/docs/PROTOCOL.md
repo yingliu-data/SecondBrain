@@ -145,7 +145,9 @@ every line is UTF-8 JSON + `"\n"`, at most 64 KiB.
 
 Put kinds and where the host stores them: `spill` (path `.spill/<call_id>.txt`
 → `workspace/.spill/`), `workspace` (the file's path under /workspace →
-`workspace/`), `manifest` (`manifest.json` → `workspace/manifest.json`). Paths
+`workspace/`), `manifest` (`manifest.json` → `{session}/manifest.json`, beside
+`workspace/`, not inside it). The wire paths are `protocol.bulk.SPILL_DIR` and
+`protocol.bulk.MANIFEST_PATH`. Paths
 are relative with no empty, `.` or `..` part.
 
 Who uses it: a spill file is put when the tool result is produced (before its

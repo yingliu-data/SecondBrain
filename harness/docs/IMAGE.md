@@ -65,7 +65,7 @@ Firecracker appends `root=/dev/vda ro` for the drive marked `is_root_device`.
    guest takes the time from `hello.at` and every later `heartbeat`
    (PLAN.md section 4.3) and the protocol never folds wall-clock time.
 5. Runs the guest as a child:
-   `python3 /opt/harness/guest.pyz --connect vsock --idle-wait vsock --multi-task --mount-workspace /dev/vdb --log-dir /var/harness --workspace /workspace`
+   `python3 /opt/harness/guest.pyz --connect vsock --idle-wait vsock --mount-workspace /dev/vdb --log-dir /var/harness --workspace /workspace`
    and waits. The guest sits in idle-wait (a silent connect to CID 2:5000
    every 50 ms) until a host listener answers; that is the base-snapshot
    point. A cold boot takes exactly the same path. After `parked` the guest

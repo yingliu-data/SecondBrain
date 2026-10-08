@@ -98,9 +98,6 @@ class Endpoints:
             return None
         return self.accept(5000, timeout)
 
-    def is_open(self, port: int) -> bool:
-        return port in self._listeners
-
     def close_port(self, port: int) -> None:
         """Stop listening on one port (M3: between the acked `parked` and the
         snapshot, so the guest's idle-wait loop finds no listener and stays
@@ -125,7 +122,6 @@ class Endpoints:
     def close(self) -> None:
         for port in list(self._listeners):
             self.close_port(port)
-        self._listeners.clear()
 
 
 class ControlChannel:

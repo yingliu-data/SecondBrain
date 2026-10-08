@@ -28,7 +28,7 @@ from protocol.fold import State, replay, state_hash, verify_checkpoints
 from protocol.messages import Inbox, Outbox, ProtocolError, control_message
 from tests.fakes.fake_host import FakeHost
 from tests.test_guest_coordinator import (
-    DEVICE, FakeOps, FakeTransport, Scenario, T0, make_cfg, text, tool_calls,
+    DEVICE, FakeOps, Scenario, T0, make_cfg, text, tool_calls,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -44,23 +44,6 @@ def full_check(events):
 
 
 # ---------------------------------------------------------------- fakes
-class ParkTransport(FakeTransport):
-    """FakeTransport plus what a park needs: wait_acked (acks everything at
-    once) and park() (recorded)."""
-
-    def __init__(self):
-        super().__init__()
-        self.parks = 0
-
-    def wait_acked(self, seq, timeout=None):
-        return True
-
-    @property
-    def acked_seq(self):
-        return self.events[-1]["seq"] if self.events else 0
-
-    def park(self):
-        self.parks += 1
 
 
 class KillingOps(FakeOps):
@@ -75,10 +58,7 @@ class KillingOps(FakeOps):
 
 def park_scenario(cfg=None, script=(), ops_manual=False):
     scn = Scenario(cfg=cfg, script=script, ops_manual=ops_manual)
-    scn.transport = ParkTransport()
-    scn.log.transport = scn.transport
     scn.ops = KillingOps(scn.inbound, None, ops_manual)
-    scn.coord.transport = scn.transport
     scn.coord.ops = scn.ops
     return scn
 
