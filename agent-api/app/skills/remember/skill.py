@@ -6,6 +6,7 @@ singleton's state.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from pathlib import Path
@@ -142,9 +143,14 @@ class RememberSkill(BaseSkill):
             return f"Error: missing required field {e}"
         except ValueError as e:
             return f"Error: {e}"
+        # sha256 of the stripped body text (D23, docs/GUEST.md: one memory
+        # hash definition everywhere, sha256_hex(body.strip())); the harness
+        # records it in the `memory` event
+        digest = hashlib.sha256(rec.body.strip().encode("utf-8")).hexdigest()
         logger.info(f"remember scope={scope} slug={rec.slug} type={rec.type}")
         return json.dumps(
-            {"status": "ok", "scope": scope, "slug": rec.slug, "type": rec.type}
+            {"status": "ok", "scope": scope, "slug": rec.slug, "type": rec.type,
+             "sha256": digest}
         )
 
     def _handle_forget(self, args: dict) -> str:
@@ -159,5 +165,6 @@ class RememberSkill(BaseSkill):
         ok = store.remove(slug)
         logger.info(f"forget scope={scope} slug={slug} ok={ok}")
         return json.dumps(
-            {"status": "ok" if ok else "not_found", "scope": scope, "slug": slug}
+            {"status": "ok" if ok else "not_found", "scope": scope, "slug": slug,
+             "sha256": ""}
         )

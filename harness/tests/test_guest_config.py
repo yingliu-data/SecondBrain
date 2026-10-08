@@ -188,3 +188,64 @@ def test_bad_flags_and_body():
     body["config"]["ui_attached"] = 1
     with pytest.raises(ValueError, match="config.ui_attached"):
         from_hello(body)
+
+
+# ---------------------------------------------------------------- M2: window, stream
+def test_m2_limit_defaults():
+    limits = Limits()
+    assert (limits.context_window_tokens, limits.reserve_tokens) == (32768, 4096)
+    cfg = from_hello(hello())
+    assert cfg.limits.context_window_tokens == 32768 and cfg.limits.reserve_tokens == 4096
+
+
+def test_m2_limits_from_hello():
+    body = hello()
+    body["config"]["limits"] = {"context_window_tokens": 8192, "reserve_tokens": 1024}
+    cfg = from_hello(body)
+    assert cfg.limits.context_window_tokens == 8192
+    assert cfg.limits.reserve_tokens == 1024
+    body["config"]["limits"] = {"context_window_tokens": "big"}
+    with pytest.raises(ValueError, match="limits.context_window_tokens"):
+        from_hello(body)
+    body["config"]["limits"] = {"reserve_tokens": -1}
+    with pytest.raises(ValueError, match="limits.reserve_tokens"):
+        from_hello(body)
+
+
+def test_token_budget_is_not_guest_config():
+    # the budget is the host proxy's knob (402); it never reaches the guest,
+    # so an ops change to it cannot change config_hash
+    assert not hasattr(Limits(), "token_budget")
+    body = hello()
+    body["config"]["limits"] = {"token_budget": 5000}
+    with pytest.raises(ValueError, match="unknown limit 'token_budget'"):
+        from_hello(body)
+
+
+def test_params_stream_default_true_and_honoured():
+    from guest.config import stream_enabled
+    cfg = from_hello(hello())
+    assert "stream" not in cfg.params and stream_enabled(cfg) is True
+    body = hello()
+    body["config"]["params"] = {"temperature": 0.2, "stream": False}
+    cfg = from_hello(body)
+    assert cfg.params == {"temperature": 0.2, "stream": False}
+    assert stream_enabled(cfg) is False
+    body["config"]["params"] = {"stream": True}
+    assert stream_enabled(from_hello(body)) is True
+    # duck-typed: anything with (or without) a params dict
+    assert stream_enabled(object()) is True
+    assert stream_enabled(type("C", (), {"params": None})()) is True
+    body["config"]["params"] = {"stream": "no"}
+    with pytest.raises(ValueError, match="params.stream"):
+        from_hello(body)
+
+
+def test_stream_and_window_are_in_the_config_hash():
+    a = from_hello(hello()).config_hash()
+    body = hello()
+    body["config"]["params"] = {"temperature": 0.2, "stream": False}
+    assert from_hello(body).config_hash() != a
+    body = hello()
+    body["config"]["limits"] = {"max_turns": 3, "op_timeout_s": {"mcp": 45}, "context_window_tokens": 4096}
+    assert from_hello(body).config_hash() != a

@@ -20,7 +20,7 @@ from guest.coordinator import Coordinator, FatalProtocolError
 from guest.context import MISSING_TOOL_MESSAGE
 from guest.provider import ProviderError
 from protocol.allowlist import effective_tools
-from protocol.canonical import derive_id
+from protocol.canonical import derive_id, sha256_hex
 from protocol.events import UNANSWERED, validate_log
 from protocol.fold import State, fold, replay, state_hash
 from tests.fakes.fake_llm import response, text, tool_calls
@@ -98,14 +98,20 @@ class FakeTransport:
         self.live: list = []
         self.acks: list = []
         self.on_event: list = []
+        self.wire: list = []          # (type, body) of events and live messages, in send order
+        self._lock = threading.Lock()
 
     def send_event(self, event):
-        self.events.append(event)
+        with self._lock:
+            self.events.append(event)
+            self.wire.append((event["type"], event["body"]))
         for fn in list(self.on_event):
             fn(event)
 
     def send_live(self, type, body):
-        self.live.append((type, body))
+        with self._lock:
+            self.live.append((type, body))
+            self.wire.append((type, body))
 
     def send_ack(self, cseq):
         self.acks.append(cseq)
@@ -169,18 +175,60 @@ class FakeOps:
         return set(self._running)
 
 
+def stream_fragments(response) -> list:
+    """The fragments guest.provider hands on_delta for `response` served as
+    SSE: the real assembly pipeline over the chunks the fake LLM streams."""
+    from guest.provider import assemble_chunks
+    from protocol.sse import response_chunks
+    out: list = []
+    assemble_chunks(response_chunks(response), out.append)
+    return out
+
+
+class Streamed:
+    """A script entry that streams: on_delta gets each fragment (a dict
+    {kind, index, text} or a plain str = a content fragment), then the
+    assembled response is returned, as guest.provider does with stream=True
+    (de-dup across its retries is the provider's business). Fragments
+    default to what the real pipeline yields for the response."""
+
+    def __init__(self, response, fragments=None):
+        self.response = response
+        if fragments is None:
+            fragments = stream_fragments(response)
+        self.fragments = [f if isinstance(f, dict) else {"kind": "content", "index": 0, "text": f}
+                          for f in fragments]
+
+
+def overflow_error(message="upstream 400: This model's maximum context length is 32768 tokens"):
+    exc = ProviderError(False, 400, message)
+    exc.overflow = True
+    return exc
+
+
+def budget_error():
+    exc = ProviderError(False, 402, "upstream 402: token budget exhausted")
+    exc.budget = True
+    return exc
+
+
 class FakeProvider:
-    """Scripted responses; an entry may be a response dict, a callable(request)
-    or an Exception to raise. `hold` blocks each call until `release()`."""
+    """Scripted responses with guest.provider's signature
+    chat_completion(request, *, stream=False, on_delta=None); an entry may be
+    a response dict, a Streamed, a callable(request) or an Exception to raise.
+    With stream=True a Streamed entry's fragments go to on_delta; with
+    stream=False on_delta gets one {kind: "text"} fragment with the whole
+    content, as the provider sends it. `hold` blocks each call until
+    `release()`. `calls` records (stream, on_delta is not None) per call."""
 
     def __init__(self, script=(), hold_at=()):
         self.script = list(script)
         self.requests: list = []
+        self.calls: list = []
         self.hold = False
         self.hold_at = set(hold_at)      # 1-based call numbers to hold until release()
         self._gate = threading.Event()
         self._gate.set()
-        self.usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
     def push(self, *entries):
         self.script.extend(entries)
@@ -188,8 +236,9 @@ class FakeProvider:
     def release(self):
         self._gate.set()
 
-    def chat_completion(self, request):
+    def chat_completion(self, request, *, stream=False, on_delta=None):
         self.requests.append(request)
+        self.calls.append((stream, on_delta is not None))
         if self.hold or len(self.requests) in self.hold_at:
             self._gate.clear()
             self.hold = False
@@ -201,6 +250,15 @@ class FakeProvider:
             raise entry
         if callable(entry):
             entry = entry(request)
+        fragments = []
+        if isinstance(entry, Streamed):
+            fragments, entry = entry.fragments, entry.response
+        if on_delta is not None:
+            if not stream:
+                content = (entry.get("choices") or [{}])[0].get("message", {}).get("content")
+                fragments = [{"kind": "text", "index": 0, "text": content}] if content else []
+            for fragment in fragments:
+                on_delta(dict(fragment))
         return entry
 
 
@@ -209,7 +267,9 @@ def make_cfg(extra_tools=(), **over) -> GuestConfig:
     limits = Limits(wall_clock_s=int(WALL_S), max_tools=over.pop("max_tools", 10),
                     max_turns=over.pop("max_turns", 12), max_tokens=256,
                     op_timeout_s=dict(OP_TIMEOUTS), spill_threshold=over.pop("spill_threshold", 2000),
-                    grace_s=GRACE_S, idle_wake_s=int(IDLE_S))
+                    grace_s=GRACE_S, idle_wake_s=int(IDLE_S),
+                    context_window_tokens=over.pop("context_window_tokens", 32768),
+                    reserve_tokens=over.pop("reserve_tokens", 4096))
     kw = dict(
         session_id=SID, principal=Principal(user=USER, tenant=TENANT), model="fake-model",
         params={"temperature": 0}, tools=effective_tools({"tools": list(extra_tools)}),
@@ -355,8 +415,10 @@ def test_emit_rejects_an_event_the_fold_rejects():
 
 # ---------------------------------------------------------------- text answer
 def test_text_answer_settles_with_the_golden_shape():
-    scn = Scenario(script=[text("2 + 2 = 4.", usage={"prompt_tokens": 120, "completion_tokens": 9,
-                                                    "total_tokens": 129})])
+    # stream: false (the M1 shape): the provider sends one whole-text delta
+    scn = Scenario(cfg=make_cfg(params={"temperature": 0, "stream": False}),
+                   script=[text("2 + 2 = 4.", usage={"prompt_tokens": 120, "completion_tokens": 9,
+                                                     "total_tokens": 129})])
     scn.task("What is 2 + 2?")
     result = scn.run()
     assert scn.types() == ["session_start", "clock", "input", "clock", "turn_start", "llm_response", "settle"]
@@ -378,9 +440,11 @@ def test_text_answer_settles_with_the_golden_shape():
     assert result == scn.bodies("settle")[0]
     assert result["outcome"] == "done" and result["answer"] == "2 + 2 = 4." and result["input_id"] == "in-1"
     assert result["usage"] == {"prompt_tokens": 120, "completion_tokens": 9, "total_tokens": 129}
-    assert scn.transport.live_of("delta") == [{"turn_id": turn["turn_id"], "kind": "text", "text": "2 + 2 = 4."}]
+    assert scn.transport.live_of("delta") == [{"session_id": SID, "turn_id": turn["turn_id"], "kind": "text",
+                                               "index": 0, "text": "2 + 2 = 4."}]
     assert scn.transport.live[0][0] == "ready"
     assert scn.coord.last_cseq == 1 and scn.transport.acks == []   # acking is the transport's job
+    assert scn.provider.calls == [(False, True)]                   # stream off, on_delta all the same
     check_log(scn)
 
 
@@ -986,3 +1050,429 @@ def test_every_scenario_log_is_json_serialisable():
         json.dumps(e)
     state = fold(scn.events)
     assert state_hash(state) == state_hash(scn.state)
+
+
+# ================================================================ M2: streaming
+def test_streamed_deltas_are_live_in_order_and_llm_response_is_verbatim():
+    full = text("The answer is four.")
+    scn = Scenario(script=[Streamed(full, [{"kind": "reasoning", "index": 0, "text": "think "},
+                                           "The answer", " is", " four."])])
+    scn.task("2 + 2?")
+    result = scn.run()
+    turn = scn.bodies("turn_start")[0]["turn_id"]
+    assert scn.provider.calls == [(True, True)]
+    assert scn.transport.live_of("delta") == [
+        {"session_id": SID, "turn_id": turn, "kind": "reasoning", "index": 0, "text": "think "},
+        {"session_id": SID, "turn_id": turn, "kind": "content", "index": 0, "text": "The answer"},
+        {"session_id": SID, "turn_id": turn, "kind": "content", "index": 0, "text": " is"},
+        {"session_id": SID, "turn_id": turn, "kind": "content", "index": 0, "text": " four."},
+    ]   # no whole-text delta after the stream
+    wire = [t for t, _ in scn.transport.wire]
+    assert max(i for i, t in enumerate(wire) if t == "delta") < wire.index("llm_response")
+    assert scn.bodies("llm_response") == [{
+        "turn_id": turn, "message": full["choices"][0]["message"], "finish_reason": "stop",
+        "usage": full["usage"], "response_id": full["id"]}]
+    assert result["answer"] == "The answer is four."
+    assert scn.types() == ["session_start", "clock", "input", "clock", "turn_start", "llm_response", "settle"]
+    check_log(scn)
+
+
+def test_streamed_tool_call_fragments_then_the_round_runs():
+    call = tool_calls([("c1", "bash", {"command": "echo hi"})])
+    scn = Scenario(script=[Streamed(call), Streamed(text("hi."))],     # fragments from the real pipeline
+                   ops_results={"bash": "hi\n"})
+    scn.task("run")
+    scn.run()
+    deltas = scn.transport.live_of("delta")
+    t1, t2 = (b["turn_id"] for b in scn.bodies("turn_start"))
+    first = [d for d in deltas if d["turn_id"] == t1]
+    assert len(first) > 1 and {(d["kind"], d["index"]) for d in first} == {("tool_call", 0)}
+    assert "".join(d["text"] for d in first) == call["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]
+    assert [(d["kind"], d["text"]) for d in deltas if d["turn_id"] == t2] == [("content", "hi.")]
+    assert scn.bodies("tool_call")[0]["args"] == {"command": "echo hi"}
+    assert scn.bodies("llm_response")[0]["message"] == call["choices"][0]["message"]
+    check_log(scn)
+
+
+def test_stream_off_relays_the_providers_one_whole_text_delta():
+    scn = Scenario(cfg=make_cfg(params={"temperature": 0, "stream": False}),
+                   script=[Streamed(text("whole"), ["wh", "ole"])])   # fragments unused: not streamed
+    scn.task("x")
+    scn.run()
+    assert scn.provider.calls == [(False, True)]
+    assert [(d["kind"], d["text"]) for d in scn.transport.live_of("delta")] == [("text", "whole")]
+    wire = [t for t, _ in scn.transport.wire]
+    assert wire.index("delta") < wire.index("llm_response")
+    assert scn.provider.requests[0].params == {"temperature": 0, "max_tokens": 256}   # stream is not a sampling param
+    assert scn.bodies("turn_start")[0]["params"] == {"temperature": 0, "max_tokens": 256}
+    check_log(scn)
+
+
+# ================================================================ M2: token estimate
+def test_estimate_and_correction_follow_usage():
+    from guest.context import estimate_tokens
+    scn = Scenario(script=[tool_calls([("c1", "bash", {"command": "x"})], usage={"prompt_tokens": 2000, "completion_tokens": 5}),
+                           text("done", usage={"prompt_tokens": 1000, "completion_tokens": 1})],
+                   ops_results={"bash": "o"})
+    assert scn.coord._correction == 1.0
+    scn.task("x")
+    scn.run()
+    r1, r2 = scn.provider.requests
+    raw1, raw2 = estimate_tokens(r1), estimate_tokens(r2)
+    assert r1.chars == len(json.dumps({"messages": r1.messages, "tools": r1.tools, "params": r1.params},
+                                      sort_keys=True, separators=(",", ":"), ensure_ascii=False))
+    assert raw1 == -(-r1.chars // 4)
+    # after the first usage the ratio is prompt_tokens / raw; the second turn's response updates it again
+    assert scn.coord._correction == pytest.approx(1000 / raw2)
+    check_log(scn)
+
+
+# ================================================================ M2: compaction
+BIG = "x" * 1500
+LONG_TASK = "cat the big file and tell me what is in it. " * 4
+
+
+def sized(entry):
+    """A script entry whose usage.prompt_tokens is the raw estimate of the
+    request it answers (a well-behaved server), so the correction stays ~1."""
+    from guest.context import estimate_tokens
+
+    def fn(request):
+        out = json.loads(json.dumps(entry))
+        n = estimate_tokens(request)
+        out["usage"] = {"prompt_tokens": n, "completion_tokens": 10, "total_tokens": n + 10}
+        return out
+    return fn
+
+
+def _compaction_cfg(**over):
+    # the base request (system + built-in tool schemas) is ~5 KB ~ 1265 tokens;
+    # a 1500-char tool result pushes the second turn over 1400
+    return make_cfg(context_window_tokens=1500, reserve_tokens=100, **over)
+
+
+def test_window_triggers_a_compaction_turn_before_the_regular_turn():
+    scn = Scenario(cfg=_compaction_cfg(),
+                   script=[sized(tool_calls([("c1", "bash", {"command": "cat big"})])),
+                           sized(text("SUMMARY: cat big printed x's.")),
+                           sized(text("All done."))],
+                   ops_results={"bash": BIG})
+    scn.task(LONG_TASK)
+    result = scn.run()
+    assert scn.types() == [
+        "session_start", "clock", "input", "clock", "turn_start", "llm_response",
+        "guard_decision", "tool_call", "op_state", "op_state", "tool_result", "wake",
+        "clock", "turn_start", "llm_response", "compaction", "memory",
+        "clock", "turn_start", "llm_response", "settle"]
+    t1, comp, t2 = scn.of("turn_start")
+    assert [t["body"]["type"] for t in (t1, comp, t2)] == ["regular", "compaction", "regular"]
+    # the compaction turn commits nothing: its includes_through_seq is the previous turn's
+    assert comp["body"]["includes_through_seq"] == t1["body"]["includes_through_seq"]
+    assert comp["body"]["turn_id"] == derive_id(USER, TENANT, SID, comp["seq"], "turn")
+    # its request: system + the committed prefix (the task) + the instruction, no tools
+    req = scn.provider.requests[1]
+    assert req.tools == [] and req.messages[0]["role"] == "system"
+    assert [m["role"] for m in req.messages] == ["system", "user", "user"]
+    assert req.messages[1]["content"].endswith(LONG_TASK)
+    assert req.messages[-1]["content"].startswith("[compaction]")
+    assert comp["body"]["request_hash"] == req.request_hash
+    assert comp["body"]["preamble_hash"] == req.preamble_hash
+    # compaction: the range is the committed prefix, [input seq, includes_through_seq]
+    c = scn.bodies("compaction")[0]
+    input_seq = scn.of("input")[0]["seq"]
+    assert c["range"] == [input_seq, t1["body"]["includes_through_seq"]]
+    assert c["summary_turn_id"] == comp["body"]["turn_id"]
+    assert c["tokens_before"] > 1400 and 0 < c["tokens_after"] < c["tokens_before"]
+    assert 0.9 < scn.coord._correction < 1.1
+    # memory: scope session, slug compaction-<turn_start seq>, sha256 of the stripped summary text
+    summary = scn.bodies("llm_response")[1]["message"]["content"]
+    assert scn.bodies("memory") == [{
+        "scope": "session", "op": "write", "slug": f"compaction-{comp['seq']}",
+        "sha256": sha256_hex(summary.strip()),
+        "derived_from": comp["body"]["turn_id"]}]
+    assert scn.state.session_memory == {f"compaction-{comp['seq']}": scn.bodies("memory")[0]["sha256"]}
+    # the regular turn after it sees the summary first, then what was staged after the range
+    after = scn.provider.requests[2]
+    assert [m["role"] for m in after.messages] == ["system", "assistant", "assistant", "tool"]
+    assert after.messages[1] == {"role": "assistant", "content": summary}
+    assert after.messages[2]["tool_calls"][0]["id"] == "c1" and after.messages[3]["tool_call_id"] == "c1"
+    assert after.prefix_len == 2
+    assert t2["body"]["request_hash"] == after.request_hash
+    # the prefix the fold holds is the same thing
+    assert [m["role"] for m in scn.state.committed_prefix] == ["assistant", "assistant", "tool"]
+    assert scn.state.prefix_origins[0] == input_seq and scn.state.compacted_through == c["range"][1]
+    # compaction turns do not stream deltas; the regular turns do (default stream on)
+    assert scn.provider.calls == [(True, True), (True, False), (True, True)]
+    assert result["outcome"] == "done" and result["answer"] == "All done."
+    replayed = check_log(scn)
+    assert replayed.committed_prefix == scn.state.committed_prefix
+
+
+def test_compaction_turns_do_not_count_against_max_turns():
+    scn = Scenario(cfg=_compaction_cfg(max_turns=2),
+                   script=[sized(tool_calls([("c1", "bash", {"command": "cat"})])), sized(text("S")),
+                           sized(text("done"))],
+                   ops_results={"bash": BIG})
+    scn.task("x")
+    result = scn.run()
+    assert [t["type"] for t in scn.bodies("turn_start")] == ["regular", "compaction", "regular"]
+    assert result["outcome"] == "done"
+    check_log(scn)
+
+
+def test_overflow_compacts_and_retries_the_turn_once():
+    scn = Scenario(script=[tool_calls([("c1", "bash", {"command": "ls"})]),
+                           overflow_error(),
+                           text("SUMMARY"),
+                           text("Retried fine.")],
+                   ops_results={"bash": "a b c"})
+    scn.task("list")
+    result = scn.run()
+    assert scn.types() == [
+        "session_start", "clock", "input", "clock", "turn_start", "llm_response",
+        "guard_decision", "tool_call", "op_state", "op_state", "tool_result", "wake",
+        "clock", "turn_start", "error",
+        "clock", "turn_start", "llm_response", "compaction", "memory",
+        "clock", "turn_start", "llm_response", "settle"]
+    t1, t2, comp, t3 = scn.of("turn_start")
+    assert [t["body"]["type"] for t in (t1, t2, comp, t3)] == ["regular", "regular", "compaction", "regular"]
+    err = scn.bodies("error")[0]
+    assert err["class"] == "overflow" and err["retry"] is True and err["ref"] == t2["body"]["turn_id"]
+    # the overflowed turn had committed the round; the compaction covers it all
+    assert comp["body"]["includes_through_seq"] == t2["body"]["includes_through_seq"]
+    assert scn.bodies("compaction")[0]["range"] == [scn.of("input")[0]["seq"], t2["body"]["includes_through_seq"]]
+    assert scn.bodies("compaction")[0]["tokens_before"] > 0
+    retry = scn.provider.requests[3]
+    assert [m["role"] for m in retry.messages] == ["system", "assistant"]
+    assert retry.messages[1]["content"] == "SUMMARY"
+    assert t3["body"]["includes_through_seq"] == t3["seq"] - 1
+    assert result["outcome"] == "done" and result["answer"] == "Retried fine."
+    check_log(scn)
+
+
+def test_second_overflow_after_compaction_fails_the_task():
+    scn = Scenario(script=[tool_calls([("c1", "bash", {"command": "ls"})]),
+                           overflow_error(), text("SUMMARY"), overflow_error()],
+                   ops_results={"bash": "a"})
+    scn.task("list")
+    result = scn.run()
+    errors = scn.bodies("error")
+    assert [(e["class"], e["retry"]) for e in errors] == [("overflow", True), ("overflow", False)]
+    assert [t["type"] for t in scn.bodies("turn_start")] == ["regular", "regular", "compaction", "regular"]
+    assert scn.types()[-2:] == ["error", "settle"]
+    assert result["outcome"] == "failed" and result["reason"] == "overflow"
+    assert len(scn.bodies("compaction")) == 1
+    check_log(scn)
+
+
+def test_overflow_on_the_first_turn_compacts_the_task_message_and_retries():
+    # the first turn committed the task: that one message is the prefix to summarise
+    scn = Scenario(script=[overflow_error(), text("S: the user pasted a huge file"), text("ok")])
+    scn.task("x" * 5000)
+    result = scn.run()
+    assert scn.types() == ["session_start", "clock", "input", "clock", "turn_start", "error",
+                           "clock", "turn_start", "llm_response", "compaction", "memory",
+                           "clock", "turn_start", "llm_response", "settle"]
+    input_seq = scn.of("input")[0]["seq"]
+    assert scn.bodies("compaction")[0]["range"] == [input_seq, input_seq + 1]   # [task, turn_clock]
+    assert [m["role"] for m in scn.provider.requests[1].messages] == ["system", "user", "user"]
+    assert scn.provider.requests[2].messages[1:] == [{"role": "assistant", "content": "S: the user pasted a huge file"}]
+    assert result["outcome"] == "done"
+    check_log(scn)
+
+
+def test_overflow_during_the_compaction_turn_fails_the_task():
+    scn = Scenario(script=[tool_calls([("c1", "bash", {"command": "ls"})]), overflow_error(), overflow_error()],
+                   ops_results={"bash": "a"})
+    scn.task("list")
+    result = scn.run()
+    assert [t["type"] for t in scn.bodies("turn_start")] == ["regular", "regular", "compaction"]
+    assert scn.bodies("error")[-1] == {"class": "overflow", "message": scn.bodies("error")[-1]["message"],
+                                       "retry": False, "ref": scn.bodies("turn_start")[-1]["turn_id"]}
+    assert result["outcome"] == "failed" and result["reason"] == "overflow"
+    assert scn.bodies("compaction") == []
+    check_log(scn)
+
+
+def test_replay_through_two_compactions_matches_the_coordinator_state():
+    # a summary short enough to drop under the budget, then two more big rounds
+    scn = Scenario(cfg=_compaction_cfg(max_tools=20, max_turns=20),
+                   script=[sized(e) for e in (
+                           tool_calls([("c1", "bash", {"command": "a"})]),
+                           text("S1"),
+                           tool_calls([("c2", "bash", {"command": "b"})]),
+                           text("S2"),
+                           tool_calls([("c3", "bash", {"command": "c"})]),
+                           text("S3"),
+                           text("end"))],
+                   ops_results={"bash": BIG})
+    scn.task("go")
+    result = scn.run()
+    assert result["outcome"] == "done"
+    assert [t["type"] for t in scn.bodies("turn_start")] == [
+        "regular", "compaction", "regular", "compaction", "regular", "compaction", "regular"]
+    ranges = [c["range"] for c in scn.bodies("compaction")]
+    input_seq = scn.of("input")[0]["seq"]
+    assert all(r[0] == input_seq for r in ranges)           # the summary keeps the first origin
+    assert ranges[0][1] < ranges[1][1] < ranges[2][1]
+    # the last regular turn committed the round that was staged after the third range
+    assert [m["role"] for m in scn.state.committed_prefix] == ["assistant", "assistant", "tool"]
+    assert scn.state.committed_prefix[0]["content"] == "S3"
+    assert scn.state.committed_prefix[1]["tool_calls"][0]["id"] == "c3"
+    slugs = sorted(scn.state.session_memory)
+    assert len(slugs) == 3 and all(s.startswith("compaction-") for s in slugs)
+    # every later preamble names the summaries written so far
+    assert "[new memory] " + slugs[0] in scn.provider.requests[-1].preamble
+    replayed = check_log(scn)
+    assert replayed.compacted_through == ranges[-1][1]
+
+
+# ================================================================ M2: budget
+def test_budget_error_settles_failed_without_retry():
+    scn = Scenario(script=[budget_error(), text("never")])
+    scn.task("x")
+    result = scn.run()
+    assert scn.types() == ["session_start", "clock", "input", "clock", "turn_start", "error", "settle"]
+    err = scn.bodies("error")[0]
+    assert err["class"] == "budget" and err["retry"] is False and err["ref"] == scn.bodies("turn_start")[0]["turn_id"]
+    assert result["outcome"] == "failed" and result["reason"] == "budget"
+    assert len(scn.provider.requests) == 1
+    check_log(scn)
+
+
+# ================================================================ M2: workspace tree id
+class TreeOps(FakeOps):
+    def __init__(self, *a, tree=None, **kw):
+        super().__init__(*a, **kw)
+        self.tree = tree
+        self.tree_calls = 0
+
+    def workspace_tree_id(self):
+        self.tree_calls += 1
+        if isinstance(self.tree, Exception):
+            raise self.tree
+        return self.tree
+
+
+def test_turn_start_carries_the_workspace_tree_id_for_every_turn():
+    scn = Scenario(cfg=_compaction_cfg(), script=[sized(tool_calls([("c1", "bash", {"command": "x"})])),
+                                                  sized(text("S")), sized(text("ok"))])
+    scn.ops = TreeOps(scn.inbound, {"bash": BIG}, tree="a" * 64)
+    scn.coord.ops = scn.ops
+    scn.task("x")
+    scn.run()
+    starts = scn.bodies("turn_start")
+    assert [t["type"] for t in starts] == ["regular", "compaction", "regular"]
+    assert all(t["workspace_tree_id"] == "a" * 64 for t in starts)
+    assert scn.ops.tree_calls == 3
+    check_log(scn)
+
+
+def test_tree_id_is_none_without_the_method_or_when_it_fails():
+    scn = Scenario(script=[text("ok")])                 # FakeOps has no workspace_tree_id
+    scn.task("x")
+    scn.run()
+    assert scn.bodies("turn_start")[0]["workspace_tree_id"] is None
+    scn2 = Scenario(script=[text("ok")])
+    scn2.coord.ops = TreeOps(scn2.inbound, tree=OSError("gone"))
+    scn2.task("x")
+    scn2.run()
+    assert scn2.bodies("turn_start")[0]["workspace_tree_id"] is None
+    check_log(scn2)
+
+
+# ================================================================ M2: memory from tools
+MEMORY_TOOLS = [{"name": "remember", "side": "host", "pin": None}, {"name": "forget", "side": "host", "pin": None}]
+
+
+def memory_fact(call, sha):
+    """The memory fact the host attaches to a remember/forget side_result."""
+    op = "write" if call["name"] == "remember" else "remove"
+    return {"scope": call["args"]["scope"], "op": op, "slug": call["args"]["slug"],
+            "sha256": sha if op == "write" else ""}
+
+
+def test_side_result_memory_facts_emit_memory_events():
+    sha = "ab" * 32
+    scn = Scenario(cfg=make_cfg(MEMORY_TOOLS), script=[
+        tool_calls([("c1", "remember", {"scope": "user", "slug": "tea", "text": "likes oolong"}),
+                    ("c2", "remember", {"scope": "session", "slug": "plan", "text": "step 1"})]),
+        tool_calls([("c3", "forget", {"scope": "session", "slug": "plan"}),
+                    ("c4", "forget", {"scope": "user", "slug": "nothing"})]),
+        text("noted"),
+    ])
+
+    def hook(event):
+        if event["type"] == "tool_call":
+            call = event["body"]
+            scn.control("side_result", {"call_id": call["call_id"], "side": "host", "ok": True,
+                                        "content": "saved", "memory": memory_fact(call, sha)})
+    scn.transport.on_event.append(hook)
+    scn.task("remember things")
+    scn.run()
+    assert scn.bodies("memory") == [
+        {"scope": "user", "op": "write", "slug": "tea", "sha256": sha, "derived_from": "c1"},
+        {"scope": "session", "op": "write", "slug": "plan", "sha256": sha, "derived_from": "c2"},
+        {"scope": "session", "op": "remove", "slug": "plan", "sha256": "", "derived_from": "c3"},
+        {"scope": "user", "op": "remove", "slug": "nothing", "sha256": "", "derived_from": "c4"},
+    ]
+    # each memory event follows its tool_result
+    types = scn.types()
+    for i, t in enumerate(types):
+        if t == "memory":
+            assert types[i - 1] == "tool_result"
+    assert scn.state.session_memory == {} and scn.state.counters["user_memory"] == 2
+    # the user-scope write is mentioned in the preambles that follow (the fold only counts it)
+    assert "[new memory] tea" in scn.provider.requests[1].preamble
+    assert "[new memory] plan" in scn.provider.requests[1].preamble
+    assert "[new memory] tea" in scn.provider.requests[2].preamble
+    assert "[new memory] plan" not in scn.provider.requests[2].preamble
+    assert scn.coord._user_memory == ["tea"]
+    check_log(scn)
+
+
+def test_memory_event_only_for_an_ok_result_with_a_valid_fact():
+    scn = Scenario(cfg=make_cfg(MEMORY_TOOLS), script=[
+        tool_calls([("c1", "remember", {"scope": "user", "slug": "tea", "text": "x"})]),
+        tool_calls([("c2", "remember", {"scope": "user", "slug": "tea", "text": "x"})]),
+        tool_calls([("c3", "remember", {"text": "no fact"})]),
+        text("ok"),
+    ])
+    fact = {"scope": "user", "op": "write", "slug": "tea", "sha256": "cd" * 32}
+    answers = iter([
+        {"content": "Error: disk full", "ok": False, "memory": fact},                 # failed: no event
+        {"content": "saved", "ok": True, "memory": {**fact, "scope": "global"}},      # not a scope
+        {"content": "saved", "ok": True},                                             # no fact named
+    ])
+
+    def hook(event):
+        if event["type"] == "tool_call":
+            scn.control("side_result", {"call_id": event["body"]["call_id"], "side": "host",
+                                        **next(answers)})
+    scn.transport.on_event.append(hook)
+    scn.task("x")
+    scn.run()
+    assert scn.bodies("memory") == []
+    assert [o["state"] for o in scn.bodies("op_state")] == ["running", "failed", "running", "done",
+                                                            "running", "done"]
+    assert any("memory rejected" in b["message"] for b in scn.transport.live_of("log"))
+    assert scn.coord._user_memory == []
+    check_log(scn)
+
+
+# ================================================================ M2: overflow mid-stream
+def test_mid_stream_overflow_compacts_and_the_retried_turn_streams_afresh():
+    # an overflow raised by the provider mid-stream (an error chunk) is the same
+    # ProviderError.overflow; the retried turn is a new turn with its own deltas
+    scn = Scenario(script=[tool_calls([("c1", "bash", {"command": "ls"})]),
+                           overflow_error("stream error: maximum context length exceeded"),
+                           text("SUMMARY"),
+                           Streamed(text("Retried fine."), ["Retried", " fine."])],
+                   ops_results={"bash": "a"})
+    scn.task("list")
+    result = scn.run()
+    assert [t["type"] for t in scn.bodies("turn_start")] == ["regular", "regular", "compaction", "regular"]
+    assert result["answer"] == "Retried fine."
+    last_turn = scn.bodies("turn_start")[-1]["turn_id"]
+    assert [d["text"] for d in scn.transport.live_of("delta") if d["turn_id"] == last_turn] == ["Retried", " fine."]
+    check_log(scn)

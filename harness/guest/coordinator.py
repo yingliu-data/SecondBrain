@@ -40,33 +40,82 @@ Sides: guest tools go to ops.submit; host/device/mcp calls wait for
 side_result with cfg.limits.op_timeout_s[side]; the `question` built-in waits
 for ui_response. One task per run(): run() returns the settle body.
 
-M1 deviations from the plan:
+M2 (docs/GUEST.md "M2 contracts"):
+  - streaming: every regular turn calls the provider with
+    stream=config.stream_enabled(cfg) and an on_delta that sends live
+    delta{session_id, turn_id, kind, index, text} per fragment straight from
+    the provider thread (Transport.send_live only queues, so it is
+    thread-safe); compaction turns pass no on_delta. The provider owns the
+    fragments: it de-dups across its own retries and, with streaming off,
+    calls on_delta once with kind "text" and the whole content. Every delta
+    of a turn is therefore sent before its llm_response, which is emitted
+    once from the assembled response.
+  - token estimate: the raw context.estimate_tokens(request) (ceil(chars/4))
+    of the turn in flight is kept in _turn_raw; the corrected estimate is
+    max(1, ceil(raw x correction)), correction = usage.prompt_tokens / the
+    raw estimate of the request that produced that usage (1.0 until the
+    first usage).
+  - turns: _start_turn and _start_compaction build the request and decide;
+    _begin_turn emits clock{turn_clock} -> turn_start for both and launches
+    the call. _on_llm tells the two apart by the folded turn's type.
+  - compaction: before a regular turn whose estimate exceeds
+    context_window_tokens - reserve_tokens, and on ProviderError.overflow
+    (then the regular turn is retried once), a compaction turn runs first:
+    clock{turn_clock}, turn_start{type: compaction, includes_through_seq = the
+    previous turn's}, llm_response (the summary), compaction{range: [first
+    prefix origin, includes_through_seq], ...}, memory{scope: session, slug:
+    compaction-<turn_start seq>, sha256: sha256(summary.strip()),
+    derived_from: the turn}. The fold rebuilds the prefix (summary first,
+    then whatever was staged after the range) and the pending regular turn
+    starts. tokens_after is the estimate of the next regular request built on
+    a copy of the state with the same compaction event applied (the fold's
+    rule, not a copy of it). A compaction never runs twice in a row
+    (`_can_compact`): a second overflow, or an overflow while the prefix is
+    already just a summary, is error{overflow, retry: false} +
+    settle{failed, reason: overflow}. Compaction turns do not count against
+    max_turns.
+  - budget: ProviderError.budget (the provider classifies 402) is
+    error{budget} + settle{failed, reason: budget}, no retry.
+  - memory from tools: the host names the memory a side call changed in
+    side_result.memory {scope, op, slug, sha256}; an ok tool_result is
+    followed by memory{..., derived_from: call_id} verbatim. User-scope slugs
+    are kept per task (`_user_memory`) and listed with the session ones in
+    the preamble's [new memory] lines.
+  - turn_start.workspace_tree_id = ops.workspace_tree_id() (None when the
+    operation manager has no such method, as the test fakes).
+
+M1 deviations from the plan, still in place:
   - an op timeout has no clock kind in the schema, so it is recorded as
     op_state{timeout, duration_ms} without a clock event;
   - malformed tool arguments get an error result straight away (the repair
     turn is M1b);
-  - park is logged and ignored (M3); compaction and workspace_tree_id are M2.
+  - park is logged and ignored (M3).
 """
 from __future__ import annotations
 
+import copy
 import dataclasses
 import json
+import math
 import threading
 import time
 from datetime import datetime, timezone
 
 from protocol.allowlist import is_allowed
-from protocol.canonical import canonical_json, canonicalisable_error, derive_id, hash_value
-from protocol.events import UNANSWERED, make_event
+from protocol.canonical import canonical_json, canonicalisable_error, derive_id, hash_value, is_int, sha256_hex
+from protocol.events import UNANSWERED, make_event, validate_event
 from protocol.fold import State, apply
 from guest import hooks as default_hooks
-from guest.context import build_request, system_hash
+from guest.config import stream_enabled
+from guest.context import build_compaction_request, build_request, estimate_tokens, system_hash
 
 HARNESS_VERSION = "0.0.1"
 DOOM_LOOP_REPEATS = 3
 MAX_UNANSWERED = 3
 QUESTION_TOOL = "question"
 INPUT_KINDS = ("task", "follow_up", "steer")
+MEMORY_KEYS = ("scope", "op", "slug", "sha256")   # side_result.memory, copied into memory events
+CORRECTION_BOUNDS = (0.1, 10.0)   # a usage/estimate ratio outside this is a broken count
 
 
 class FatalProtocolError(RuntimeError):
@@ -190,7 +239,7 @@ class Coordinator:
         self.settled: dict | None = None
         self._task_usage_base: dict = {}
         self._task_ops_base = 0
-        self._task_turns_base = 0
+        self._task_turns = 0              # regular turns started in this task
         self._final_turn = False          # the no-tools wrap-up after max_tools
 
         # turn bookkeeping
@@ -202,6 +251,12 @@ class Coordinator:
         self._attachments: dict[str, list] = {}
         self._call_counts: dict[str, int] = {}
         self._pending_inputs: list[str] = []   # input_ids staged since the last turn start
+
+        # context (M2)
+        self._correction = 1.0                 # usage.prompt_tokens / raw estimate
+        self._turn_raw: int | None = None      # raw estimate of the turn in flight
+        self._tokens_before: int | None = None # of the running compaction turn
+        self._user_memory: list[str] = []      # user-scope slugs written this task
 
         # waits
         self._side_calls: dict[str, dict] = {}        # call_id -> {side, started_ms}
@@ -361,7 +416,8 @@ class Coordinator:
         self.task_input_id = input_id
         self._task_usage_base = dict(self.state.usage)
         self._task_ops_base = self.state.limits_consumed["ops"]
-        self._task_turns_base = self.state.limits_consumed["turns"]
+        self._task_turns = 0
+        self._user_memory = []
         self._cancel("idle")
         wall = _limit(self.limits, "wall_clock_s", None)
         if wall:
@@ -410,7 +466,8 @@ class Coordinator:
         content = body.get("content", "")
         content = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
         duration = max(0, self.clock.now_ms() - pending["started_ms"])
-        self._finish_call(call_id, "done" if ok else "failed", content, duration_ms=duration)
+        self._finish_call(call_id, "done" if ok else "failed", content,
+                          memory=body.get("memory"), duration_ms=duration)
 
     # ------------------------------------------------------------ inbound: others
     def _on_ack(self, seq: int) -> None:
@@ -485,12 +542,52 @@ class Coordinator:
 
     # ------------------------------------------------------------ turns
     def _turns_this_task(self) -> int:
-        return self.state.limits_consumed["turns"] - self._task_turns_base
+        """Regular turns of this task (compaction turns are not counted)."""
+        return self._task_turns
+
+    def _tree_id(self):
+        fn = getattr(self.ops, "workspace_tree_id", None)
+        if not callable(fn):
+            return None
+        try:
+            tid = fn()
+        except Exception as exc:    # noqa: BLE001 - a hashing problem is not a loop problem
+            self.log(f"workspace_tree_id failed: {exc}", level="warning")
+            return None
+        return tid if isinstance(tid, str) else None
+
+    def _window_budget(self):
+        """context_window_tokens - reserve_tokens, or None when no window is set."""
+        window = _limit(self.limits, "context_window_tokens", None)
+        if not window:
+            return None
+        return max(0, int(window) - int(_limit(self.limits, "reserve_tokens", 0) or 0))
+
+    def _corrected(self, raw: int) -> int:
+        """A raw estimate scaled by the usage correction (never below 1)."""
+        return max(1, math.ceil(raw * self._correction))
+
+    def _new_memory(self) -> list:
+        """The [new memory] slugs: the session memories the fold holds and the
+        user-scope slugs this task wrote (the fold only counts those)."""
+        return [*self.state.session_memory, *self._user_memory]
+
+    def _can_compact(self) -> bool:
+        """There is a committed prefix to summarise, the last turn was not a
+        compaction (never twice in a row), and the prefix is not already just
+        the last summary."""
+        committed = self.state.committed
+        last = self.state.last_turn()
+        if not committed or last is None or last["type"] == "compaction":
+            return False
+        return not (self.state.compacted_through is not None and len(committed) == 1)
 
     def _ops_this_task(self) -> int:
         return self.state.limits_consumed["ops"] - self._task_ops_base
 
     def _start_turn(self) -> None:
+        """The next regular turn: the limits, its request, and a compaction
+        turn first when the estimate is over the window."""
         if self.settled is not None:
             return
         if not self._link_up:
@@ -507,28 +604,83 @@ class Coordinator:
         if max_tools and self._ops_this_task() >= max_tools:
             self._final_turn = True
         at = self.clock.now_ms()
-        self.emit("clock", {"kind": "turn_clock", "at": at})
         request = build_request(self.state, self.cfg, at, attachments=self._attachments,
-                                preambles=self._preambles, with_tools=not self._final_turn)
-        turn_id = self._id("turn")
-        self.emit("turn_start", {
-            "turn_id": turn_id, "type": "regular",
-            "includes_through_seq": self.state.last_seq,
+                                preambles=self._preambles, with_tools=not self._final_turn,
+                                new_memory=self._new_memory())
+        estimate = self._corrected(estimate_tokens(request))
+        budget = self._window_budget()
+        if budget is not None and estimate > budget and self._can_compact():
+            self.log("compaction: estimate over the window", level="info",
+                     estimate=estimate, budget=budget)
+            self._start_compaction(estimate)
+            return
+        self._begin_turn("regular", request, at=at)
+
+    def _start_compaction(self, tokens_before: int) -> None:
+        """The compaction turn (M2): its request is the system block, the
+        committed prefix and the instruction; includes_through_seq is the
+        previous turn's, so it commits nothing and the range it summarises is
+        exactly the committed prefix."""
+        at = self.clock.now_ms()
+        request = build_compaction_request(self.state, self.cfg, preambles=self._preambles)
+        self._begin_turn("compaction", request, at=at,
+                         includes_through_seq=self.state.last_turn()["includes_through_seq"],
+                         tokens_before=tokens_before)
+
+    def _turn_start_body(self, turn_id: str, kind: str, request, includes_through_seq: int) -> dict:
+        return {
+            "turn_id": turn_id, "type": kind,
+            "includes_through_seq": includes_through_seq,
             "model": self.cfg.model, "params": request.params,
             "request_hash": request.request_hash, "preamble_hash": request.preamble_hash,
-            "workspace_tree_id": None,
-        })
+            "workspace_tree_id": self._tree_id(),
+        }
+
+    def _begin_turn(self, kind: str, request, *, at: int, includes_through_seq: int | None = None,
+                    tokens_before: int | None = None) -> str:
+        """clock{turn_clock, at} -> turn_start -> bookkeeping -> the provider
+        call, for both turn types. includes_through_seq None = everything
+        logged before the turn_start (a regular turn)."""
+        self.emit("clock", {"kind": "turn_clock", "at": at})
+        if includes_through_seq is None:
+            includes_through_seq = self.state.last_seq
+        turn_id = self._id("turn")
+        self.emit("turn_start", self._turn_start_body(turn_id, kind, request, includes_through_seq))
         self.current_turn = turn_id
-        self._turn_calls, self._turn_pending = [], set()
-        self._pending_inputs = []
+        self._turn_raw = estimate_tokens(request)
+        if kind == "regular":
+            self._task_turns += 1
+            self._turn_calls, self._turn_pending = [], set()
+            self._pending_inputs = []
+        else:
+            self._tokens_before = tokens_before
         self._cancel("grace")
-        self.log("turn started", level="debug", turn_id=turn_id, final=self._final_turn)
-        threading.Thread(target=self._call_provider, args=(turn_id, request),
+        self.log(f"{kind} turn started", level="debug", turn_id=turn_id, final=self._final_turn,
+                 estimate=self._corrected(self._turn_raw), tokens_before=tokens_before)
+        self._launch(turn_id, request, deltas=kind == "regular")
+        return turn_id
+
+    def _launch(self, turn_id: str, request, *, deltas: bool) -> None:
+        on_delta = None
+        if deltas:
+            session_id = self.cfg.session_id
+
+            def on_delta(fragment: dict) -> None:
+                # called from the provider thread; transport.send_live only queues.
+                # A turn abandoned (settle, abort) while its call still streams
+                # must not leak its text into whatever the host shows next.
+                if self.current_turn != turn_id or self.settled is not None:
+                    return
+                self.live("delta", {"session_id": session_id, "turn_id": turn_id,
+                                    "kind": fragment["kind"], "index": fragment["index"],
+                                    "text": fragment["text"]})
+        threading.Thread(target=self._call_provider,
+                         args=(turn_id, request, stream_enabled(self.cfg), on_delta),
                          name=f"provider-{turn_id}", daemon=True).start()
 
-    def _call_provider(self, turn_id: str, request) -> None:
+    def _call_provider(self, turn_id: str, request, stream: bool, on_delta) -> None:
         try:
-            result = self.provider.chat_completion(request)
+            result = self.provider.chat_completion(request, stream=stream, on_delta=on_delta)
         except Exception as exc:    # noqa: BLE001 - everything becomes an inbound item
             result = exc
         self.inbound.put(("llm", turn_id, result))
@@ -537,24 +689,19 @@ class Coordinator:
         if turn_id != self.current_turn or self.settled is not None:
             self.log(f"stale llm result for {turn_id} ignored", level="debug")
             return
+        compaction = self.state.turns[turn_id]["type"] == "compaction"
         if isinstance(result, Exception):
-            transient = bool(getattr(result, "transient", False))
-            self.emit("error", {"class": "transient" if transient else "protocol",
-                                "message": f"provider: {result}", "retry": False, "ref": turn_id})
             self.current_turn = None
-            self._settle("failed", "", reason="provider_error")
+            self._on_provider_error(turn_id, result, compaction)
             return
-        choice = (result.get("choices") or [{}])[0]
-        message = dict(choice.get("message") or {"role": "assistant", "content": None})
-        message.setdefault("role", "assistant")
-        finish = str(choice.get("finish_reason") or "stop")
-        usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
-        body = {"turn_id": turn_id, "message": message, "finish_reason": finish, "usage": usage}
-        rid = result.get("id")
-        if isinstance(rid, str) or rid is None:
-            body["response_id"] = rid
+        body = self._response_body(turn_id, result)
         self.emit("llm_response", body)
         self.current_turn = None
+        self._update_correction(body["usage"])
+        if compaction:
+            self._finish_compaction(turn_id, body["message"])
+            return
+        message, finish = body["message"], body["finish_reason"]
         content = message.get("content")
         text = content if isinstance(content, str) else ""
         calls = message.get("tool_calls") or []
@@ -562,7 +709,6 @@ class Coordinator:
         if finish == "length":
             self.emit("error", {"class": "limit", "message": "finish_reason length: no tool runs",
                                 "retry": False, "ref": turn_id})
-            self.live("delta", {"turn_id": turn_id, "kind": "text", "text": text})
             self._settle("done", text, reason="length")
             return
         if calls and self._final_turn:
@@ -573,7 +719,6 @@ class Coordinator:
             self._run_tool_calls(turn_id, calls)
             return
         self._last_response_had_calls = False
-        self.live("delta", {"turn_id": turn_id, "kind": "text", "text": text})
         if self._final_turn:
             self._settle("done", text, reason="max_tools")
             return
@@ -585,6 +730,88 @@ class Coordinator:
 
     def _wake(self, reason: str, result_ids: list, input_ids: list) -> None:
         self.emit("wake", {"reason": reason, "result_ids": list(result_ids), "input_ids": list(input_ids)})
+
+    @staticmethod
+    def _response_body(turn_id: str, result: dict) -> dict:
+        """The llm_response body from an assembled chat-completions response."""
+        choice = (result.get("choices") or [{}])[0]
+        message = dict(choice.get("message") or {"role": "assistant", "content": None})
+        message.setdefault("role", "assistant")
+        finish = str(choice.get("finish_reason") or "stop")
+        usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
+        body = {"turn_id": turn_id, "message": message, "finish_reason": finish, "usage": usage}
+        rid = result.get("id")
+        if isinstance(rid, str) or rid is None:
+            body["response_id"] = rid
+        return body
+
+    def _update_correction(self, usage: dict) -> None:
+        """correction = usage.prompt_tokens / the raw estimate of the turn's request."""
+        raw, self._turn_raw = self._turn_raw, None
+        prompt = usage.get("prompt_tokens") if isinstance(usage, dict) else None
+        if not raw or not is_int(prompt, 1):
+            return
+        lo, hi = CORRECTION_BOUNDS
+        self._correction = min(hi, max(lo, prompt / raw))
+
+    def _on_provider_error(self, turn_id: str, exc: Exception, during_compaction: bool) -> None:
+        if getattr(exc, "budget", False):
+            self.emit("error", {"class": "budget", "message": f"provider: {exc}",
+                                "retry": False, "ref": turn_id})
+            self._settle("failed", "", reason="budget")
+            return
+        if getattr(exc, "overflow", False):
+            retry = not during_compaction and self._can_compact()
+            self.emit("error", {"class": "overflow", "message": f"provider: {exc}",
+                                "retry": retry, "ref": turn_id})
+            if retry:
+                self._start_compaction(self._corrected(self._turn_raw) if self._turn_raw else 0)
+            else:
+                self._settle("failed", "", reason="overflow")
+            return
+        transient = bool(getattr(exc, "transient", False))
+        self.emit("error", {"class": "transient" if transient else "protocol",
+                            "message": f"provider: {exc}", "retry": False, "ref": turn_id})
+        self._settle("failed", "", reason="provider_error")
+
+    def _finish_compaction(self, turn_id: str, summary_message: dict) -> None:
+        """compaction + memory after the summary turn's llm_response, then the
+        regular turn that was waiting (or being retried). The range is the
+        committed prefix the turn summarised: [its first origin, the turn's
+        includes_through_seq]."""
+        turn = self.state.turns[turn_id]
+        content = summary_message.get("content")
+        summary = content if isinstance(content, str) else ""
+        if not summary:
+            self.log("compaction summary is empty", level="warning", turn_id=turn_id)
+        body = {"range": [self.state.committed[0]["origin"], turn["includes_through_seq"]],
+                "summary_turn_id": turn_id,
+                "tokens_before": max(0, int(self._tokens_before or 0)),
+                "tokens_after": 0}
+        self._tokens_before = None
+        body["tokens_after"] = max(0, int(self._estimate_after_compaction(body)))
+        self.emit("compaction", body)
+        self.emit("memory", {"scope": "session", "op": "write",
+                             "slug": f"compaction-{turn['seq']}", "sha256": sha256_hex(summary.strip()),
+                             "derived_from": turn_id})
+        self.log("compaction done", level="info", range=body["range"],
+                 tokens_before=body["tokens_before"], tokens_after=body["tokens_after"])
+        self._start_turn()
+
+    def _estimate_after_compaction(self, body: dict) -> int:
+        """The estimate of the next regular request, built on a copy of the
+        state with this compaction event folded in (the fold's own rule)."""
+        preview = copy.deepcopy(self.state)
+        try:
+            apply(preview, make_event(self.cfg.session_id, preview.last_seq + 1,
+                                      self.clock.now_iso(), "compaction", body))
+            request = build_request(preview, self.cfg, preview.clock_at or 0,
+                                    attachments=self._attachments, preambles=dict(self._preambles),
+                                    with_tools=not self._final_turn, new_memory=self._new_memory())
+        except Exception as exc:    # noqa: BLE001 - reported, never checked
+            self.log(f"tokens_after preview failed: {exc}", level="warning")
+            return 0
+        return self._corrected(estimate_tokens(request))
 
     # ------------------------------------------------------------ tool calls
     def _side_of(self, name: str) -> str | None:
@@ -733,8 +960,10 @@ class Coordinator:
             self._abandon_open_work("killed")
             self._settle("escalated", "", reason="unanswered_questions")
 
-    def _finish_call(self, call_id: str, state: str, content: str, *, spill_ref=None, **op_extra) -> None:
-        """op_state{terminal} + tool_result (after_tool rewrite), then the wake check."""
+    def _finish_call(self, call_id: str, state: str, content: str, *, spill_ref=None, memory=None,
+                     **op_extra) -> None:
+        """op_state{terminal} + tool_result (after_tool rewrite), the host's
+        memory fact after an ok result, then the wake check."""
         call = self.state.open_calls.get(call_id)
         if call is None or "result" in call:
             return
@@ -754,10 +983,31 @@ class Coordinator:
         if call_id in self.state.placeholders:
             body["late"] = True
         self.emit("tool_result", body)
+        if state == "done" and memory is not None:
+            self._emit_memory(call_id, memory)
         self._turn_pending.discard(call_id)
         if (not self._turn_pending and self._last_response_had_calls and not self._suppress_wake
                 and self.settled is None and self.current_turn is None):
             self._after_round()
+
+    def _emit_memory(self, call_id: str, memory) -> None:
+        """memory{scope, op, slug, sha256, derived_from: call_id} from the
+        host's side_result.memory, verbatim; a fact the event schema rejects
+        is logged and dropped. User-scope slugs are kept for the preamble."""
+        body = {k: memory.get(k) for k in MEMORY_KEYS} if isinstance(memory, dict) else {}
+        body["derived_from"] = call_id
+        errors = validate_event(make_event(self.cfg.session_id, self.state.last_seq + 1,
+                                           self.clock.now_iso(), "memory", body))
+        if errors:
+            self.log(f"side_result.memory rejected: {errors[0]}", level="warning", call_id=call_id)
+            return
+        self.emit("memory", body)
+        if body["scope"] == "user":
+            slug = body["slug"]
+            if body["op"] == "write" and slug not in self._user_memory:
+                self._user_memory.append(slug)
+            elif body["op"] == "remove" and slug in self._user_memory:
+                self._user_memory.remove(slug)
 
     def _after_round(self) -> None:
         """Every call of the round is terminal: wake and start the next turn."""
@@ -785,6 +1035,7 @@ class Coordinator:
             self._suppress_wake = False
         self._last_response_had_calls = False
         self.current_turn = None     # a provider result arriving later is stale
+        self._tokens_before = None
 
     def _abort(self, reason: str) -> None:
         self.log(f"abort: {reason}", level="warning")

@@ -325,13 +325,20 @@ def test_spill_quota_counts_existing_files(ws, inbound):
 
 # ------------------------------------------------------- workspace_tree_id
 
-def test_workspace_tree_id_is_stable_and_ignores_harness_dir(ws, mgr):
+def run_op(mgr, inbound, call_id, command):
+    """One bash op, waited for (the tree id cache refreshes after an op)."""
+    mgr.submit(call_id, "bash", {"command": command})
+    r = take(inbound, 1)[call_id]
+    assert r["ok"], r
+    return r
+
+
+def test_workspace_tree_id_is_stable_and_ignores_harness_dir(ws, inbound, mgr):
     a = mgr.workspace_tree_id()
     assert a == workspace_tree_id(ws) == mgr.workspace_tree_id()
     assert len(a) == 64 and int(a, 16)
-    (ws / ".harness" / "spill").mkdir(parents=True)
-    (ws / ".harness" / "spill" / "x.txt").write_text("noise")
-    assert mgr.workspace_tree_id() == a
+    run_op(mgr, inbound, "noise", "mkdir -p .harness/spill && echo noise > .harness/spill/x.txt")
+    assert mgr.workspace_tree_id() == a == workspace_tree_id(ws)
 
 
 def test_workspace_tree_id_changes_on_write_rename_and_content(ws, inbound, mgr):
@@ -339,14 +346,87 @@ def test_workspace_tree_id_changes_on_write_rename_and_content(ws, inbound, mgr)
     mgr.submit("w", "write", {"path": "new.txt", "content": "n"})
     take(inbound, 1)
     b = mgr.workspace_tree_id()
-    assert b != a
-    (ws / "new.txt").write_text("m")
+    assert b != a and b == workspace_tree_id(ws)
+    run_op(mgr, inbound, "c", "printf m > new.txt")
     c = mgr.workspace_tree_id()
-    assert c not in (a, b)
-    (ws / "new.txt").rename(ws / "moved.txt")
-    assert mgr.workspace_tree_id() not in (a, b, c)
-    (ws / "moved.txt").unlink()
+    assert c not in (a, b) and c == workspace_tree_id(ws)
+    run_op(mgr, inbound, "mv", "mv new.txt moved.txt")
+    d = mgr.workspace_tree_id()
+    assert d not in (a, b, c) and d == workspace_tree_id(ws)
+    run_op(mgr, inbound, "rm", "rm moved.txt")
     assert mgr.workspace_tree_id() == a
+
+
+def test_workspace_tree_id_is_cached_until_an_operation_finishes(ws, inbound, mgr, monkeypatch):
+    walks = []
+    real = mgr._tree.tree_id
+    monkeypatch.setattr(mgr._tree, "tree_id", lambda: walks.append(1) or real())
+    a = mgr.workspace_tree_id()
+    assert mgr.workspace_tree_id() == a and len(walks) == 1      # cache hit: no walk
+    # a change behind the manager's back is not seen until an op finishes
+    (ws / "outside.txt").write_text("x")
+    assert mgr.workspace_tree_id() == a and len(walks) == 1
+    run_op(mgr, inbound, "noop", "true")
+    b = mgr.workspace_tree_id()
+    assert b != a and b == workspace_tree_id(ws) and len(walks) == 2
+    assert mgr.workspace_tree_id() == b and len(walks) == 2
+
+
+def test_workspace_tree_id_rehashes_only_changed_files(ws, inbound, mgr, monkeypatch):
+    import guest.ops as ops_mod
+    for i in range(5):
+        (ws / f"f{i}.txt").write_text(f"file {i}")
+    (ws / "sub").mkdir()
+    (ws / "sub" / "deep.txt").write_text("deep")
+    hashed = []
+    real = ops_mod._file_digest
+    monkeypatch.setattr(ops_mod, "_file_digest", lambda p: hashed.append(os.path.basename(p)) or real(p))
+    first = mgr.workspace_tree_id()
+    assert sorted(hashed) == sorted(["a.txt", "deep.txt"] + [f"f{i}.txt" for i in range(5)])
+    hashed.clear()
+    run_op(mgr, inbound, "edit", "printf changed > f3.txt && rm f4.txt")
+    second = mgr.workspace_tree_id()
+    assert hashed == ["f3.txt"]                     # one re-hash; the removed file dropped
+    assert second != first
+    monkeypatch.undo()
+    assert second == workspace_tree_id(ws)
+    assert "f4.txt" not in mgr._tree._files
+
+
+def test_workspace_tree_id_same_mtime_rewrite(ws, inbound, mgr):
+    f = ws / "a.txt"                                # "alpha\n"
+    st = f.stat()
+    a = mgr.workspace_tree_id()
+    # a different size with the mtime put back: detected via st_size
+    f.write_text("alphabet soup\n")
+    os.utime(f, ns=(st.st_atime_ns, st.st_mtime_ns))
+    run_op(mgr, inbound, "n1", "true")
+    b = mgr.workspace_tree_id()
+    assert b != a and b == workspace_tree_id(ws)
+    # same size, same mtime, same inode (rewritten in place): the cache keeps
+    # the old digest (documented limit); the module-level function is the
+    # exact reference and sees the change
+    st = f.stat()
+    with open(f, "r+b") as fh:
+        fh.write(b"ALPHABET")
+    os.utime(f, ns=(st.st_atime_ns, st.st_mtime_ns))
+    assert f.stat().st_ino == st.st_ino and f.stat().st_size == st.st_size
+    run_op(mgr, inbound, "n2", "true")
+    assert mgr.workspace_tree_id() == b
+    assert workspace_tree_id(ws) != b
+
+
+def test_workspace_tree_id_cached_walk_matches_reference_on_links(ws, inbound, mgr):
+    (ws / "d").mkdir()
+    (ws / "d" / "x").write_text("x")
+    os.symlink("a.txt", ws / "link")
+    os.symlink("d", ws / "dirlink")                 # a symlink to a directory: skipped by both
+    os.symlink("missing", ws / "dangling")
+    (ws / "d" / ".harness").mkdir()                 # only the top-level .harness is excluded
+    (ws / "d" / ".harness" / "y").write_text("y")
+    assert mgr.workspace_tree_id() == workspace_tree_id(ws)
+    run_op(mgr, inbound, "relink", "ln -sfn d/x link")
+    assert mgr.workspace_tree_id() == workspace_tree_id(ws)
 
 
 def test_workspace_tree_id_matches_known_digest(tmp_path):

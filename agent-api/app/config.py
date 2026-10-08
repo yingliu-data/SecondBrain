@@ -12,6 +12,7 @@ LLM_TEMPERATURE = float(os.environ.get("LLM_TEMPERATURE", 0.7))
 # schemas) thinking mode reliably describes tools instead of calling them,
 # so it is off by default (same reason avatar_control's planner disables it).
 LLM_ENABLE_THINKING = os.environ.get("LLM_ENABLE_THINKING", "false").lower() in ("1", "true", "yes")
+LLM_STREAM = os.environ.get("LLM_STREAM", "true").lower() in ("1", "true", "yes")   # D17: stream: true through the proxy
 
 # ── API ──
 API_SECRET_KEY = os.environ["API_SECRET_KEY"]
@@ -79,3 +80,7 @@ HARNESS_HOST_TOOL_TIMEOUT_S = int(os.environ.get("HARNESS_HOST_TOOL_TIMEOUT_S", 
 HARNESS_SPILL_THRESHOLD = int(os.environ.get("HARNESS_SPILL_THRESHOLD", 2000))
 HARNESS_SEGMENT_EVENTS = int(os.environ.get("HARNESS_SEGMENT_EVENTS", 1000))   # events per segment
 HARNESS_STOP_AT_SETTLE = os.environ.get("HARNESS_STOP_AT_SETTLE", "true").lower() in ("1", "true", "yes")
+HARNESS_TOKEN_BUDGET = int(os.environ.get("HARNESS_TOKEN_BUDGET", 0))        # total_tokens per session; 0 = unlimited
+# Context window the guest plans against (M2 compaction trigger: estimate > window - reserve).
+HARNESS_CONTEXT_WINDOW_TOKENS = int(os.environ.get("HARNESS_CONTEXT_WINDOW_TOKENS", 32768))
+HARNESS_RESERVE_TOKENS = int(os.environ.get("HARNESS_RESERVE_TOKENS", 4096))

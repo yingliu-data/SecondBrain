@@ -1,9 +1,15 @@
 """sides — host-originated operations (PLAN.md 8): a `tool_call` event whose
 side is not `guest` is a request to the host; the worker carries it out and
-answers with a `side_result` control message `{call_id, side, content, ok}`.
+answers with a `side_result` control message `{call_id, side, content, ok,
+memory?}`.
 
   host    registry.execute_server_tool(name, args, allowed) on the asyncio
-          loop (skills are async), result sanitised as today
+          loop (skills are async), result sanitised as today; an ok
+          `remember`/`forget` result adds `memory: {scope, op: write|remove,
+          slug, sha256}` to the side_result (the guest emits its `memory`
+          event from it verbatim) and the same dict, plus call_id, is logged
+          as a `memory` host event (D23: sha256 = sha256_hex(body.strip())
+          from the skill's result JSON, "" for a removal)
   device  SSE `tool_call{id, name, arguments}` (projected by stream.py from
           the event) and a DeviceCalls entry that `POST /api/v1/tool-result`
           resolves; the entry lives in the registry, not the stream, so it
@@ -32,6 +38,8 @@ from app.config import HARNESS_HOST_TOOL_TIMEOUT_S, TOOL_TIMEOUT
 from app.skills.base import set_current_context
 
 logger = logging.getLogger("host.sides")
+
+MEMORY_TOOLS = {"remember": "write", "forget": "remove"}
 
 
 class DeviceCalls:
@@ -86,6 +94,23 @@ class DeviceCalls:
         return sum(1 for e in self._open.values() if not e["future"].done())
 
 
+def _memory_change(name: str, args: dict, result: str) -> dict | None:
+    """`{scope, op, slug, sha256}` of an ok remember/forget result; None for
+    any other tool, a non-JSON result or `not_found` (nothing changed)."""
+    if name not in MEMORY_TOOLS:
+        return None
+    try:
+        parsed = json.loads(result)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(parsed, dict) or parsed.get("status") != "ok":
+        return None
+    return {"scope": parsed.get("scope") or args.get("scope", "user"),
+            "op": MEMORY_TOOLS[name],
+            "slug": parsed.get("slug") or args.get("slug", ""),
+            "sha256": parsed.get("sha256", "")}
+
+
 def _set_if_pending(fut: asyncio.Future, result) -> None:
     if not fut.done():
         fut.set_result(result)
@@ -133,8 +158,11 @@ class Sides:
         task.add_done_callback(self.tasks.discard)
         return task
 
-    def _answer(self, body: dict, content: str, ok: bool, started: float) -> dict:
+    def _answer(self, body: dict, content: str, ok: bool, started: float,
+                memory: dict | None = None) -> dict:
         result = {"call_id": body["call_id"], "side": body["side"], "content": content, "ok": ok}
+        if memory is not None:
+            result["memory"] = memory
         self.send_control("side_result", result)
         self.host_event("side_call", {
             "side": body["side"], "call_id": body["call_id"], "name": body["name"],
@@ -172,7 +200,11 @@ class Sides:
                 except (json.JSONDecodeError, TypeError, AttributeError):
                     pass
         result = sanitize(result)
-        return self._answer(body, result, not result.startswith("Error"), started)
+        ok = not result.startswith("Error")
+        memory = _memory_change(name, args, result) if ok else None
+        if memory is not None:
+            self.host_event("memory", {**memory, "call_id": body["call_id"]})
+        return self._answer(body, result, ok, started, memory)
 
     # ------------------------------------------------------------ device
     async def _run_device(self, body: dict) -> dict:

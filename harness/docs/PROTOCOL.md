@@ -50,7 +50,7 @@ Types: `hello`, `task`, `follow_up`, `steer`, `ui_response`, `side_result`,
 | `hello` | `config` (model alias, limits, tools with sides, hooks, `async_tools`, `question_timeout_s`, `ui_attached`), `session_id`, `principal` (user, tenant), `system_block`, `resume`, `at` |
 | `task` / `follow_up` / `steer` | `input_id`, `text`, `attachments` |
 | `ui_response` | `input_id`, `question_id`, `answer` |
-| `side_result` | `call_id`, `side` (`host`/`device`/`mcp`), `content`, `ok` |
+| `side_result` | `call_id`, `side` (`host`/`device`/`mcp`), `content`, `ok`; optional `memory` `{scope, op, slug, sha256}`: the memory the call changed (`remember`/`forget`), which the guest records as a `memory` event after the ok `tool_result` (docs/GUEST.md) |
 | `park` | `reason` |
 | `abort` | `reason` |
 | `heartbeat` | `at` — every 60 s → `clock{host_heartbeat}` |
@@ -69,7 +69,7 @@ messages). A line with both, or neither, is rejected.
 Types: `ready`, `delta`, `log`, `bulk_ref`. No `seq`, no `session_id`.
 
 ```json
-{"type":"delta","body":{"turn_id":"turn_3f2a","kind":"text","text":"Here is"}}
+{"type":"delta","body":{"session_id":"sess-1","turn_id":"turn_3f2a","kind":"content","index":0,"text":"Here is"}}
 ```
 
 ## 3. The ack rule

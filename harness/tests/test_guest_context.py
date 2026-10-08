@@ -8,7 +8,7 @@ import pytest
 from guest import context
 from guest.config import GuestConfig, Limits, Principal
 from protocol.allowlist import effective_tools
-from protocol.canonical import hash_value
+from protocol.canonical import canonical_json, hash_value, sha256_hex
 from protocol.fold import State, fold
 from tests.logbuilder import Log
 
@@ -97,19 +97,16 @@ def test_tool_schema_accepts_already_wrapped_schema():
 
 # ---------------------------------------------------------------- preamble
 def test_preamble_time_is_minute_precision_utc():
-    s = State()
-    pre = context.preamble_text(s, 1_790_000_000_000)
+    pre = context.preamble_text(1_790_000_000_000)
     assert pre.splitlines()[0] == "[context]"
     assert "time: 2026-09-21 14:13 UTC" in pre
     # seconds do not matter
-    assert context.preamble_text(s, 1_790_000_000_000 + 30_000) == pre
+    assert context.preamble_text(1_790_000_000_000 + 30_000) == pre
 
 
 def test_preamble_lists_attachments_and_new_memories():
-    s = State()
-    s.session_memory = {"meetup": "a" * 64}
-    pre = context.preamble_text(s, 1_790_000_000_000,
-                                [{"slug": "tea", "body": "Likes oolong."}, "plain note"])
+    pre = context.preamble_text(1_790_000_000_000,
+                                [{"slug": "tea", "body": "Likes oolong."}, "plain note"], ["meetup"])
     assert "[recalled memory: tea]\nLikes oolong." in pre
     assert "[recalled memory]\nplain note" in pre
     assert "[new memory] meetup" in pre
@@ -130,7 +127,8 @@ def test_build_request_shape_for_the_first_turn():
     assert "[recalled memory: math]\n2+2=4" in user["content"]
     assert set(user) == {"role", "content"}        # no fold-internal keys on the wire
     assert req.preamble_hash == hash_value(req.preamble)
-    assert req.request_hash == hash_value({"messages": req.messages, "tools": req.tools, "params": req.params})
+    text = canonical_json({"messages": req.messages, "tools": req.tools, "params": req.params})
+    assert req.request_hash == sha256_hex(text) and req.chars == len(text)
     assert req.system_hash == context.system_hash(cfg)
     assert req.params == {"temperature": 0, "max_tokens": 256}
     assert req.prefix_len == 1
@@ -256,3 +254,114 @@ def test_committed_user_message_renders_with_its_registered_preamble():
 ])
 def test_format_time(ms, expected):
     assert context.format_time(ms) == expected
+
+
+# ---------------------------------------------------------------- M2: estimate, compaction request, memory lines
+def test_estimate_tokens_is_ceil_chars_over_four():
+    import math
+    cfg = make_cfg()
+    req = context.build_request(state_with_task(), cfg, 1)
+    chars = len(json.dumps({"messages": req.messages, "tools": req.tools, "params": req.params},
+                           sort_keys=True, separators=(",", ":"), ensure_ascii=False))
+    assert req.chars == chars
+    assert context.estimate_tokens(req) == math.ceil(chars / 4)
+    comp = context.build_compaction_request(state_with_task(), cfg)
+    assert comp.request_hash == sha256_hex(canonical_json(
+        {"messages": comp.messages, "tools": comp.tools, "params": comp.params}))
+    assert context.estimate_tokens(comp) == math.ceil(comp.chars / 4)
+
+
+def test_stream_is_not_a_sampling_param():
+    cfg = make_cfg(params={"temperature": 0, "stream": False})
+    req = context.build_request(state_with_task(), cfg, 1)
+    assert req.params == {"temperature": 0, "max_tokens": 256}
+    assert context.build_compaction_request(state_with_task(), cfg).params == req.params
+
+
+def test_preamble_lists_new_memories_once_and_sorted():
+    pre = context.preamble_text(1_790_000_000_000, new_memory=["plan", "both", "tea", "both", "tea"])
+    lines = [l for l in pre.splitlines() if l.startswith("[new memory]")]
+    assert lines == ["[new memory] both", "[new memory] plan", "[new memory] tea"]
+    req = context.build_request(state_with_task(), make_cfg(), 1, new_memory=["tea"])
+    assert "[new memory] tea" in req.messages[1]["content"] and "[new memory] tea" in req.preamble
+
+
+def test_build_request_new_memory_defaults_to_the_session_memories():
+    state = state_with_task()
+    state.session_memory = {"plan": "a" * 64}
+    req = context.build_request(state, make_cfg(), 1)
+    assert [l for l in req.preamble.splitlines() if l.startswith("[new memory]")] == ["[new memory] plan"]
+    assert "[new memory]" not in context.build_request(state, make_cfg(), 1, new_memory=[]).preamble
+
+
+def _two_turn_log(cfg, preambles):
+    log = Log(SID, tools=cfg.tools)
+    log.start()                                                     # 1
+    log.input("in-1", "What is on my calendar?")                    # 2
+    log.clock(1_790_000_000_000)                                    # 3
+    req1 = context.build_request(fold(log.events), cfg, 1_790_000_000_000, preambles=preambles)
+    log.turn("t1", preamble=req1.preamble_hash, request_hash=req1.request_hash)   # 4
+    log.response("t1", calls=[("call_1", "calendar", {"day": "today"})])           # 5
+    log.call("t1", "call_1", "calendar", "device", {"day": "today"})               # 6
+    log.result("call_1", "[]")                                                     # 7
+    log.clock(1_790_000_600_000)                                                   # 8
+    req2 = context.build_request(fold(log.events), cfg, 1_790_000_600_000, preambles=preambles)
+    log.turn("t2", preamble=req2.preamble_hash, request_hash=req2.request_hash)   # 9: commits 5, 7
+    log.response("t2", content="Nothing today.")                                   # 10
+    log.input("in-2", "And tomorrow?", kind="follow_up")                           # 11
+    return log
+
+
+def test_build_compaction_request_is_system_prefix_and_instruction_without_tools():
+    cfg = make_cfg([{"name": "calendar", "side": "device", "pin": None}])
+    preambles: dict = {}
+    log = _two_turn_log(cfg, preambles)
+    state = fold(log.events)
+    regular = context.build_request(state, cfg, 1_790_000_700_000, preambles=dict(preambles))
+    req = context.build_compaction_request(state, cfg, preambles=preambles)
+    # the committed prefix, rendered exactly as the regular turn renders it
+    assert req.messages[: regular.prefix_len] == regular.prefix_messages()
+    assert [m["role"] for m in req.messages] == ["system", "user", "assistant", "tool", "user"]
+    assert req.messages[-1] == {"role": "user", "content": context.COMPACTION_INSTRUCTION}
+    assert req.tools == [] and req.prefix_len == 4
+    assert req.preamble == context.COMPACTION_INSTRUCTION
+    assert req.preamble_hash == hash_value(context.COMPACTION_INSTRUCTION)
+    assert req.request_hash == hash_value({"messages": req.messages, "tools": [], "params": req.params})
+    assert req.system_hash == context.system_hash(cfg) and req.preamble_input_id is None
+    # the staged suffix (the response and the follow-up) is not in it
+    assert all("Nothing today." != m.get("content") for m in req.messages)
+    assert context.build_compaction_request(state, cfg, preambles=preambles).request_hash == req.request_hash
+
+
+def test_request_after_compaction_starts_with_the_summary_then_the_staged_items():
+    cfg = make_cfg([{"name": "calendar", "side": "device", "pin": None}])
+    preambles: dict = {}
+    log = _two_turn_log(cfg, preambles)
+    state = fold(log.events)
+    creq = context.build_compaction_request(state, cfg, preambles=preambles)
+    its = state.last_turn()["includes_through_seq"]                                # 8
+    log.turn("t3", type="compaction", includes_through_seq=its,
+             preamble=creq.preamble_hash, request_hash=creq.request_hash)         # 12
+    log.response("t3", content="SUMMARY")                                          # 13
+    log.add("compaction", {"range": [2, its], "summary_turn_id": "t3",
+                           "tokens_before": 500, "tokens_after": 50})              # 14
+    log.add("memory", {"scope": "session", "op": "write", "slug": "compaction-12",
+                       "sha256": "0" * 64, "derived_from": "t3"})                  # 15
+    log.clock(1_790_000_800_000)
+    state = fold(log.events)
+    assert state.committed_prefix == [{"role": "assistant", "content": "SUMMARY"}]
+    assert state.prefix_origins == [2]
+    req = context.build_request(state, cfg, 1_790_000_800_000, preambles=preambles)
+    assert [m["role"] for m in req.messages] == ["system", "assistant", "assistant", "user"]
+    assert req.messages[1] == {"role": "assistant", "content": "SUMMARY"}
+    assert req.messages[2] == {"role": "assistant", "content": "Nothing today."}
+    assert req.messages[3]["content"].endswith("\n\nAnd tomorrow?")
+    assert "[new memory] compaction-12" in req.messages[3]["content"]
+    assert req.prefix_len == 2 and req.preamble_input_id == "in-2"
+    # and it stays a function of the log: the next turn renders the same prefix
+    log.turn("t4", preamble=req.preamble_hash, request_hash=req.request_hash)
+    log.response("t4", content="Free.")
+    log.clock(1_790_000_900_000)
+    req2 = context.build_request(fold(log.events), cfg, 1_790_000_900_000, preambles=preambles)
+    assert req2.messages[: len(req.messages)] == req.messages
+    assert req2.prefix_bytes().startswith(req.prefix_bytes()[:-1])

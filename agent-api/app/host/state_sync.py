@@ -30,7 +30,21 @@ Projections (kept one release, PLAN.md 3): `history.jsonl` gets the user text
 of each new task/follow_up/steer input and the assistant answer at settle
 (SessionDir.append_history); `logs/trace.jsonl` gets today's event names
 (SessionDir.append_trace): tool_call, tool_result, assistant_response,
-llm_error, loop_exhausted — plus question, settle and error for the viewer.
+llm_error, loop_exhausted — plus question, settle, error and memory for the
+viewer.
+
+Memory projection (D23, PLAN.md 7). A guest `memory{scope: session}` event
+whose `derived_from` is a compaction turn of this run (read from the fold:
+`state.turns[derived_from]`) is the summary the guest folded its prefix from;
+the host writes it to `{session_dir}/memory/{slug}.md` through MemoryStore
+(op `write`: name "Compaction summary", description "summary of the
+conversation up to seq <the turn's includes_through_seq>", type project, body
+= the turn's response message content, the context item with seq ==
+`response_seq`) or removes it (op `remove`), and checks the event's sha256
+against `sha256_hex(body.strip())` (a mismatch is logged, never fatal: the
+log, not the file, is canonical). A `memory` event derived from a call_id
+(`remember`/`forget`) is only traced: the host skill wrote the file and Sides
+logged the host event.
 """
 from __future__ import annotations
 
@@ -40,11 +54,13 @@ import os
 import threading
 from pathlib import Path
 
+from protocol.canonical import sha256_hex
 from protocol.events import validate_event
 from protocol.fold import FoldError, State, apply
 
 from app.config import HARNESS_SEGMENT_EVENTS
 from app.session.session_dir import SessionDir, utcnow_iso
+from app.user.memory import MemoryStore
 
 logger = logging.getLogger("host.state_sync")
 
@@ -92,7 +108,6 @@ class StateSync:
         self.run = 1
         self.state = State()
         self.ticket_id: str | None = None
-        self._calls: dict[str, dict] = {}        # call_id -> {name, side, seq}
         self._host_count = 0
         self.seen_inputs: set[str] = set()       # across runs
         self.settled: dict[str, dict] = {}       # input_id -> settle body, across runs
@@ -128,8 +143,6 @@ class StateSync:
                     raise StateSyncError(f"run {run} does not fold: {e}") from e
                 if ev["type"] == "settle":
                     self.settled[ev["body"]["input_id"]] = ev["body"]
-                if run == runs[-1]:
-                    self._index(ev)
             self.seen_inputs |= state.seen_input_ids
             self.run, self.state = run, state
         host = self._segments("host-")
@@ -145,7 +158,6 @@ class StateSync:
                 return self.run
             self.run += 1
             self.state = State()
-            self._calls = {}
             return self.run
 
     def read(self, after_seq: int = 0, *, run: int | None = None) -> list[dict]:
@@ -208,16 +220,12 @@ class StateSync:
             return self.state.last_seq
 
     def _index(self, event: dict) -> None:
+        """What must hold across runs: the input_ids seen, each task's settle."""
         etype, b = event["type"], event["body"]
-        if etype == "tool_call":
-            self._calls[b["call_id"]] = {"name": b["name"], "side": b["side"], "seq": event["seq"]}
-        elif etype == "input":
+        if etype == "input":
             self.seen_inputs.add(b["input_id"])
         elif etype == "settle":
             self.settled[b["input_id"]] = b
-
-    def call_info(self, call_id: str) -> dict | None:
-        return self._calls.get(call_id)
 
     # ------------------------------------------------------------ host log
     def host_event(self, type: str, body: dict) -> dict:
@@ -250,12 +258,11 @@ class StateSync:
             self._trace("tool_call", {"name": body["name"], "arguments": body["args"],
                                       "call_id": body["call_id"], "side": body["side"]})
         elif etype == "tool_result":
-            call = self._calls.get(body["call_id"], {})
+            call = self.state.open_calls.get(body["call_id"], {})
             detail = {"name": call.get("name", "?"), "result": body["content"][:2000],
                       "call_id": body["call_id"]}
-            oc = self.state.open_calls.get(body["call_id"], {})
-            if "duration_ms" in oc:
-                detail["duration_ms"] = oc["duration_ms"]
+            if "duration_ms" in call:
+                detail["duration_ms"] = call["duration_ms"]
             self._trace("tool_result", detail)
         elif etype == "llm_response":
             msg = body["message"]
@@ -275,3 +282,46 @@ class StateSync:
                                             ticket_id=self.ticket_id)
             self._trace("settle", {"input_id": body["input_id"], "outcome": body["outcome"],
                                    "usage": body["usage"]})
+        elif etype == "memory":
+            self._trace("memory", {"scope": body["scope"], "op": body["op"], "slug": body["slug"],
+                                   "sha256": body["sha256"], "derived_from": body["derived_from"]})
+            self._project_memory(body)
+
+    # ------------------------------------------------------------ memory (D23)
+    def _project_memory(self, body: dict) -> None:
+        """Write or remove the session-tier file of a compaction summary."""
+        derived_from = body["derived_from"]
+        if body["scope"] != "session" or derived_from in self.state.open_calls:
+            return                              # user tier / tool-derived: the skill wrote it
+        turn = self.state.turns.get(derived_from)
+        summary = self._response_message(turn) if turn and turn["type"] == "compaction" else None
+        if summary is None:
+            logger.warning("memory %s/%s derived_from %r is neither a tool call nor a "
+                           "compaction turn of this run; not projected",
+                           body["op"], body["slug"], derived_from)
+            return
+        store = MemoryStore(self.session.memory)
+        if body["op"] == "remove":
+            store.remove(body["slug"])
+            return
+        content = summary.get("content")
+        content = content if isinstance(content, str) else ""
+        store.write(slug=body["slug"], name="Compaction summary",
+                    description=f"summary of the conversation up to seq "
+                                f"{turn['includes_through_seq']}",
+                    type="project", body=content)
+        digest = sha256_hex(content.strip())
+        if body["sha256"] != digest:
+            logger.warning("memory %s: sha256 %s in the event differs from the summary text's %s",
+                           body["slug"], body["sha256"], digest)
+
+    def _response_message(self, turn: dict) -> dict | None:
+        """The turn's llm_response message, from the folded context (the
+        committed prefix, else the staged suffix); None before it is stored."""
+        seq = turn["response_seq"]
+        if seq is None:
+            return None
+        for it in (*self.state.committed, *self.state.staged_suffix):
+            if it["seq"] == seq:
+                return it["message"]
+        return None

@@ -12,7 +12,7 @@ from app.host.sides import DeviceCalls
 from app.host.stream import DONE, tokens
 from app.host.worker import GuestError, Worker, Workers, strip_current_time
 from host_fakes import (FakeRegistry, FakeSandbox, FakeTenant, read_jsonl, session,  # noqa: F401
-                        users_root, worker_kwargs)
+                        token_text, users_root, worker_kwargs)
 
 
 async def drain(q: asyncio.Queue) -> list[str]:
@@ -220,3 +220,55 @@ async def test_workers_registry_and_prompt_stripping(session):
     assert strip_current_time("a\n- Current time: {current_time}\nb") == "a\nb"
     assert strip_current_time("WCC prompt. Current time: {current_time}") == "WCC prompt."
     assert strip_current_time("x {current_time} y") == "x  y"
+
+
+# ---------------------------------------------------------------- M2: hello keys, streaming
+@pytest.mark.asyncio
+async def test_hello_carries_the_m2_stream_and_limit_keys(session, monkeypatch):
+    import app.host.worker as worker_mod
+
+    sandbox = FakeSandbox([{"text": "x"}])
+    w = Worker(session, FakeTenant(), FakeRegistry(), sandbox, device_calls=DeviceCalls(),
+               **worker_kwargs())
+    hello = w.build_hello()
+    assert hello["config"]["params"]["stream"] is True               # D17 default
+    limits = hello["config"]["limits"]
+    assert limits["context_window_tokens"] == 32768 and limits["reserve_tokens"] == 4096
+    assert "token_budget" not in limits                             # a proxy knob only
+    # the env flip, the window, and the budget the proxy is built with
+    monkeypatch.setattr(worker_mod, "LLM_STREAM", False)
+    monkeypatch.setattr(worker_mod, "HARNESS_CONTEXT_WINDOW_TOKENS", 8192)
+    monkeypatch.setattr(worker_mod, "HARNESS_TOKEN_BUDGET", 1234)
+    hello = w.build_hello()
+    assert hello["config"]["params"]["stream"] is False
+    assert hello["config"]["limits"]["context_window_tokens"] == 8192
+    result = await w.act({"input_id": "in_1", "text": "hi"})
+    assert result["outcome"] == "done" and w.proxy.token_budget == 1234
+    await w.close()
+
+
+@pytest.mark.asyncio
+async def test_streamed_deltas_reach_the_sink_verbatim_once(session):
+    """M2 streaming: the guest's content fragments are the tokens, the
+    response is not re-emitted, reasoning never shows; a non-streamed turn's
+    whole-text delta goes out word-wise, once."""
+    sandbox = FakeSandbox([{"text": "Hello, wörld", "deltas": ["Hel", "lo, wör", "ld"],
+                            "reasoning": ["let me think"]}])
+    w = Worker(session, FakeTenant(), FakeRegistry(), sandbox, device_calls=DeviceCalls(),
+               **worker_kwargs())
+    sink = w.attach()
+    result = await w.act({"input_id": "in_1", "text": "hi"})
+    sse = await drain(sink)
+    assert result["answer"] == "Hello, wörld"
+    toks = [json.loads(s.split("data: ", 1)[1])["text"] for s in sse if s.startswith("event: token")]
+    assert toks == ["Hel", "lo, wör", "ld"] and sse[-1] == DONE
+    assert "think" not in "".join(sse)
+    assert session.read_history()[-1] == {"role": "assistant", "content": "Hello, wörld"}
+    # second task, LLM_STREAM=false shape: the whole text as one `text` delta
+    sandbox.script = [{"text": "Second answer", "deltas": ["Second answer"], "delta_kind": "text"}]
+    sink = w.attach()
+    result = await w.act({"input_id": "in_2", "text": "again"})
+    sse = await drain(sink)
+    assert token_text(sse).strip() == "Second answer" and sse[-1] == DONE
+    assert sse[1:] == tokens("Second answer") + [DONE]            # the non-streamed shape
+    await w.close()

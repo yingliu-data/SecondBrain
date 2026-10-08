@@ -14,6 +14,7 @@ from pathlib import Path
 
 from protocol.allowlist import effective_tools
 from protocol.messages import ack, encode, parse
+from protocol.sse import DONE_FRAME, response_chunks, sse_frame
 
 from app.host.sandbox import Sandbox
 
@@ -24,12 +25,21 @@ def ts_now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
+def token_text(sse: list[str]) -> str:
+    """The concatenated texts of the `token` events in projected SSE strings."""
+    return "".join(json.loads(s.split("data: ", 1)[1])["text"]
+                   for s in sse if s.startswith("event: token"))
+
+
 class FakeGuest:
     """Connects to {ipc}/v.sock_5000, handshakes, waits for hello, then for
     every task runs `script`: a list of turns, each `{"text": ...}` (final
     answer) or `{"call": {"id", "name", "args"}}` (a tool call; side from
     hello's tools; host/device/mcp calls wait for side_result, guest calls
-    get `guest_result`). Events are shaped like the goldens."""
+    get `guest_result`). Events are shaped like the goldens. A text turn
+    may carry `deltas`: live `delta` fragments sent before the llm_response,
+    of `delta_kind` ("content", default: M2 streaming; "text": the
+    non-streamed whole-message delta), and `reasoning` fragments."""
 
     def __init__(self, script, *, guest_result="ok", exit_after_settle=True,
                  dedupe=True, seq_start=0):
@@ -84,6 +94,10 @@ class FakeGuest:
 
     def live(self, type: str, body: dict) -> None:
         self.send({"type": type, "body": body})
+
+    def delta(self, turn_id: str, kind: str, text: str, index: int = 0) -> None:
+        self.live("delta", {"session_id": self.session_id, "turn_id": turn_id,
+                            "kind": kind, "index": index, "text": text})
 
     def wait_acked(self, seq: int, timeout: float = 5.0) -> bool:
         with self._ack_cv:
@@ -194,9 +208,10 @@ class FakeGuest:
             usage_total["completion_tokens"] += 5
             if "text" in turn:
                 answer = turn["text"]
-                if turn.get("deltas"):
-                    for d in turn["deltas"]:
-                        self.live("delta", {"turn_id": turn_id, "kind": "text", "text": d})
+                for d in turn.get("reasoning", []):
+                    self.delta(turn_id, "reasoning", d)
+                for d in turn.get("deltas", []):
+                    self.delta(turn_id, turn.get("delta_kind", "content"), d)
                 self.emit("llm_response", {
                     "turn_id": turn_id, "finish_reason": "stop", "usage": usage,
                     "message": {"role": "assistant", "content": turn["text"]},
@@ -326,12 +341,27 @@ class FakeTenant:
 class FakeUpstreamLLM:
     """A scripted OpenAI-style chat-completions server on 127.0.0.1 (TCP, so
     httpx can reach it). `responses` is a list of assistant messages (dict
-    with content and/or tool_calls) handed out in order; the last repeats."""
+    with content and/or tool_calls) handed out in order; the last repeats.
+
+    `status != 200` answers that status with `error_body` (default
+    `{"error": "nope"}`). A request with `stream: true` is served as
+    text/event-stream in chunked HTTP/1.1 the way vLLM streams it (mirrors
+    harness/tests/fakes/fake_llm.py; both use protocol.sse.response_chunks):
+    a role chunk, content split into words, each tool call as an indexed
+    first fragment (id, name, first piece of the arguments) plus argument
+    fragments, a finish_reason chunk, a usage-only chunk, `[DONE]`. `keepalive=True` puts a `: keep-alive` comment before each
+    chunk; `cut_after=n` closes the connection after n data chunks (no
+    finish_reason, no [DONE]). `streamed` keeps the SSE text sent per streamed
+    call, for verbatim checks."""
 
     def __init__(self, responses, status=200):
         self.responses = list(responses)
         self.status = status
+        self.error_body: dict | None = None
+        self.keepalive = False
+        self.cut_after: int | None = None
         self.requests: list[dict] = []
+        self.streamed: list[str] = []
         self.n = 0
         outer = self
 
@@ -346,26 +376,58 @@ class FakeUpstreamLLM:
                 req = json.loads(self.rfile.read(length) or b"{}")
                 outer.requests.append(req)
                 if outer.status != 200:
-                    body = json.dumps({"error": "nope"}).encode()
+                    body = json.dumps(outer.error_body if outer.error_body is not None
+                                      else {"error": "nope"}).encode()
                     self.send_response(outer.status)
                 else:
                     i = min(outer.n, len(outer.responses) - 1)
                     outer.n += 1
                     msg = outer.responses[i]
                     finish = "tool_calls" if msg.get("tool_calls") else "stop"
-                    body = json.dumps({
+                    full = {
                         "id": f"chatcmpl-fake-{outer.n}", "object": "chat.completion",
                         "model": req.get("model", "fake"),
                         "choices": [{"index": 0, "message": {"role": "assistant", **msg},
                                      "finish_reason": finish}],
                         "usage": {"prompt_tokens": 100 + outer.n, "completion_tokens": 7,
                                   "total_tokens": 107 + outer.n},
-                    }).encode()
+                    }
+                    if req.get("stream") is True:
+                        self._stream(full)
+                        return
+                    body = json.dumps(full).encode()
                     self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
+
+            def _stream(self, full: dict) -> None:
+                writes: list[bytes] = []
+                cut = False
+                for n, chunk in enumerate(response_chunks(full), start=1):
+                    if outer.cut_after is not None and n > outer.cut_after:
+                        cut = True
+                        break
+                    if outer.keepalive:
+                        writes.append(b": keep-alive\n\n")
+                    writes.append(sse_frame(json.dumps(chunk, separators=(",", ":"))))
+                if not cut:
+                    writes.append(DONE_FRAME)
+                outer.streamed.append(b"".join(writes).decode("utf-8"))
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Transfer-Encoding", "chunked")
+                self.end_headers()
+                for data in writes:
+                    self.wfile.write(b"%x\r\n%s\r\n" % (len(data), data))
+                    self.wfile.flush()
+                if cut:
+                    self.close_connection = True
+                else:
+                    self.wfile.write(b"0\r\n\r\n")
+                    self.wfile.flush()
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), H)
         self.server.daemon_threads = True

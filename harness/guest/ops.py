@@ -11,9 +11,19 @@ Contract (docs/GUEST.md):
         drop queued ops; all of them are reported "killed"
     running() -> set[call_id]             submitted and not yet reported
     spill_threshold: int
-    workspace_tree_id() -> str            deterministic hash of the workspace
+    workspace_tree_id() -> str            deterministic hash of the workspace (cached)
     shutdown(wait=False)                  tear down the worker pool (tests)
-  workspace_tree_id(workspace) -> str     the module-level form
+  workspace_tree_id(workspace) -> str     the module-level form: uncached, the
+                                          reference the cached one must equal
+
+Tree id cache: the manager keeps `relative path -> ((st_mtime_ns, st_size,
+st_ino), digest)` and re-hashes only files whose stat key changed (entries
+that disappeared are dropped). It returns the previous id without walking at
+all while no operation has finished since the last call, so a change made
+behind the manager's back (not by one of its operations) shows up only after
+the next operation finishes. A rewrite that keeps size, mtime_ns and inode is
+not detected by the cache; the id is still a pure function of the tree
+whenever every file's stat key changes with its content.
 
 Threading: a pool of `pool_size` worker threads runs file tools concurrently.
 `write`, `edit` and `apply_patch` on the same path run serially, in
@@ -106,20 +116,81 @@ def workspace_tree_id(workspace: Path) -> str:
             entries.append((p.relative_to(workspace).as_posix(), p))
     for rel, p in sorted(entries):
         if p.is_symlink():
-            digest = hashlib.sha256(b"symlink:" + os.readlink(p).encode()).hexdigest()
+            digest = _symlink_digest(p)
         elif p.is_file():
-            fh = hashlib.sha256()
-            try:
-                with open(p, "rb") as f:
-                    for chunk in iter(lambda: f.read(1 << 16), b""):
-                        fh.update(chunk)
-            except OSError:
+            digest = _file_digest(p)
+            if digest is None:
                 continue
-            digest = fh.hexdigest()
         else:
             continue
         h.update(rel.encode("utf-8") + b"\0" + digest.encode() + b"\n")
     return h.hexdigest()
+
+
+def _file_digest(path) -> str | None:
+    """sha256 hex of a file's bytes; None when it cannot be read."""
+    fh = hashlib.sha256()
+    try:
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 16), b""):
+                fh.update(chunk)
+    except OSError:
+        return None
+    return fh.hexdigest()
+
+
+def _symlink_digest(path) -> str:
+    return hashlib.sha256(b"symlink:" + os.readlink(path).encode()).hexdigest()
+
+
+class _TreeCache:
+    """workspace_tree_id with per-file digests cached by stat key (module
+    doc). The walk matches workspace_tree_id(): regular files and symlinks
+    (not followed; a symlink to a directory is skipped, as os.walk does),
+    `.harness/` excluded at the top level."""
+
+    def __init__(self, workspace: Path):
+        self.workspace = workspace
+        self._files: dict[str, tuple[tuple, str]] = {}
+
+    def tree_id(self) -> str:
+        seen: dict[str, tuple[tuple, str]] = {}
+        self._scan(str(self.workspace), "", seen)
+        self._files = seen
+        h = hashlib.sha256()
+        for rel in sorted(seen):
+            h.update(rel.encode("utf-8") + b"\0" + seen[rel][1].encode() + b"\n")
+        return h.hexdigest()
+
+    def _scan(self, directory: str, prefix: str, seen: dict) -> None:
+        try:
+            entries = list(os.scandir(directory))
+        except OSError:
+            return
+        for entry in entries:
+            rel = prefix + entry.name
+            try:
+                if entry.is_dir():
+                    if not entry.is_symlink() and not (prefix == "" and entry.name == HARNESS_DIR):
+                        self._scan(entry.path, rel + "/", seen)
+                    continue
+                link = entry.is_symlink()
+                if not link and not entry.is_file(follow_symlinks=False):
+                    continue
+                st = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            key = (st.st_mtime_ns, st.st_size, st.st_ino)
+            cached = self._files.get(rel)
+            if cached is not None and cached[0] == key:
+                seen[rel] = cached
+                continue
+            try:
+                digest = _symlink_digest(entry.path) if link else _file_digest(entry.path)
+            except OSError:
+                digest = None
+            if digest is not None:
+                seen[rel] = (key, digest)
 
 
 class OperationManager:
@@ -135,6 +206,11 @@ class OperationManager:
         self._pending: list[_Job] = []            # serialised ops waiting for a path
         self._busy: set[str] = set()              # paths held by running ops
         self._spill_used = self._existing_spill_bytes()
+        self._finished = 0                        # operations reported so far
+        self._tree = _TreeCache(self.workspace)
+        self._tree_lock = threading.Lock()
+        self._tree_id: str | None = None
+        self._tree_at = -1                        # self._finished when _tree_id was computed
 
     # ------------------------------------------------------------- public
 
@@ -194,7 +270,15 @@ class OperationManager:
             return set(self._jobs)
 
     def workspace_tree_id(self) -> str:
-        return workspace_tree_id(self.workspace)
+        """The workspace's tree id, re-hashing only changed files, and not
+        walking at all when no operation finished since the last call."""
+        with self._tree_lock:
+            with self._lock:
+                finished = self._finished
+            if self._tree_id is None or finished != self._tree_at:
+                self._tree_id = self._tree.tree_id()
+                self._tree_at = finished
+            return self._tree_id
 
     def shutdown(self, wait: bool = False) -> None:
         self._pool.shutdown(wait=wait, cancel_futures=not wait)
@@ -274,6 +358,7 @@ class OperationManager:
         content, spill = self._spill(job.call_id, content)
         with self._lock:
             self._jobs.pop(job.call_id, None)
+            self._finished += 1                   # the workspace may have changed
             if job.held:
                 job.held = False
                 self._busy -= job.keys

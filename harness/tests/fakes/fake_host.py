@@ -9,8 +9,10 @@ speaks docs/PROTOCOL.md from the host's side with protocol.messages:
     arrival order, no duplicates, no gaps) and are acked (unless acks are
     paused); duplicates are re-acked; every arrival is kept in `raw_events`
   - a `tool_call` event whose side is not guest is answered with a
-    `side_result` control from `side_results` (dict call_id -> {content, ok},
-    or a callable(tool_call body) -> {content, ok})
+    `side_result` control from `side_results` (dict call_id -> {content, ok,
+    memory?}, or a callable(tool_call body) -> the same); `memory` is the
+    optional {scope, op, slug, sha256} fact a remember/forget side result
+    carries (docs/PROTOCOL.md)
   - it survives reconnects: on a new connection it expects the guest's
     handshake (an ack of cseq), answers with its own ack of seq and resends
     the unacked controls above the guest's ack (resend_plan)
@@ -326,10 +328,11 @@ class FakeHost:
             result = self.side_results.get(call_id)
         if result is None:
             result = {"content": f"fake host: no result scripted for {call_id}", "ok": False}
-        self.send("side_result", {
-            "call_id": call_id, "side": call["side"],
-            "content": result.get("content", ""), "ok": bool(result.get("ok", False)),
-        })
+        body = {"call_id": call_id, "side": call["side"],
+                "content": result.get("content", ""), "ok": bool(result.get("ok", False))}
+        if result.get("memory") is not None:
+            body["memory"] = result["memory"]
+        self.send("side_result", body)
 
     def _error(self, text: str) -> None:
         with self._cv:

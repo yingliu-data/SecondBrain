@@ -4,6 +4,13 @@
     after_tool(state, call, content) -> str | None        a rewrite, or None
     Hooks                                                 ordered chains; M2 registers
                                                           sanitize / avatar rewrites
+    Hooks.check_purity(state, call, content) -> None      runs both chains with the
+                                                          clock, environment, randomness,
+                                                          files and sockets patched to
+                                                          raise; ImpureHook names the
+                                                          hook that touched one
+    purity_guard()                                        the context manager behind it
+    ImpureHook(RuntimeError)
 
 `call` is the tool_call body ({turn_id, call_id, name, side, args, ...}).
 
@@ -17,11 +24,110 @@ reads the clock, the environment, randomness, a file or the network, and it
 never calls the LLM, a tool or the gateway. Replay re-runs nothing, so a hook
 that depended on anything outside its arguments would make the log lie.
 PLAN.md section 14: "a hook reading time() → purity test fails".
+
+How the rule is enforced (tests/test_guest_hooks.py): `check_purity` runs the
+registered chains on a sample call inside `purity_guard()`, which patches the
+plausible entry points a hook could reach for (FORBIDDEN: `time.time`/
+`monotonic`/`perf_counter`, `os.environ`/`getenv`/`urandom`, `random.random`/
+`randint`/`choice`/`shuffle` and `random.Random.random`, `socket.socket`/
+`create_connection`, `open`) so that any use raises ImpureHook naming the hook
+and the entry point. It is a test-time check of
+the whole chain, not a sandbox: it catches the hook reading those things on
+the sample call, and it patches process-wide, so it runs in tests only.
 """
 from __future__ import annotations
 
+import builtins
+import os
+import random
+import socket
+import time
+from contextlib import contextmanager
+from unittest import mock
+
 PASS_REASON = "placeholder_pass"
 DECISIONS = ("allow", "deny", "ask")
+
+SAMPLE_CALL = {"turn_id": "turn_sample", "call_id": "call_sample", "name": "bash",
+               "side": "guest", "args": {"command": "true"}}
+SAMPLE_CONTENT = "sample tool output"
+
+
+class ImpureHook(RuntimeError):
+    """A hook reached for the clock, the environment, randomness, a file or
+    the network. str() names the hook and the entry point."""
+
+    def __init__(self, entry_point: str, hook: str = "?"):
+        super().__init__(f"hook {hook} is impure: it used {entry_point}")
+        self.entry_point = entry_point
+        self.hook = hook
+
+
+class _Forbidden:
+    """A stand-in for os.environ: every read raises ImpureHook."""
+
+    def __init__(self, what: str):
+        self._what = what
+
+    def __getattr__(self, name: str):
+        if name.startswith("__"):           # protocol probes (copy, pickle, repr helpers)
+            raise AttributeError(name)
+        raise ImpureHook(self._what)
+
+    def _raise(self, *a, **k):
+        raise ImpureHook(self._what)
+
+    # dunder lookups bypass __getattr__
+    __getitem__ = __contains__ = __iter__ = __len__ = _raise
+
+
+def _raiser(what: str):
+    def fn(*a, **k):
+        raise ImpureHook(what)
+    return fn
+
+
+# (owner, attribute): the entry points a hook could plausibly reach for. The
+# module-level random functions are bound to an import-time instance, so
+# `random.Random.random` is listed too for a hook that builds its own generator.
+FORBIDDEN = (
+    (time, "time"), (time, "monotonic"), (time, "perf_counter"),
+    (os, "environ"), (os, "getenv"), (os, "urandom"),
+    (random, "random"), (random, "randint"), (random, "choice"), (random, "shuffle"),
+    (random.Random, "random"),
+    (socket, "socket"), (socket, "create_connection"),
+    (builtins, "open"),
+)
+
+
+def _label(owner, name: str) -> str:
+    if owner is builtins:
+        return name
+    if isinstance(owner, type):
+        return f"{owner.__module__}.{owner.__qualname__}.{name}"
+    return f"{owner.__name__}.{name}"
+
+
+@contextmanager
+def purity_guard():
+    """Inside the block, the FORBIDDEN entry points raise
+    ImpureHook(entry_point). Patches process-wide: tests only."""
+    patches = []
+    for owner, name in FORBIDDEN:
+        label = _label(owner, name)
+        stand_in = _Forbidden(label) if (owner, name) == (os, "environ") else _raiser(label)
+        patches.append(mock.patch.object(owner, name, stand_in))
+    for p in patches:
+        p.start()
+    try:
+        yield
+    finally:
+        for p in reversed(patches):
+            p.stop()
+
+
+def _hook_name(fn) -> str:
+    return getattr(fn, "__qualname__", None) or getattr(fn, "__name__", None) or repr(fn)
 
 
 class Hooks:
@@ -72,6 +178,22 @@ class Hooks:
                 text = out
                 changed = True
         return text if changed else None
+
+    # the purity check
+    def check_purity(self, state=None, call: dict | None = None, content: str = SAMPLE_CONTENT) -> None:
+        """Run every registered hook, one at a time, on (state, call, content)
+        under purity_guard(). Raises ImpureHook naming the first hook that
+        used a forbidden entry point; returns None when the chains are pure
+        (the empty default chains are)."""
+        call = dict(SAMPLE_CALL) if call is None else call
+        runs = [(fn, (state, call)) for fn in self._before] + \
+               [(fn, (state, call, content)) for fn in self._after]
+        with purity_guard():
+            for fn, args in runs:
+                try:
+                    fn(*args)
+                except ImpureHook as exc:
+                    raise ImpureHook(exc.entry_point, _hook_name(fn)) from None
 
 
 DEFAULT = Hooks()

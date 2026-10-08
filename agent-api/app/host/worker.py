@@ -34,11 +34,12 @@ from protocol.allowlist import effective_tools
 from protocol.messages import Outbox, ProtocolError, ack, control_message
 
 from app.config import (
-    HARNESS_GUEST_ROOT, HARNESS_HEARTBEAT_S, HARNESS_HELLO_TIMEOUT_S,
-    HARNESS_HOST_TOOL_TIMEOUT_S, HARNESS_MAX_TURNS, HARNESS_PORTS,
-    HARNESS_QUESTION_TIMEOUT_S, HARNESS_SANDBOX, HARNESS_SPILL_THRESHOLD,
-    HARNESS_STOP_AT_SETTLE, HARNESS_WALL_CLOCK_S, LLM_ENABLE_THINKING,
-    LLM_MAX_TOKENS, LLM_MODEL, LLM_TEMPERATURE, LLM_URL, MAX_TOOLS,
+    HARNESS_CONTEXT_WINDOW_TOKENS, HARNESS_GUEST_ROOT, HARNESS_HEARTBEAT_S,
+    HARNESS_HELLO_TIMEOUT_S, HARNESS_HOST_TOOL_TIMEOUT_S, HARNESS_MAX_TURNS,
+    HARNESS_PORTS, HARNESS_QUESTION_TIMEOUT_S, HARNESS_RESERVE_TOKENS,
+    HARNESS_SANDBOX, HARNESS_SPILL_THRESHOLD, HARNESS_STOP_AT_SETTLE,
+    HARNESS_TOKEN_BUDGET, HARNESS_WALL_CLOCK_S, LLM_ENABLE_THINKING,
+    LLM_MAX_TOKENS, LLM_MODEL, LLM_STREAM, LLM_TEMPERATURE, LLM_URL, MAX_TOOLS,
     SYSTEM_PROMPT, TOOL_TIMEOUT,
 )
 from app.host.endpoints import ControlChannel, Endpoints
@@ -51,7 +52,7 @@ from app.user.context_builder import ContextBuilder
 
 logger = logging.getLogger("host.worker")
 
-HARNESS_VERSION = "0.0.1"
+HARNESS_VERSION = "0.0.2"
 
 
 class GuestError(RuntimeError):
@@ -236,11 +237,16 @@ class Worker:
             "op_timeout_s": {"guest": 120, "host": HARNESS_HOST_TOOL_TIMEOUT_S,
                              "device": TOOL_TIMEOUT, "mcp": 300},
             "spill_threshold": HARNESS_SPILL_THRESHOLD,
+            # M2: the guest compacts when its estimate exceeds window - reserve
+            # (the token budget is a proxy knob, not a guest limit)
+            "context_window_tokens": HARNESS_CONTEXT_WINDOW_TOKENS,
+            "reserve_tokens": HARNESS_RESERVE_TOKENS,
         }
 
     def build_hello(self, resume: bool = False) -> dict:
         params: dict = {"max_tokens": self.tenant.max_tokens or LLM_MAX_TOKENS,
-                        "temperature": LLM_TEMPERATURE}
+                        "temperature": LLM_TEMPERATURE,
+                        "stream": LLM_STREAM}      # D17: false = one call per turn
         if not LLM_ENABLE_THINKING:
             params["chat_template_kwargs"] = {"enable_thinking": False}
         config = {
@@ -290,7 +296,7 @@ class Worker:
         if self.endpoints is None:
             self.endpoints = Endpoints(self.session.root, self.ports)
             self.proxy = LLMProxy(self.endpoints.listener(self.ports["llm"]), self.llm_url,
-                                  self.sync.host_event)
+                                  self.sync.host_event, token_budget=HARNESS_TOKEN_BUDGET)
             self.proxy.start()
             self._accept_thread = threading.Thread(target=self._accept_loop, daemon=True,
                                                    name=f"accept:{self.session_key}")
@@ -415,6 +421,7 @@ class Worker:
         try:
             if not self._guest_ready():
                 await self._start_guest()
+            self.projector.begin_task()         # before any delta can arrive
             self.send_control(*self._task_message(task_input))
             hb = self._loop.create_task(self._heartbeat())
             try:

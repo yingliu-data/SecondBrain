@@ -3,10 +3,13 @@
     system_block(cfg) -> str                 fixed per session (no {current_time})
     system_hash(cfg) -> str                  hash of the system text + tool schemas
     tool_schemas(cfg) -> list[dict]          OpenAI function schemas, cfg.tools order
-    preamble_text(state, clock_at_ms, attachments) -> str
+    preamble_text(clock_at_ms, attachments=None, new_memory=()) -> str
                                              the per-turn user-side block
     build_request(state, cfg, clock_at_ms, *, attachments=None, preambles=None,
-                  with_tools=True) -> Request
+                  with_tools=True, new_memory=None) -> Request
+    build_compaction_request(state, cfg, *, preambles=None) -> Request
+                                             the compaction turn's request (M2)
+    estimate_tokens(request) -> int          ceil(request.chars / 4), the raw estimate (M2)
 
 The request is a pure function of (state, cfg, clock_at_ms, the attachments the
 host delivered with the inputs, and the preamble texts of earlier turns), so a
@@ -23,9 +26,13 @@ preamble hash H is rendered with the preamble text registered for H; the
 `preambles` dict is that registry (the coordinator owns it across turns).
 
 The per-turn preamble (time at minute precision from `clock_at_ms`, the
-recalled memory bodies attached to the input, `[new memory]` lines for the
-session memories written so far) is prepended to the FIRST staged user
-message, the one the fold marks with the turn's `preamble_hash`. A turn that
+recalled memory bodies attached to the input, and one `[new memory]` line per
+slug in `new_memory`) is prepended to the FIRST staged user message, the one
+the fold marks with the turn's `preamble_hash`. `new_memory` defaults to the
+session memories written so far (state.session_memory, which the fold keeps,
+compaction summaries included); the coordinator passes those merged with the
+user-scope slugs the task wrote (it keeps them from its own `memory` events,
+since the fold only counts user-scope writes). A turn that
 commits no user message (a tool-result round) carries a preamble_hash but
 inserts no preamble: the time the model sees is the last one it was told.
 
@@ -35,16 +42,33 @@ filled with an error tool message right after their assistant message, so the
 conversation stays well-formed. Open calls are the fold's business
 (placeholders in async mode) and are left alone.
 
-Compaction (M2) hooks in at `_prefix_items`: it is the one place that decides
-which committed items are rendered; today it is all of them.
+Compaction (M2). The fold rebuilds `state.committed` at a `compaction` event
+(protocol.fold._compaction: items before the range, then the summary turn's
+assistant message at origin range[0], then items after the range), so
+`_prefix_items` renders `state.committed` as it is and the request after a
+compaction starts with the summary assistant message, followed by whatever
+was staged after the range. `build_compaction_request` builds the compaction
+turn's own request: the system block, the committed prefix rendered exactly as
+a regular turn renders it, and one user message with COMPACTION_INSTRUCTION;
+no tools, no preamble (its `preamble_hash` is the hash of the instruction, so
+the turn_start still records what the model was asked). Staged items are not
+part of it: they stay staged and follow the summary in the next regular turn.
+
+Token estimate (M2): `Request.chars` is the length of the canonical JSON
+text of what the model is sent ({messages, tools, params}); the same text
+gives `request_hash` (sha256 of it), so it is serialised once per request.
+`estimate_tokens(request)` = ceil(chars / 4), the raw estimate; the
+coordinator scales it by its usage correction. Reported in
+compaction.tokens_before/after; never a fold input.
 """
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+import math
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from protocol.canonical import hash_value
+from protocol.canonical import canonical_json, hash_value, sha256_hex
 
 try:  # the sibling package; TOOL_DEFINITIONS may still be a stub ({}).
     from guest.tools import TOOL_DEFINITIONS
@@ -53,6 +77,20 @@ except Exception:  # pragma: no cover - import-time safety only
 
 MISSING_TOOL_MESSAGE = "error: this tool call was not run (tool not offered in this session)"
 CURRENT_TIME_TOKEN = "{current_time}"
+CHARS_PER_TOKEN = 4
+# sampling params never sent to the model as-is: `stream` is the transport
+# mode the coordinator passes to the provider (config.stream_enabled)
+NON_SAMPLING_PARAMS = ("stream",)
+COMPACTION_INSTRUCTION = (
+    "[compaction]\n"
+    "The conversation above is being compacted. Write a summary that will replace "
+    "it as the only context for the rest of this session. Cover, under these "
+    "headings: goal (what the user wants, their most recent request verbatim); "
+    "progress (what has been done, with the exact file paths, commands and "
+    "results that matter); decisions (choices made and why); next steps (what "
+    "remains, in order); facts (names, values, identifiers and user "
+    "preferences learned). Be concrete and complete; omit pleasantries. Do not "
+    "call tools.")
 
 
 @dataclass
@@ -63,10 +101,10 @@ class Request:
     system_hash: str
     request_hash: str
     preamble_hash: str
+    chars: int = 0               # len of the canonical text request_hash is the sha256 of
     prefix_len: int = 0          # messages[:prefix_len] is the committed part (system incl.)
     preamble: str = ""           # the preamble text of this turn
     preamble_input_id: str | None = None   # the input it was prepended to, if any
-    meta: dict = field(default_factory=dict)
 
     def prefix_messages(self) -> list:
         return self.messages[: self.prefix_len]
@@ -151,9 +189,13 @@ def tool_schemas(cfg) -> list:
     return out
 
 
+def _system_hash(system: str, schemas: list) -> str:
+    return hash_value({"system": system, "tools": schemas})
+
+
 def system_hash(cfg) -> str:
     """sha256 over the system text and the tool schemas: the fixed prefix."""
-    return hash_value({"system": system_block(cfg), "tools": tool_schemas(cfg)})
+    return _system_hash(system_block(cfg), tool_schemas(cfg))
 
 
 # ---------------------------------------------------------------- preamble
@@ -176,13 +218,13 @@ def _memory_lines(item) -> list[str]:
     return ["[recalled memory]", str(item)]
 
 
-def preamble_text(state, clock_at_ms: int, attachments=None) -> str:
-    """The per-turn block: time, recalled memories (the input's attachments),
-    `[new memory]` lines for session memories written so far (state.session_memory)."""
+def preamble_text(clock_at_ms: int, attachments=None, new_memory=()) -> str:
+    """The per-turn block: time, recalled memories (the input's attachments)
+    and a `[new memory]` line per slug in `new_memory` (each once, sorted)."""
     lines = ["[context]", f"time: {format_time(clock_at_ms)}"]
     for item in attachments or []:
         lines.extend(_memory_lines(item))
-    for slug in sorted(getattr(state, "session_memory", {}) or {}):
+    for slug in sorted({str(s) for s in new_memory or ()}):
         lines.append(f"[new memory] {slug}")
     return "\n".join(lines)
 
@@ -231,6 +273,8 @@ def _fill_missing_tool_messages(messages: list, known_call_ids: set, present: se
 
 def _params(cfg) -> dict:
     params = dict(getattr(cfg, "params", None) or {})
+    for key in NON_SAMPLING_PARAMS:
+        params.pop(key, None)
     limits = getattr(cfg, "limits", None)
     max_tokens = getattr(limits, "max_tokens", None)
     if "max_tokens" not in params and max_tokens is not None:
@@ -238,8 +282,39 @@ def _params(cfg) -> dict:
     return params
 
 
+def _assemble(state, cfg, preambles: dict, tail: list, *, with_tools: bool, preamble: str,
+              preamble_hash: str, preamble_input_id: str | None) -> Request:
+    """[system] + the rendered committed prefix + `tail` (already rendered),
+    with the filler tool messages, as a Request. The system text and the tool
+    schemas are computed once and give system_hash too; the canonical text of
+    {messages, tools, params} gives both `chars` and `request_hash`."""
+    system = system_block(cfg)
+    schemas = tool_schemas(cfg)
+    known_calls = set(getattr(state, "open_calls", {}) or {})
+    prefix = [_render_item(it["message"], preambles) for it in _prefix_items(state)]
+    present = {m.get("tool_call_id") for m in prefix + tail if m.get("role") == "tool"}
+    prefix = _fill_missing_tool_messages(prefix, known_calls, present)
+    tail = _fill_missing_tool_messages(tail, known_calls, present)
+    messages = [{"role": "system", "content": system}] + prefix + tail
+    tools = schemas if with_tools else []
+    params = _params(cfg)
+    text = canonical_json({"messages": messages, "tools": tools, "params": params})
+    return Request(
+        messages=messages,
+        tools=tools,
+        params=params,
+        system_hash=_system_hash(system, schemas),
+        request_hash=sha256_hex(text),
+        preamble_hash=preamble_hash,
+        chars=len(text),
+        prefix_len=1 + len(prefix),
+        preamble=preamble,
+        preamble_input_id=preamble_input_id,
+    )
+
+
 def build_request(state, cfg, clock_at_ms: int, *, attachments=None, preambles=None,
-                  with_tools: bool = True) -> Request:
+                  with_tools: bool = True, new_memory=None) -> Request:
     """The request for a turn started now: everything staged is what the turn
     will see (includes_through_seq = state.last_seq).
 
@@ -248,13 +323,13 @@ def build_request(state, cfg, clock_at_ms: int, *, attachments=None, preambles=N
     preambles:   {preamble_hash: preamble text}; the registry of earlier turns'
                  preambles, updated in place with this turn's.
     with_tools:  False for the wrap-up turn after max_tools (no tools offered).
+    new_memory:  the slugs listed as `[new memory]` lines; None = the session
+                 memories the fold holds (state.session_memory).
     """
     attachments = attachments or {}
     preambles = preambles if preambles is not None else {}
-    known_calls = set(getattr(state, "open_calls", {}) or {})
-
-    system = {"role": "system", "content": system_block(cfg)}
-    prefix = [_render_item(it["message"], preambles) for it in _prefix_items(state)]
+    if new_memory is None:
+        new_memory = getattr(state, "session_memory", None) or ()
 
     # the staged suffix: the first user message gets this turn's preamble
     first_input = None
@@ -262,7 +337,7 @@ def build_request(state, cfg, clock_at_ms: int, *, attachments=None, preambles=N
         if it["message"].get("role") == "user":
             first_input = it["message"].get("input_id")
             break
-    preamble = preamble_text(state, clock_at_ms, attachments.get(first_input))
+    preamble = preamble_text(clock_at_ms, attachments.get(first_input), new_memory)
     p_hash = hash_value(preamble)
     preambles[p_hash] = preamble
 
@@ -276,21 +351,26 @@ def build_request(state, cfg, clock_at_ms: int, *, attachments=None, preambles=N
                            "content": _with_preamble(preamble, msg.get("content") or "")})
         else:
             suffix.append(_render_item(msg, preambles))
-    present = {m.get("tool_call_id") for m in prefix + suffix if m.get("role") == "tool"}
-    prefix = _fill_missing_tool_messages(prefix, known_calls, present)
-    suffix = _fill_missing_tool_messages(suffix, known_calls, present)
+    return _assemble(state, cfg, preambles, suffix, with_tools=with_tools, preamble=preamble,
+                     preamble_hash=p_hash, preamble_input_id=first_input if seen_user else None)
 
-    messages = [system] + prefix + suffix
-    tools = tool_schemas(cfg) if with_tools else []
-    params = _params(cfg)
-    return Request(
-        messages=messages,
-        tools=tools,
-        params=params,
-        system_hash=system_hash(cfg),
-        request_hash=hash_value({"messages": messages, "tools": tools, "params": params}),
-        preamble_hash=p_hash,
-        prefix_len=1 + len(prefix),
-        preamble=preamble,
-        preamble_input_id=first_input if seen_user else None,
-    )
+
+# ---------------------------------------------------------------- compaction (M2)
+def build_compaction_request(state, cfg, *, preambles=None) -> Request:
+    """The compaction turn's request: the system block, the committed prefix
+    rendered as a regular turn renders it (the same preamble registry, the
+    same filler tool messages), and one user message with
+    COMPACTION_INSTRUCTION. No tools; the staged suffix is not included (it
+    stays staged and follows the summary in the next regular turn). The
+    turn's preamble_hash is hash_value(COMPACTION_INSTRUCTION)."""
+    preambles = preambles if preambles is not None else {}
+    instruction = {"role": "user", "content": COMPACTION_INSTRUCTION}
+    return _assemble(state, cfg, preambles, [instruction], with_tools=False,
+                     preamble=COMPACTION_INSTRUCTION,
+                     preamble_hash=hash_value(COMPACTION_INSTRUCTION), preamble_input_id=None)
+
+
+def estimate_tokens(request) -> int:
+    """The raw token estimate: ceil(request.chars / 4). The coordinator scales
+    it by its usage correction."""
+    return math.ceil(request.chars / CHARS_PER_TOKEN)

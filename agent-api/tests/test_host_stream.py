@@ -4,7 +4,7 @@ import json
 import pytest
 
 from app.host.stream import DONE, KEEPALIVE, Projector, project, sse, tokens
-from host_fakes import HASH
+from host_fakes import HASH, token_text
 from test_sessions_and_loop import FakeLLM, FakeRegistry, collect
 
 SID = "s1"
@@ -85,13 +85,151 @@ def test_question_error_and_live_delta():
     assert p.project(ev(4, "error", {"class": "transient", "message": "m", "retry": True})) == []
     assert p.project(ev(5, "error", {"class": "fatal", "message": "boom", "retry": False})) == [
         sse("error", {"class": "fatal", "message": "boom"})]
-    assert p.live({"type": "delta", "body": {"turn_id": "t9", "kind": "text", "text": "Hel"}}) == [
-        sse("token", {"text": "Hel"})]
+    # a non-streamed turn's whole-message delta goes out word-wise (the legacy shape)
+    assert p.live({"type": "delta", "body": {"turn_id": "t9", "kind": "text", "index": 0,
+                                             "text": "Hello"}}) == tokens("Hello")
     assert p.live({"type": "log", "body": {"msg": "x"}}) == []
-    # a turn that streamed deltas is not re-emitted word-wise at llm_response
+    # a turn that sent its text live is not re-emitted at llm_response
     assert p.project(ev(6, "llm_response", {"turn_id": "t9", "finish_reason": "stop", "usage": {},
                                             "message": {"role": "assistant",
                                                         "content": "Hello"}})) == []
     assert p.project(ev(7, "settle", {"input_id": "i", "outcome": "done", "answer": "Hello",
                                       "usage": {}, "manifest": {}})) == [DONE]
     assert KEEPALIVE == ": keepalive\n\n"
+
+
+def delta(turn_id, kind, text):
+    return {"type": "delta", "body": {"session_id": SID, "turn_id": turn_id, "kind": kind,
+                                      "index": 0, "text": text}}
+
+
+def turn_start(seq, turn_id):
+    return ev(seq, "turn_start", {"turn_id": turn_id, "type": "regular",
+                                  "includes_through_seq": seq - 1, "model": "m", "params": {},
+                                  "request_hash": HASH, "preamble_hash": HASH,
+                                  "workspace_tree_id": None})
+
+
+def response(seq, turn_id, content):
+    return ev(seq, "llm_response", {"turn_id": turn_id, "finish_reason": "stop", "usage": {},
+                                    "message": {"role": "assistant", "content": content}})
+
+
+def settle(seq, answer):
+    return ev(seq, "settle", {"input_id": "i", "outcome": "done", "answer": answer,
+                              "usage": {}, "manifest": {}})
+
+
+def test_streamed_content_deltas_are_tokens_verbatim_and_suppress_the_response():
+    """M2 (D17): one token per fragment, boundaries as the model made them;
+    reasoning and tool_call fragments never reach the client; the turn's
+    llm_response and the settle add no text."""
+    p = Projector()
+    p.begin_task()
+    out = []
+    out += p.live(delta("t1", "reasoning", "thinking..."))
+    assert out == []
+    out += p.live(delta("t1", "content", "Hel"))
+    out += p.live(delta("t1", "content", "lo, wör"))
+    out += p.live(delta("t1", "tool_call", '{"q":'))
+    out += p.live(delta("t1", "content", "ld\n"))
+    out += p.live(delta("t1", "content", ""))               # empty fragments are dropped
+    assert out == [sse("token", {"text": "Hel"}), sse("token", {"text": "lo, wör"}),
+                   sse("token", {"text": "ld\n"})]
+    # the input event is stored after the first deltas (live messages overtake
+    # the guest's log writer) and must not reset the "streamed" flag
+    out += p.project(ev(2, "input", {"input_id": "i", "kind": "task", "text": "x",
+                                     "dedupe": "new"}))
+    out += p.project(response(5, "t1", "Hello, wörld"))
+    out += p.project(settle(6, "Hello, wörld"))
+    assert token_text(out) == "Hello, wörld\n" and out[-1] == DONE
+    assert sum(1 for s in out if s.startswith("event: token")) == 3
+
+
+def test_streamed_tool_turn_preamble_ends_with_a_newline():
+    """A turn that says "Let me check." and then calls a tool streamed its text
+    live; one newline goes out before the next turn's text so the answer does
+    not run into it ("Let me check.\nDone." not "Let me check.Done.")."""
+    p = Projector()
+    p.begin_task()
+    out = p.project(turn_start(2, "t1"))
+    out += p.live(delta("t1", "content", "Let me check."))
+    tool_turn = response(3, "t1", "Let me check.")
+    tool_turn["body"]["finish_reason"] = "tool_calls"
+    tool_turn["body"]["message"]["tool_calls"] = [{"id": "c1", "type": "function",
+        "function": {"name": "bash", "arguments": "{}"}}]
+    out += p.project(tool_turn)
+    out += p.project(turn_start(7, "t_mid"))       # a tool turn without text adds nothing
+    out += p.project(turn_start(8, "t2"))
+    out += p.live(delta("t2", "content", "Done."))
+    out += p.project(response(9, "t2", "Done."))
+    out += p.project(settle(10, "Done."))
+    assert out == [sse("token", {"text": "Let me check."}), sse("token", {"text": "\n"}),
+                   sse("token", {"text": "Done."}), DONE]
+
+
+def test_follow_up_turn_text_is_separated_by_a_newline():
+    """"Done." streamed, then a follow-up wakes the guest and the next turn
+    streams "Next.": the client reads "Done.\nNext."; text that already ends
+    in whitespace (the word-wise shape) gets no separator."""
+    p = Projector()
+    p.begin_task()
+    out = p.project(turn_start(3, "t1"))
+    out += p.live(delta("t1", "content", "Done."))
+    out += p.project(response(4, "t1", "Done."))
+    out += p.project(ev(5, "input", {"input_id": "i2", "kind": "follow_up", "text": "and?",
+                                     "dedupe": "new"}))
+    out += p.project(ev(6, "wake", {"reason": "input", "result_ids": [], "input_ids": ["i2"]}))
+    out += p.project(turn_start(7, "t2"))
+    out += p.live(delta("t2", "content", "Next."))
+    out += p.project(response(8, "t2", "Next."))
+    out += p.project(settle(9, "Next."))
+    assert token_text(out) == "Done.\nNext." and out[-1] == DONE
+    p.begin_task()
+    out = p.live(delta("t3", "text", "One two"))
+    out += p.live(delta("t4", "text", "Three"))
+    assert out == tokens("One two") + tokens("Three")
+
+
+def test_non_streamed_turn_falls_back_to_word_wise_response():
+    """LLM_STREAM=false (or a guest without deltas): the llm_response text
+    goes out word-wise, as the legacy loop did; settle adds nothing."""
+    p = Projector()
+    p.begin_task()
+    out = p.project(ev(2, "input", {"input_id": "i", "kind": "task", "text": "x", "dedupe": "new"}))
+    out += p.project(response(5, "t1", "Hello there world"))
+    assert out[1:] == tokens("Hello there world")
+    out += p.project(settle(6, "Hello there world"))
+    assert out[-1] == DONE and token_text(out) == "Hello there world "
+
+
+def test_begin_task_resets_between_tasks_and_tool_turns_add_no_text():
+    p = Projector()
+    p.begin_task()
+    p.live(delta("t1", "content", "first"))
+    assert p.project(settle(3, "first")) == [DONE]
+    # a second task on the same projector: nothing streamed yet
+    p.begin_task()
+    assert p.project(settle(6, "second")) == tokens("second") + [DONE]
+    # a tool-call turn: no text at llm_response, deltas (if any) still stream
+    p.begin_task()
+    assert p.project(ev(8, "llm_response", {
+        "turn_id": "t3", "finish_reason": "tool_calls", "usage": {},
+        "message": {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "c", "type": "function", "function": {"name": "bash", "arguments": "{}"}}]},
+    })) == []
+    assert p.live(delta("t4", "content", "done")) == [sse("token", {"text": "done"})]
+    assert p.project(settle(12, "done")) == [DONE]
+
+
+def test_compaction_summary_is_never_shown():
+    """A compaction turn's llm_response is context for the model, not answer
+    text: it adds no token and does not suppress the settle answer."""
+    p = Projector()
+    p.begin_task()
+    comp = turn_start(2, "tc")
+    comp["body"]["type"] = "compaction"
+    assert p.project(comp) == []
+    assert p.project(response(3, "tc", "goal: ... progress: ...")) == []
+    out = p.project(settle(4, "Hello"))
+    assert out[:-1] == tokens("Hello")

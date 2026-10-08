@@ -59,7 +59,7 @@ Fatal protocol errors (`second hello`, unsupported schema): emit
   transport)`: `start()`, `put(event)`, `flush(timeout)`.
 - `guest.inbox`: `Inbox(state)`: `classify(control_msg) -> ("new"|"duplicate"|"late", input_body)`.
 - `guest.context`: `Request` dataclass (`messages`, `tools`, `params`, `system_hash`,
-  `request_hash`, `preamble_hash`); `build_request(state, cfg, clock_at_ms) -> Request`;
+  `request_hash`, `preamble_hash`, `chars`); `build_request(state, cfg, clock_at_ms) -> Request`;
   `system_block(cfg) -> str`.
 - `guest.provider`: `Provider(connector, port=5010, model, timeout_s)`:
   `chat_completion(request: Request) -> dict` (OpenAI chat-completions response,
@@ -111,3 +111,78 @@ Guest-side tools go to `OperationManager.submit`.
 - On every new :5000 connection the host sends its ack and resends all pending
   control messages instead of waiting for the guest's handshake ack; the guest
   inbox drops the duplicates.
+
+## M2 contracts (streaming, compaction, budgets)
+
+Hello config additions: `params.stream` (bool, default true; `LLM_STREAM=false`
+on the host sets it false), `limits.context_window_tokens` (32768),
+`limits.reserve_tokens` (4096). The token budget is the host proxy's alone
+(`HARNESS_TOKEN_BUDGET`; it answers 402): it is not part of hello.
+
+- `guest.provider.Provider.chat_completion(request, *, stream=False, on_delta=None) -> dict`
+  always returns the assembled non-streamed shape
+  `{"id", "model", "choices": [{"index", "message", "finish_reason"}], "usage"}`.
+  With `stream=True` it posts `stream: true, stream_options: {include_usage: true}`,
+  parses the SSE chunks itself (hand-rolled, stdlib), assembles `content`,
+  `reasoning_content` and `tool_calls` (by index; argument fragments concatenated),
+  and calls `on_delta({"kind": "content"|"reasoning"|"tool_call", "index": int,
+  "text": str})` per fragment. With `stream=False` it calls `on_delta` once with
+  `{"kind": "text", "index": 0, "text": <the whole content>}`. Usage comes from
+  the final chunk. A stream that ends without `finish_reason` is a transient
+  ProviderError. `ProviderError.budget` is set for a 402; a 400 whose message
+  mentions context length / maximum context → `ProviderError.overflow = True`.
+- Coordinator: every regular turn passes an `on_delta` that sends live
+  `delta{session_id, turn_id, kind, index, text}` per fragment; `llm_response`
+  is emitted once from the assembled response (verbatim).
+  `turn_start.workspace_tree_id = ops.workspace_tree_id()`.
+  Token estimate = ceil(`Request.chars`/4) × correction (`Request.chars` is the
+  length of the canonical text whose sha256 is `request_hash`), correction =
+  last `usage.prompt_tokens` / that turn's raw estimate (1.0 until the first usage).
+  Trigger a compaction turn before a regular turn when estimate >
+  `context_window_tokens − reserve_tokens`, and on `ProviderError.overflow`
+  (retry the regular turn once after compacting; a second overflow →
+  `error{overflow}` + `settle{failed, reason: overflow}`).
+- Compaction turn: `clock{turn_clock}` → `turn_start{type: compaction,
+  includes_through_seq, request_hash, preamble_hash}` whose request is the
+  system block + the committed prefix + one user message with the compaction
+  instruction (goal · progress · decisions · next steps · facts; no tools
+  offered) → `llm_response` (the summary) → `compaction{range: [first prefix
+  origin seq, includes_through_seq], summary_turn_id, tokens_before,
+  tokens_after}` → `memory{scope: session, op: write, slug: "compaction-<turn
+  seq>", sha256, derived_from: summary_turn_id}`.
+  The fold rebuilds the prefix from the summary; the host projects the summary
+  into `memory/compaction-<seq>.md`.
+- Memory facts: a memory event's `sha256` is `sha256_hex(text.strip())` of the
+  memory's body text (UTF-8), `""` for a remove; for a compaction summary the
+  text is the summary. The memories a host-side tool changed (`remember`,
+  `forget`) are named by the host: its `side_result` carries
+  `memory: {scope, op: write|remove, slug, sha256}`, and after the `ok`
+  `tool_result` the coordinator emits `memory{scope, op, slug, sha256,
+  derived_from: call_id}` verbatim (a fact the event schema rejects is logged
+  and dropped; a failed result emits none).
+- Budget: 402 → `error{budget}` → `settle{failed, reason: budget}`, no retry.
+- Hooks purity test: a hook that reads `time`, `os.environ`, `random` or
+  `socket` during `before_tool`/`after_tool` fails `tests/test_guest_hooks.py`.
+
+### M2 as built (refinements to the contracts above)
+
+- Live `delta` bodies carry `index` as well (`{session_id, turn_id, kind, index,
+  text}`) so the host can assemble tool-call fragments by index.
+- Deltas belong to the provider: it de-dups across its own retries (a cut
+  stream re-streams from the start; the caller's `on_delta` still sees each
+  piece of text once), and the non-stream path sends its one `text` delta from
+  the provider too. Every delta of a turn is sent before that turn's
+  `llm_response`; the coordinator sends none of its own.
+- A compaction turn's `includes_through_seq` is the previous turn's: it commits
+  nothing, so the summary replaces exactly the committed prefix and staged
+  items follow it. Compaction turns stream nothing live and do not count
+  against `max_turns`. Both turn types start the same way
+  (`Coordinator._begin_turn`: `clock{turn_clock}` → `turn_start`), and
+  `tokens_after` is estimated on a copy of the state with the same
+  `compaction` event folded in.
+- User-scope memories are not in the fold's state (it only counts them): the
+  coordinator keeps the slugs the task wrote and lists them with
+  `state.session_memory` as the preamble's `[new memory]` lines.
+- The host declares `HARNESS_CONTEXT_WINDOW_TOKENS`, `HARNESS_RESERVE_TOKENS`
+  and `LLM_STREAM` in hello; `HARNESS_TOKEN_BUDGET` configures only the proxy,
+  which answers 402 once a session's `total_tokens` reach the budget.

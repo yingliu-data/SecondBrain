@@ -6,8 +6,21 @@ the word-wise emission), `tool_call` is `{id, name, arguments}`,
 `avatar_command` is `{name, result}`, `done` is `{}`. Added for the harness:
 `seq{input_id, seq}` on every input, `question{...}` and `error{...}`.
 
+Answer text. The guest sends live `delta{session_id, turn_id, kind, index,
+text}` messages before the turn's `llm_response`: `kind: "content"` is one
+streamed fragment (relayed verbatim as one token), `kind: "text"` is the
+whole message of a non-streamed turn (relayed word-wise, the legacy shape);
+reasoning and tool_call fragments are never shown, nor is a compaction turn's
+summary. A turn that sent text adds
+nothing at its `llm_response`; one that did not (a guest without deltas) goes
+out word-wise there; a task that sent no text at all gets the settle answer
+word-wise. When a turn's text follows an earlier turn of the task whose text
+did not end in whitespace ("Let me check." then a tool call, or "Done." then
+a follow-up), one `token "\\n"` separates them.
+
   Projector()                 per session; remembers call_id → tool name and
-                              whether a task's text was already streamed
+                              the text sent per turn of the running task
+    .begin_task()             a task is about to start: nothing sent yet
     .project(event) -> [sse]  one stored event
     .live(msg) -> [sse]       one live message (delta → token)
     .note_host_result(call_id, content)
@@ -15,6 +28,7 @@ the word-wise emission), `tool_call` is `{id, name, arguments}`,
                               receive a compacted copy, e.g. plan_movement)
   project(event) -> [sse]     stateless convenience (a fresh Projector)
   sse(event, data) -> str     the one formatter
+  tokens(text) -> [sse]       word-wise token events
   KEEPALIVE                   ": keepalive\\n\\n", every 15 s while a task runs
 """
 from __future__ import annotations
@@ -37,15 +51,20 @@ def tokens(text: str) -> list[str]:
 
 
 DONE = "event: done\ndata: {}\n\n"
+NEWLINE = sse("token", {"text": "\n"})
 
 
 class Projector:
     def __init__(self) -> None:
         self._names: dict[str, str] = {}        # call_id -> tool name
-        self._sides: dict[str, str] = {}
         self._host_results: dict[str, str] = {}
-        self._streamed = False                  # text already sent for this task
-        self._deltas: set[str] = set()          # turn_ids that streamed deltas
+        self._live: dict[str, str] = {}         # turn_id -> text sent for it (this task, in order)
+        self._compaction: set[str] = set()      # compaction turn_ids: their summary is never shown
+
+    def begin_task(self) -> None:
+        """The worker is about to send a task: nothing has been sent for it
+        yet (called before the control message, so before any delta)."""
+        self._live.clear()
 
     def note_host_result(self, call_id: str, content: str) -> None:
         self._host_results[call_id] = content
@@ -53,27 +72,44 @@ class Projector:
     def tool_name(self, call_id: str) -> str | None:
         return self._names.get(call_id)
 
+    def _text(self, turn_id, text: str, frames: list[str]) -> list[str]:
+        """Send `frames` (whose texts join to `text`) for `turn_id`, after the
+        separator when this is the turn's first text and the task's previous
+        text did not end in whitespace."""
+        out: list[str] = []
+        if turn_id not in self._live:
+            prev = next(reversed(self._live.values()), "")
+            if prev and not prev[-1].isspace():
+                out.append(NEWLINE)
+            self._live[turn_id] = ""
+        self._live[turn_id] += text
+        return out + frames
+
+    def _words(self, turn_id, text: str) -> list[str]:
+        """A whole message, word-wise (the legacy shape)."""
+        text = text.strip()
+        return self._text(turn_id, text + " ", tokens(text)) if text else []
+
     # ------------------------------------------------------------ events
     def project(self, event: dict) -> list[str]:
         etype, body = event["type"], event["body"]
         if etype == "input":
-            if body["kind"] != "ui_response" and body["dedupe"] == "new":
-                self._streamed = False
             return [sse("seq", {"input_id": body["input_id"], "seq": event["seq"]})]
+        if etype == "turn_start":
+            if body.get("type") == "compaction":
+                self._compaction.add(body["turn_id"])
+            return []
         if etype == "llm_response":
             msg = body["message"]
+            if body["turn_id"] in self._compaction:
+                return []                       # a compaction summary is context, not an answer
             if body["finish_reason"] == "tool_calls" or msg.get("tool_calls"):
                 return []
-            if body["turn_id"] in self._deltas:
-                return []
-            text = (msg.get("content") or "").strip()
-            if not text:
-                return []
-            self._streamed = True
-            return tokens(text)
+            if body["turn_id"] in self._live:
+                return []                       # sent live, before the response
+            return self._words(body["turn_id"], msg.get("content") or "")
         if etype == "tool_call":
             self._names[body["call_id"]] = body["name"]
-            self._sides[body["call_id"]] = body["side"]
             if body["side"] == "device":
                 return [sse("tool_call", {"id": body["call_id"], "name": body["name"],
                                           "arguments": body["args"]})]
@@ -101,9 +137,10 @@ class Projector:
             return []
         if etype == "settle":
             out: list[str] = []
-            if not self._streamed and body["answer"]:
+            if not self._live and body["answer"]:
                 out.extend(tokens(body["answer"].strip()))
-            self._streamed = False
+            self._live.clear()                  # turn_ids never recur across tasks
+            self._compaction.clear()
             out.append(DONE)
             return out
         return []
@@ -113,16 +150,14 @@ class Projector:
         if msg.get("type") != "delta":
             return []
         body = msg.get("body", {})
-        if body.get("kind", "text") != "text":
+        kind, text = body.get("kind"), body.get("text")
+        if not isinstance(text, str) or not text:
             return []
-        text = body.get("text", "")
-        if not text:
-            return []
-        turn_id = body.get("turn_id")
-        if turn_id:
-            self._deltas.add(turn_id)
-        self._streamed = True
-        return [sse("token", {"text": text})]
+        if kind == "content":
+            return self._text(body.get("turn_id"), text, [sse("token", {"text": text})])
+        if kind == "text":
+            return self._words(body.get("turn_id"), text)
+        return []                               # reasoning, tool_call: never shown
 
 
 def project(event: dict) -> list[str]:

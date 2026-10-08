@@ -13,6 +13,13 @@ turned into the effective list by protocol.allowlist.effective_tools),
 `question_timeout_s`, `ui_attached`, `ports`. A `schema` key on the body or
 the config must equal protocol.SCHEMA_VERSION.
 
+M2 (docs/GUEST.md "M2 contracts"): `params.stream` (bool, default True; the
+coordinator reads it with `stream_enabled(cfg)`) and the limits
+`context_window_tokens` (32768) and `reserve_tokens` (4096: the compaction
+threshold is window - reserve). The token budget is the host proxy's knob
+alone (it answers 402); it is not guest config, so an ops change to it does
+not change config_hash.
+
 Every problem is a ValueError whose message names the field. Pure: no I/O.
 """
 from __future__ import annotations
@@ -44,6 +51,8 @@ class Limits:
     spill_quota_bytes: int = 50_000_000
     grace_s: float = 1.0
     idle_wake_s: int = 600
+    context_window_tokens: int = 32768   # M2: the model's context length
+    reserve_tokens: int = 4096           # M2: headroom kept for the response
 
 
 @dataclass
@@ -127,6 +136,18 @@ def _check_schema(container: dict, name: str) -> None:
             f"hello.{name}schema mismatch: {container['schema']!r} != {SCHEMA_VERSION}")
 
 
+def stream_enabled(cfg) -> bool:
+    """`params.stream`, default True (D17: LLM_STREAM=false on the host sets it false)."""
+    return bool((getattr(cfg, "params", None) or {}).get("stream", True))
+
+
+def _params(raw) -> dict:
+    params = _dict(raw, "config.params", {})
+    if "stream" in params:
+        _bool(params["stream"], "config.params.stream", True)
+    return params
+
+
 def _limits(raw) -> Limits:
     """Limits merged over the defaults; unknown keys and wrong types rejected."""
     raw = _dict(raw, "config.limits", {})
@@ -191,7 +212,7 @@ def from_hello(body) -> GuestConfig:
         session_id=session_id,
         principal=principal,
         model=_str(config.get("model"), "config.model"),
-        params=_dict(config.get("params"), "config.params", {}),
+        params=_params(config.get("params")),
         tools=tools,
         system_block=_dict(body.get("system_block"), "system_block", {}),
         limits=_limits(config.get("limits")),
