@@ -4,11 +4,17 @@
 # Boot args (set by the sandbox manager): console=ttyS0 reboot=k panic=1 pci=off
 # init=/sbin/harness-init ; Firecracker appends root=/dev/vda ro.
 #
-# Jobs: mount the pseudo filesystems, mount the per-session workspace drive
-# (/dev/vdb -> /workspace), run the guest harness, and on exit or on the host's
-# SendCtrlAltDel (SIGINT here) sync the workspace and reboot, which makes
-# Firecracker exit. No network, no clock source: the guest learns the time
-# from `hello.at` (PLAN.md section 4.3).
+# Jobs: mount the pseudo filesystems, run the guest harness, and on exit or on
+# the host's SendCtrlAltDel (SIGINT here) sync the workspace and reboot, which
+# makes Firecracker exit. No network, no clock source: the guest learns the
+# time from `hello.at` (PLAN.md section 4.3).
+#
+# M3 (docs/M3-CONTRACTS.md §1): init does NOT mount /dev/vdb. The guest starts
+# in `--idle-wait vsock` (polling connect to CID 2:5000, silently) -- the point
+# the BASE snapshot is taken at -- and mounts /dev/vdb on /workspace itself
+# (`--mount-workspace /dev/vdb`) once a host listener answers. A cold boot and
+# a restore from the base snapshot run the same path, and the base snapshot
+# never holds a mounted workspace, so it fits every session's workspace.img.
 
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export HOME=/root LANG=C.UTF-8 PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
@@ -36,13 +42,14 @@ echo harness > /proc/sys/kernel/hostname
 # Soft Ctrl-Alt-Del: the kernel sends SIGINT to PID 1 instead of rebooting at once.
 echo 0 > /proc/sys/kernel/ctrl-alt-del
 
-# The per-session workspace drive (sandbox manager: PUT /drives/workspace).
-if [ -b /dev/vdb ]; then
-    mkdir -p /workspace
-    mount -o noatime /dev/vdb /workspace || log "cannot mount /dev/vdb at /workspace"
-else
+# The per-session workspace drive (sandbox manager: PUT /drives/workspace) is
+# mounted by the guest after idle-wait. Without a /dev/vdb (a hand-run boot)
+# /workspace is a tmpfs and the guest is not asked to mount anything.
+MOUNT_ARGS=(--mount-workspace /dev/vdb)
+if [ ! -b /dev/vdb ]; then
     log "no /dev/vdb; /workspace is a tmpfs for this boot"
     mnt tmpfs tmpfs /workspace mode=755
+    MOUNT_ARGS=()
 fi
 
 GUEST_PID=
@@ -69,8 +76,9 @@ finish() {
 }
 trap finish INT TERM
 
-log "starting guest harness (vsock -> CID 2)"
-python3 /opt/harness/guest.pyz --connect vsock --log-dir /var/harness --workspace /workspace &
+log "starting guest harness (idle-wait, then vsock -> CID 2)"
+python3 /opt/harness/guest.pyz --connect vsock --idle-wait vsock "${MOUNT_ARGS[@]}" \
+    --log-dir /var/harness --workspace /workspace &
 GUEST_PID=$!
 wait "$GUEST_PID"
 rc=$?
