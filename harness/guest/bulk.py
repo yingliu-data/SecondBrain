@@ -132,6 +132,8 @@ def workspace_files(workspace) -> tuple[list[dict], dict[str, str]]:
         dirnames[:] = sorted(d for d in dirnames if (rel_dir + d + "/") not in excluded)
         for name in sorted(filenames):
             rel = rel_dir + name
+            if rel == MANIFEST_PATH:  # the host writes it here (LocalSandbox shares the dir)
+                continue
             full = os.path.join(dirpath, name)
             try:
                 st = os.lstat(full)
