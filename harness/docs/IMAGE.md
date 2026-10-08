@@ -1,9 +1,10 @@
 # Guest VM image (`harness/image/`)
 
-What boots inside the per-session Firecracker microVM (PLAN.md D6a, D18, M1),
-how it is built, and how the guest finds the host. Build and runtime are both
-unprivileged; nothing here needs sudo. The server runbook is
-`docs/RUNBOOK-M1.md`.
+What boots inside the per-session Firecracker microVM (PLAN.md D6a, D18, M1,
+M3), how it is built, how the base snapshot is taken, and how the guest finds
+the host. Build and runtime are both unprivileged; nothing here needs sudo.
+The server runbooks are `docs/RUNBOOK-M1.md` (first boot) and
+`docs/RUNBOOK-M3.md` (snapshots, park and resume).
 
 ## Artifacts (`harness/image/out/`, git-ignored)
 
@@ -13,7 +14,9 @@ unprivileged; nothing here needs sudo. The server runbook is
 | `rootfs.ext4` | the read-only root filesystem (Debian bookworm-slim, Python 3.12, bash, git, coreutils, `/sbin/harness-init`, `/opt/harness/guest.pyz`); ~350 MiB | `build.sh rootfs` |
 | `vmlinux` | the pinned Firecracker CI kernel, uncompressed ELF, sha256-verified | `build.sh kernel` |
 | `workspace-template.img` | a 1 GiB sparse, empty ext4; `HARNESS_WORKSPACE_TEMPLATE` for hosts whose agent-api container has no `mkfs.ext4` | `build.sh workspace` |
+| `IMAGE_VERSION` | 16 hex chars: `sha256("<vmlinux sha256>\n<rootfs sha256>\n")[:16]`; the identity every snapshot records and is checked against | `build.sh version` (part of `all`) |
 | `firecracker`, `jailer` | the pinned release binaries (host side, optional convenience) | `build.sh firecracker` |
+| `vm/base/{vmstate,mem,MANIFEST.json}` | the BASE snapshot, when built with the default `HARNESS_VM_CACHE=out/vm` (normally built straight into the deployed cache) | `make snapshot` (needs `/dev/kvm`) |
 
 Pins live in `harness/image/versions.env` (Firecracker `v1.17.0`, CI kernel
 `firecracker-ci/v1.15/x86_64/vmlinux-6.1.155`, base image
@@ -54,14 +57,20 @@ Firecracker appends `root=/dev/vda ro` for the drive marked `is_root_device`.
    filesystem stays read-only.
 2. Sets the hostname and `kernel/ctrl-alt-del = 0` (soft: the host's
    `SendCtrlAltDel` becomes SIGINT to PID 1 instead of an instant reboot).
-3. Mounts `/dev/vdb` (the session's `workspace.img`) at `/workspace`,
-   `noatime`. Without a `/dev/vdb` it falls back to a tmpfs and logs it.
+3. Does **not** mount `/dev/vdb` (M3-CONTRACTS §1): the guest mounts it on
+   `/workspace` itself once idle-wait ends (`--mount-workspace /dev/vdb`), so
+   the base snapshot never holds a mounted workspace. Without a `/dev/vdb`
+   (a hand-run boot) init puts a tmpfs on `/workspace` and drops the flag.
 4. **Clock:** nothing. The VM has no RTC source worth trusting and no NTP; the
    guest takes the time from `hello.at` and every later `heartbeat`
    (PLAN.md section 4.3) and the protocol never folds wall-clock time.
 5. Runs the guest as a child:
-   `python3 /opt/harness/guest.pyz --connect vsock --log-dir /var/harness --workspace /workspace`
-   and waits.
+   `python3 /opt/harness/guest.pyz --connect vsock --idle-wait vsock --mount-workspace /dev/vdb --log-dir /var/harness --workspace /workspace`
+   and waits. The guest sits in idle-wait (a silent connect to CID 2:5000
+   every 50 ms) until a host listener answers; that is the base-snapshot
+   point. A cold boot takes exactly the same path. After `parked` the guest
+   returns to idle-wait without exiting (M3-CONTRACTS §3), so init does not
+   notice a park.
 6. On guest exit, or on SIGINT/SIGTERM (the host's `stop()`): TERM then KILL the
    guest, `sync`, unmount `/workspace`, and `reboot(LINUX_REBOOT_CMD_RESTART)`
    (sysrq `b` as fallback). With `reboot=k` Firecracker sees the reset and the
@@ -69,6 +78,52 @@ Firecracker appends `root=/dev/vda ro` for the drive marked `is_root_device`.
 
 Console output (kernel + init + the guest's stderr) goes to ttyS0, which the
 sandbox manager captures at `{session_dir}/vm/console.log`.
+
+## The base snapshot (`make snapshot`, M3)
+
+`build_snapshot.py build-base` (the logic is `build_base_snapshot()` in
+`agent-api/app/host/sandbox/firecracker.py`; the script loads that file
+directly, the container runs `python -m app.host.sandbox.firecracker build-base`):
+
+1. Makes a scratch session dir `{cache}/.build-base/{vm,ipc}` and cold-boots the
+   rootfs exactly as `FirecrackerSandbox.start()` does, with guest CID 3
+   (`BASE_GUEST_CID`). Every path the VM records is relative to the
+   Firecracker cwd (`vm/`): drives `rootfs.ext4` (a symlink to `HARNESS_ROOTFS`)
+   and `workspace.img`, vsock `../ipc/v.sock`.
+2. Waits for idle: no host listener exists, so each connect attempt is a vsock
+   packet the VMM answers with a reset. `FlushMetrics` every 200 ms; three
+   consecutive windows with vsock packets = the guest is in its idle loop
+   (nothing else in the guest uses vsock before hello); then 1 s settle.
+   `--fixed-delay S` replaces detection with a plain wait.
+3. `PATCH /vm {Paused}`, `PUT /snapshot/create {Full, snapshot_path, mem_file_path}`
+   into `{cache}/.base.tmp/`, writes `MANIFEST.json`, kills the process and
+   swaps `.base.tmp` -> `base` atomically (running VMs keep the old `mem` inode).
+
+`MANIFEST.json`: `format`, `image_version`, `kernel_sha256`, `rootfs_sha256`,
+`firecracker_version`, `guest_cid`, `vcpus`, `mem_mib`, `workspace_bytes`,
+`boot_args`, `idle_detect`, `created_ms`. `restore()` refuses (SandboxError ->
+the worker boots the rootfs instead) when `image_version` or
+`firecracker_version` differ from the running config, or when the session's
+`workspace.img` is not `workspace_bytes` long (the virtio-blk capacity is part
+of the vmstate). Rebuild the base after every `make image`, Firecracker
+upgrade, or change of `HARNESS_VM_MEM_MIB` / `HARNESS_VM_VCPUS` /
+`HARNESS_WORKSPACE_MIB`.
+
+Why relative paths work (Firecracker v1.17, `docs/snapshotting/snapshot-support.md`):
+the vmstate stores the drive `path_on_host` and vsock `uds_path` strings as
+given, and a new process re-opens them; resources "need to be accessible at
+the same relative paths to the new Firecracker process". The sandbox launches
+every Firecracker with `cwd = {session_dir}/vm`, so `workspace.img` and
+`../ipc/v.sock` resolve to each session's own files (this is also exactly what
+the jailer's chroot layout expects). `/snapshot/load` additionally gets
+`vsock_override {uds_path}` (added in Firecracker 1.16); there is no drive
+override in the 1.17 API. The guest CID is restored from the vmstate and
+cannot be overridden: all VMs from one base share CID 3, which is harmless
+because Firecracker's vsock is emulated per VMM over Unix sockets, not
+vhost-vsock. Firecracker treats resuming one snapshot many times as a
+randomness hazard (VMGenID reseeds the kernel PRNG on 6.1); the guest draws
+nothing random before the snapshot point and derives every id from hello
+(M3-CONTRACTS §1).
 
 ## How the guest finds the host
 
@@ -91,9 +146,11 @@ test double uses (`guest.main --connect unix:{session_dir}/ipc`), so
 Host-initiated connections (none in M1) would go through `v.sock` itself with
 Firecracker's `CONNECT P\n` / `OK n\n` handshake.
 
-The guest's own CID is irrelevant to it (it only dials CID 2); the host needs
-it unique per running VM, which `derive_guest_cid(session name)` in
-`sandbox/firecracker.py` gives, overridable with `HARNESS_GUEST_CID`.
+The guest's own CID is irrelevant to it (it only dials CID 2). Firecracker's
+vsock is emulated inside each VMM and bridged to that VM's own Unix sockets,
+so CIDs need not be unique across VMs: a cold boot uses
+`derive_guest_cid(session name)` (overridable with `HARNESS_GUEST_CID`), and
+every VM restored from the base snapshot carries the base's CID 3.
 
 ## Building and rebuilding
 
@@ -147,12 +204,12 @@ install step reads the same file.
 
 ## Limits and follow-ups
 
-- No snapshot in the image yet: M3 adds the "harness idle before it connects
-  out" snapshot (the guest already has `--idle-wait FILE` for that point) and
-  per-session snapshots.
-- The init script reboots the VM when the guest exits. In M3, where a VM
-  spans a session and is parked rather than ended, the init will instead
-  restart the guest or wait for a `park` acknowledgement.
+- Snapshots are Full only (no Diff snapshots, no UFFD memory backend). A
+  2 GiB guest writes up to 2 GiB of `mem` per park (sparse: only touched
+  pages occupy disk); Diff snapshots are the follow-up if parks get frequent.
+- The init script still reboots the VM when the guest exits; a park does not
+  exit the guest (it returns to idle-wait), so this only covers crashes and
+  `stop()`.
 - The jailer is not used in M1 (PLAN.md section 11: isolation hardening is
   OpenShell's); `out/jailer` is extracted so the switch is a flag change in
   `sandbox/firecracker.py`.

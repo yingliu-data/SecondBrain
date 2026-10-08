@@ -35,6 +35,9 @@ import json, os, socket, sys, threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 args = sys.argv[1:]
+if "--version" in args:
+    print("Firecracker " + os.environ.get("FAKE_FC_VERSION", "v1.17.0"))
+    sys.exit(0)
 opts = {}
 i = 0
 while i < len(args):
@@ -73,10 +76,31 @@ class Handler(BaseHTTPRequestHandler):
     def do_PUT(self):
         body = self._body()
         with open(record, "a") as fh:
-            fh.write(json.dumps({"method": "PUT", "path": self.path, "body": body}) + "\n")
+            fh.write(json.dumps({"method": self.command, "path": self.path, "body": body}) + "\n")
+        if self.path == "/actions" and isinstance(body, dict) \
+                and body.get("action_type") == "FlushMetrics":
+            n = int(os.environ.get("FAKE_FC_VSOCK_PKTS", "0"))
+            with open(opts["metrics-path"], "a") as fh:
+                fh.write(json.dumps({"vsock": {"tx_packets_count": n, "rx_packets_count": n}}) + "\n")
         if fail_path and self.path == fail_path:
             self._reply(400, json.dumps({"fault_message": "fake rejected " + self.path}).encode())
             return
+        if self.path == "/snapshot/create":
+            # relative paths resolve against our cwd, like the real binary
+            for key, content in (("snapshot_path", b"VMSTATE"), ("mem_file_path", b"MEM")):
+                with open(body[key], "wb") as fh:
+                    fh.write(content + b" cwd=" + os.getcwd().encode())
+        if self.path == "/snapshot/load":
+            missing = [p for p in (body["snapshot_path"], body["mem_backend"]["backend_path"])
+                       if not os.path.isfile(p)]
+            if missing:
+                self._reply(400, json.dumps({"fault_message": "missing " + str(missing)}).encode())
+                threading.Timer(0.05, lambda: os._exit(1)).start()   # load failure ends FC
+                return
+            with open(record, "a") as fh:
+                fh.write(json.dumps({"cwd": os.getcwd(),
+                                     "workspace_exists": os.path.exists("workspace.img"),
+                                     "rootfs_link": os.path.realpath("rootfs.ext4")}) + "\n")
         self._reply(204)
         if self.path == "/actions" and isinstance(body, dict) \
                 and body.get("action_type") == "SendCtrlAltDel" \
@@ -105,6 +129,8 @@ def fake_fc(tmp_path, monkeypatch):
     monkeypatch.setenv("FAKE_FC_RECORD", str(record))
     monkeypatch.delenv("FAKE_FC_FAIL_PATH", raising=False)
     monkeypatch.delenv("FAKE_FC_IGNORE_CAD", raising=False)
+    monkeypatch.delenv("FAKE_FC_VERSION", raising=False)
+    monkeypatch.delenv("FAKE_FC_VSOCK_PKTS", raising=False)
     return binary, record
 
 
@@ -188,18 +214,22 @@ def test_start_sends_the_documented_sequence(fake_fc, fake_mkfs, session_dir, tm
         assert rootfs["drive_id"] == "rootfs"
         assert rootfs["is_root_device"] is True
         assert rootfs["is_read_only"] is True
-        assert rootfs["path_on_host"] == str(tmp_path / "rootfs.ext4")
+        # relative to the Firecracker cwd ({session}/vm): a symlink to the image
+        assert rootfs["path_on_host"] == "rootfs.ext4"
+        link = session_dir / "vm" / "rootfs.ext4"
+        assert link.is_symlink() and os.readlink(link) == str(tmp_path / "rootfs.ext4")
 
         ws = by_path["/drives/workspace"]
         assert ws == {
             "drive_id": "workspace",
-            "path_on_host": str(session_dir / "vm" / "workspace.img"),
+            "path_on_host": "workspace.img",
             "is_root_device": False,
             "is_read_only": False,
         }
 
         vsock = by_path["/vsock"]
         assert _from_vm_dir(session_dir, vsock["uds_path"]) == str(session_dir / "ipc" / "v.sock")
+        assert vsock["uds_path"] == os.path.join("..", "ipc", "v.sock")
         assert vsock["guest_cid"] == derive_guest_cid("default_abc123")
         assert vsock["guest_cid"] >= 3
         # A guest connect(CID 2, port P) is forwarded to {uds_path}_P on the host.
@@ -300,9 +330,9 @@ def test_real_mkfs_makes_a_sparse_ext4_image(fake_fc, session_dir, tmp_path):
         assert fh.read(2) == b"\x53\xef"             # ext4 superblock magic
 
 
-def test_short_session_dir_gets_absolute_socket_paths(fake_fc, fake_mkfs, tmp_path):
-    """With a path that fits sun_path, Firecracker receives absolute paths:
-    `{session_dir}/ipc/v.sock` and `{session_dir}/vm/firecracker.sock`."""
+def test_short_session_dir_gets_absolute_api_socket(fake_fc, fake_mkfs, tmp_path):
+    """With a path that fits sun_path, the API socket is absolute; the vsock
+    uds_path is always relative (it is recorded in snapshots, M3)."""
     with tempfile.TemporaryDirectory(prefix="fc-", dir="/tmp") as short:
         session_dir = Path(short) / "default_s1"
         session_dir.mkdir()
@@ -314,7 +344,7 @@ def test_short_session_dir_gets_absolute_socket_paths(fake_fc, fake_mkfs, tmp_pa
             argv = _argv(fake_fc[1])
             assert argv[1] == str(session_dir / "vm" / "firecracker.sock")
             vsock = [r for r in _requests(fake_fc[1]) if r["path"] == "/vsock"][0]["body"]
-            assert vsock["uds_path"] == str(session_dir / "ipc" / "v.sock")
+            assert vsock["uds_path"] == "../ipc/v.sock"
         finally:
             sb.stop()
 

@@ -6,7 +6,9 @@
 #   build.sh kernel     pinned Firecracker CI kernel -> out/vmlinux (sha256 verified)
 #   build.sh workspace  out/workspace-template.img (sparse ext4; HARNESS_WORKSPACE_TEMPLATE)
 #   build.sh firecracker  pinned release tarball -> out/firecracker (host binary, sha256 verified)
-#   build.sh all        pyz rootfs kernel workspace
+#   build.sh version    out/IMAGE_VERSION = sha256("<kernel sha>\n<rootfs sha>\n")[:16]
+#   build.sh all        pyz rootfs kernel workspace version
+#   build.sh snapshot   base snapshot into $HARNESS_VM_CACHE/base (needs /dev/kvm; build_snapshot.py)
 #   build.sh check      sizes, pyz runs, rootfs contains the init + pyz
 #   build.sh clean      remove out/ and .build/
 #
@@ -202,6 +204,39 @@ build_workspace() {
     log "built $img (${WORKSPACE_TEMPLATE_MIB} MiB sparse)"
 }
 
+# ------------------------------------------------------------- version
+# The identity a snapshot must match (MANIFEST.json image_version). Same formula
+# as app/host/sandbox/firecracker.py image_version_from_shas().
+build_version() {
+    [ -f "$OUT/vmlinux" ] && [ -f "$OUT/rootfs.ext4" ] || die "version: build kernel and rootfs first"
+    local k r v
+    k="$(sha256sum "$OUT/vmlinux" | cut -d' ' -f1)"
+    r="$(sha256sum "$OUT/rootfs.ext4" | cut -d' ' -f1)"
+    v="$(printf '%s\n%s\n' "$k" "$r" | sha256sum | cut -c1-16)"
+    echo "$v" > "$OUT/IMAGE_VERSION"
+    log "IMAGE_VERSION $v"
+}
+
+# ------------------------------------------------------------ snapshot
+# Boots the rootfs in Firecracker, waits for the guest's idle-wait, writes
+# $HARNESS_VM_CACHE/base/{vmstate,mem,MANIFEST.json}. Needs /dev/kvm. Defaults
+# point at out/; set any HARNESS_* to build against the deployed copies.
+build_snapshot() {
+    need "$PYTHON"
+    [ -f "$OUT/IMAGE_VERSION" ] || build_version
+    local fc="${HARNESS_FIRECRACKER_BIN:-}"
+    if [ -z "$fc" ]; then
+        if [ -x "$OUT/firecracker" ]; then fc="$OUT/firecracker"; else fc=firecracker; fi
+    fi
+    # shellcheck disable=SC2086
+    HARNESS_FIRECRACKER_BIN="$fc" \
+    HARNESS_KERNEL="${HARNESS_KERNEL:-$OUT/vmlinux}" \
+    HARNESS_ROOTFS="${HARNESS_ROOTFS:-$OUT/rootfs.ext4}" \
+    HARNESS_WORKSPACE_TEMPLATE="${HARNESS_WORKSPACE_TEMPLATE:-$OUT/workspace-template.img}" \
+    HARNESS_VM_CACHE="${HARNESS_VM_CACHE:-$OUT/vm}" \
+        "$PYTHON" "$HERE/build_snapshot.py" build-base ${SNAPSHOT_ARGS:-}
+}
+
 # --------------------------------------------------------------- check
 check() {
     local rc=0
@@ -212,6 +247,7 @@ check() {
             printf '[check] %-22s MISSING\n' "$f"; rc=1
         fi
     done
+    [ -f "$OUT/IMAGE_VERSION" ] && echo "[check] IMAGE_VERSION $(cat "$OUT/IMAGE_VERSION")"
     [ -f "$OUT/workspace-template.img" ] && printf '[check] %-22s %12s bytes (sparse, %s KiB used)\n' \
         workspace-template.img "$(stat -c %s "$OUT/workspace-template.img")" "$(du -k "$OUT/workspace-template.img" | cut -f1)"
     if [ -f "$OUT/vmlinux" ]; then
@@ -252,8 +288,10 @@ case "$cmd" in
     kernel) build_kernel ;;
     firecracker) build_firecracker ;;
     workspace) build_workspace ;;
-    all) build_pyz; build_rootfs; build_kernel; build_workspace ;;
+    version) build_version ;;
+    snapshot) build_snapshot ;;
+    all) build_pyz; build_rootfs; build_kernel; build_workspace; build_version ;;
     check) check ;;
     clean) clean ;;
-    *) die "unknown command: $cmd (pyz|rootfs|kernel|firecracker|workspace|all|check|clean)" ;;
+    *) die "unknown command: $cmd (pyz|rootfs|kernel|firecracker|workspace|version|snapshot|all|check|clean)" ;;
 esac

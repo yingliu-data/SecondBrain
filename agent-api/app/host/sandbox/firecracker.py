@@ -1,42 +1,66 @@
-"""sandbox/firecracker — one Firecracker microVM per session (PLAN.md D6a, D18, M1).
+"""sandbox/firecracker — one Firecracker microVM per session (PLAN.md D6a, D18, M1, M3).
 
-M1 scope: boot from the read-only rootfs over the Firecracker API with a vsock
-device and a per-session `/workspace` drive, stop, kill. Snapshots, restore and
-the jailer are M3 follow-ups (docs/RUNBOOK-M1.md lists them).
+M1: boot from the read-only rootfs over the Firecracker API with a vsock device
+and a per-session `/workspace` drive, stop, kill. M3 (docs/M3-CONTRACTS.md §1–2):
+full snapshots (`snapshot`), restore from the shared BASE snapshot or from a
+per-session snapshot (`restore`, `has_snapshot`), and the base-snapshot build
+(`build_base_snapshot`, `python -m app.host.sandbox.firecracker build-base`,
+`harness/image/build_snapshot.py`). The jailer is still a follow-up.
 
 Standard library plus `subprocess` only: this module must stay httpx-free so it
-can move (an OpenShell runtime would be a second backend behind the same three
-methods, PLAN.md section 11).
+can move (an OpenShell runtime would be a second backend behind the same
+methods, PLAN.md section 11), and so `harness/image/build_snapshot.py` can load
+it without the agent-api package.
 
 Per-session files (all under the session directory, PLAN.md section 3):
 
     {session_dir}/vm/firecracker.sock   Firecracker API socket (host side only)
     {session_dir}/vm/workspace.img      ext4 image, /dev/vdb in the guest, /workspace
+    {session_dir}/vm/rootfs.ext4        symlink -> FirecrackerConfig.rootfs (read-only)
     {session_dir}/vm/firecracker.log    Firecracker's own log
-    {session_dir}/vm/metrics.json       Firecracker metrics (JSON lines)
-    {session_dir}/ipc/v.sock            vsock device uds_path. Firecracker binds it
-                                        for host-initiated connections (CONNECT port).
-                                        A guest-initiated connection to port P is
-                                        forwarded to the host's listener at
-                                        {session_dir}/ipc/v.sock_P -- the same names
-                                        the test double (guest.transport.UnixConnector)
-                                        uses, so endpoints.py serves both unchanged.
+    {session_dir}/vm/metrics.json       Firecracker metrics (JSON lines, deltas per flush)
+    {session_dir}/vm/console.log        the guest's ttyS0
+    {session_dir}/vm/snapshot/          per-session snapshot: vmstate, mem, META.json
+    {session_dir}/ipc/v.sock            vsock device uds_path. A guest-initiated
+                                        connection to port P is forwarded to the
+                                        host's listener at {session_dir}/ipc/v.sock_P
+                                        -- the same names the test double uses.
+
+Paths are relative to the Firecracker process's cwd ({session_dir}/vm): the
+drives are `rootfs.ext4` and `workspace.img`, the vsock is `../ipc/v.sock`.
+Firecracker records those strings in the snapshot's vmstate, so one BASE
+snapshot (built in a scratch session dir) resolves to each session's own files
+when it is loaded by a process whose cwd is that session's `vm/`. On load the
+vsock path is also passed explicitly (`vsock_override`, Firecracker >= 1.16);
+there is no drive override in the API (1.17), hence the relative names.
+
+BASE snapshot, `HARNESS_VM_CACHE` (default /var/lib/secondbrain/vm):
+
+    base/vmstate  base/mem  base/MANIFEST.json
+        {format, image_version, kernel_sha256, rootfs_sha256, firecracker_version,
+         guest_cid, vcpus, mem_mib, workspace_bytes, boot_args, created_ms}
 
 Public API:
     SandboxError
     FirecrackerConfig            paths, sizes, boot args; `from_env()`
-    FirecrackerSandbox(config)   start(session_dir), stop(), is_alive(); plus
-                                 guest_cid, api_socket, vsock_uds, workspace_image,
-                                 pid, returncode, wait(timeout)
-    derive_guest_cid(name)       the default per-session CID (>= 3)
+    FirecrackerSandbox(config)   start(session_dir), stop(), is_alive(),
+                                 restore(session_dir, snapshot_dir=None),
+                                 snapshot(snapshot_dir), has_snapshot(snapshot_dir=None);
+                                 plus guest_cid, api_socket, vsock_uds, workspace_image,
+                                 pid, returncode, wait(timeout), last_restore_ms,
+                                 last_vm_event ({op, source, ms} for the `vm` host event)
+    build_base_snapshot(config)  boot the rootfs, wait for the guest's idle-wait, snapshot
+    derive_guest_cid(name)       a per-session CID (>= 3) for cold boots
     instance_id(name)            Firecracker-legal `--id` for a session directory
-    connect_unix(path, timeout)  connect() that survives sun_path's 108-byte limit;
-                                 endpoints.py can use it for the v.sock_P listeners
-    firecracker_path(path, cwd)  the socket path form Firecracker is given
-    API_ORDER                    the exact configuration sequence, for tests and docs
+    image_version(config)        the image identity a snapshot must match
+    firecracker_version(bin)     "v1.17.0" from `firecracker --version` (cached)
+    connect_unix(path, timeout)  connect() that survives sun_path's 108-byte limit
+    firecracker_path(path, cwd)  the API-socket path form Firecracker is given
+    API_ORDER, RESTORE_ORDER, SNAPSHOT_ORDER   the exact request sequences
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import http.client
 import json
@@ -46,6 +70,7 @@ import shutil
 import signal
 import socket
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -57,20 +82,30 @@ except ImportError:  # pragma: no cover
 
 __all__ = [
     "API_ORDER",
+    "BASE_GUEST_CID",
     "DEFAULT_BOOT_ARGS",
+    "DEFAULT_VM_CACHE",
+    "RESTORE_ORDER",
+    "SNAPSHOT_ORDER",
     "FirecrackerConfig",
     "FirecrackerSandbox",
     "SandboxError",
     "UNIX_PATH_MAX",
+    "build_base_snapshot",
     "connect_unix",
     "derive_guest_cid",
     "firecracker_path",
+    "firecracker_version",
+    "image_version",
     "instance_id",
 ]
 
 DEFAULT_BOOT_ARGS = "console=ttyS0 reboot=k panic=1 pci=off init=/sbin/harness-init"
 # Firecracker appends `root=/dev/vda ro` itself for the drive marked is_root_device
 # (read-only because the rootfs drive is), so the boot args carry no root=.
+# The guest's `--idle-wait vsock --mount-workspace /dev/vdb` comes from
+# harness-init, not from the boot args: a cold boot and the base-snapshot boot
+# are the same boot (M3-CONTRACTS §1).
 
 # The configuration sequence `start()` sends. Tests assert this exact order.
 API_ORDER = (
@@ -81,30 +116,52 @@ API_ORDER = (
     ("PUT", "/vsock"),
     ("PUT", "/actions"),
 )
+# `restore()`: a fresh process, nothing configured, one load (Firecracker
+# allows LoadSnapshot only before any other configuration).
+RESTORE_ORDER = (("PUT", "/snapshot/load"),)
+# `snapshot()`: pause, then a full snapshot; the process is killed afterwards.
+SNAPSHOT_ORDER = (("PATCH", "/vm"), ("PUT", "/snapshot/create"))
 
 VSOCK_NAME = "v.sock"       # under {session_dir}/ipc/
 API_SOCK_NAME = "firecracker.sock"
 WORKSPACE_IMG_NAME = "workspace.img"
+ROOTFS_LINK_NAME = "rootfs.ext4"
 LOG_NAME = "firecracker.log"
 METRICS_NAME = "metrics.json"
+CONSOLE_NAME = "console.log"
+
+SNAPSHOT_STATE_NAME = "vmstate"
+SNAPSHOT_MEM_NAME = "mem"
+META_NAME = "META.json"             # per-session snapshot
+MANIFEST_NAME = "MANIFEST.json"     # base snapshot
+CONSUMED_SUFFIX = ".consumed"       # META.json after a successful restore
+SNAPSHOT_FORMAT = 1
+BASE_DIR_NAME = "base"
+DEFAULT_VM_CACHE = "/var/lib/secondbrain/vm"
+IMAGE_VERSION_FILE = "IMAGE_VERSION"   # next to the rootfs (harness/image/out/)
 
 # vsock CIDs: 0, 1 (reserved), 2 (host). Guests get 3 .. 0xFFFFFFFE; we stay
 # well under that so a CID is always a plain positive int in JSON.
 MIN_GUEST_CID = 3
 _CID_SPAN = 2**31 - MIN_GUEST_CID
+# The base snapshot's CID. Firecracker's vsock is a userspace device backed by
+# Unix sockets (not vhost-vsock), so the CID only matters inside the guest and
+# every VM restored from the base shares it; load cannot change it.
+BASE_GUEST_CID = 3
 
 _INSTANCE_ID_RE = re.compile(r"[^A-Za-z0-9-]")
+_VERSION_RE = re.compile(r"v\d+\.\d+\.\d+\S*")
 
 # sun_path is 108 bytes on Linux. A session directory deep under data/sessions
-# can push `{session_dir}/ipc/v.sock_5010` past it, so socket paths handed to
-# Firecracker are made relative to its cwd ({session_dir}/vm) when the absolute
-# form is too long, and the host side connects through /proc/self/fd/<dirfd>.
+# can push `{session_dir}/vm/firecracker.sock` past it, so the API socket path
+# handed to Firecracker is made relative to its cwd ({session_dir}/vm) when the
+# absolute form is too long, and the host side connects through /proc/self/fd.
 UNIX_PATH_MAX = 100   # leave room for Firecracker's own "_PORT" suffixes
 
 
 class SandboxError(RuntimeError):
-    """Launch, API or lifecycle failure. API failures carry Firecracker's
-    response body verbatim (`status`, `body`)."""
+    """Launch, API, snapshot or lifecycle failure. API failures carry
+    Firecracker's response body verbatim (`status`, `body`)."""
 
     def __init__(self, message: str, *, status: int | None = None, body: str = ""):
         super().__init__(message)
@@ -113,12 +170,12 @@ class SandboxError(RuntimeError):
 
 
 def derive_guest_cid(name: str) -> int:
-    """Per-session guest CID chosen by the host: >= 3, stable for a session name.
+    """Per-session guest CID for a cold boot: >= 3, stable for a session name.
 
-    Firecracker's vhost-vsock backend needs CIDs unique per host at the same
-    time; 2^31 values hashed from the session name make a clash between two
-    concurrent sessions negligible, and the worker may override via
-    `FirecrackerConfig.guest_cid` when it allocates CIDs itself."""
+    Firecracker's vsock device is emulated in the VMM over Unix sockets, so
+    the CID is not a host-wide resource; a stable per-session value only keeps
+    logs readable. VMs restored from the base snapshot all carry
+    BASE_GUEST_CID. The worker may override via `FirecrackerConfig.guest_cid`."""
     digest = hashlib.sha256(name.encode("utf-8")).digest()
     return MIN_GUEST_CID + int.from_bytes(digest[:8], "big") % _CID_SPAN
 
@@ -147,6 +204,11 @@ class FirecrackerConfig:
     api_timeout_s: float = 10.0      # per API request and for the socket to appear
     stop_grace_s: float = 5.0        # SendCtrlAltDel -> SIGKILL
     extra_args: list[str] = field(default_factory=list)
+    # --- M3 ---
+    vm_cache: str = DEFAULT_VM_CACHE        # HARNESS_VM_CACHE: base/ lives here
+    image_version: str | None = None        # HARNESS_IMAGE_VERSION; None -> image_version(cfg)
+    firecracker_version: str | None = None  # HARNESS_FIRECRACKER_VERSION; None -> `--version`
+    vsock_override: bool = True             # pass vsock_override on load (Firecracker >= 1.16)
 
     @classmethod
     def from_env(cls, env: dict | None = None) -> "FirecrackerConfig":
@@ -161,13 +223,17 @@ class FirecrackerConfig:
             workspace_template=e.get("HARNESS_WORKSPACE_TEMPLATE") or None,
             boot_args=e.get("HARNESS_BOOT_ARGS", DEFAULT_BOOT_ARGS),
             log_level=e.get("HARNESS_FIRECRACKER_LOG_LEVEL", "Warning"),
+            vm_cache=e.get("HARNESS_VM_CACHE") or DEFAULT_VM_CACHE,
+            image_version=e.get("HARNESS_IMAGE_VERSION") or None,
+            firecracker_version=e.get("HARNESS_FIRECRACKER_VERSION") or None,
         )
         if e.get("HARNESS_GUEST_CID"):
             cfg.guest_cid = int(e["HARNESS_GUEST_CID"])
         return cfg
 
-    def validate(self) -> None:
-        if not self.kernel:
+    def validate(self, *, restore: bool = False) -> None:
+        """`restore=True`: a snapshot load needs no kernel (nothing boots)."""
+        if not self.kernel and not restore:
             raise SandboxError("FirecrackerConfig.kernel is empty (HARNESS_KERNEL)")
         if not self.rootfs:
             raise SandboxError("FirecrackerConfig.rootfs is empty (HARNESS_ROOTFS)")
@@ -175,6 +241,78 @@ class FirecrackerConfig:
             raise SandboxError("vcpus >= 1, mem_mib >= 128, workspace_mib >= 1 required")
         if self.guest_cid is not None and self.guest_cid < MIN_GUEST_CID:
             raise SandboxError(f"guest_cid must be >= {MIN_GUEST_CID}")
+
+    @property
+    def base_snapshot_dir(self) -> Path:
+        return Path(self.vm_cache) / BASE_DIR_NAME
+
+
+# ------------------------------------------------------------ identities
+
+_FC_VERSION_CACHE: dict[str, str] = {}
+_SHA_CACHE: dict[tuple, str] = {}
+
+
+def firecracker_version(binary: str) -> str:
+    """`v1.17.0` from `firecracker --version` ("Firecracker v1.17.0"), cached
+    per binary path. SandboxError when the binary cannot say."""
+    if binary in _FC_VERSION_CACHE:
+        return _FC_VERSION_CACHE[binary]
+    try:
+        res = subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise SandboxError(f"cannot run {binary} --version: {exc}") from exc
+    m = _VERSION_RE.search(res.stdout + res.stderr)
+    if res.returncode != 0 or not m:
+        raise SandboxError(f"{binary} --version: unexpected output {res.stdout!r}")
+    _FC_VERSION_CACHE[binary] = m.group(0)
+    return m.group(0)
+
+
+def sha256_file(path: str | Path) -> str:
+    """sha256 of a file, cached by (path, size, mtime) for the process."""
+    p = Path(path)
+    st = p.stat()
+    key = (str(p.resolve()), st.st_size, st.st_mtime_ns)
+    if key not in _SHA_CACHE:
+        h = hashlib.sha256()
+        with open(p, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+        _SHA_CACHE[key] = h.hexdigest()
+    return _SHA_CACHE[key]
+
+
+def image_version_from_shas(kernel_sha256: str, rootfs_sha256: str) -> str:
+    """Same formula as harness/image/build.sh `version`:
+    first 16 hex of sha256("<kernel sha>\\n<rootfs sha>\\n")."""
+    blob = f"{kernel_sha256}\n{rootfs_sha256}\n".encode()
+    return hashlib.sha256(blob).hexdigest()[:16]
+
+
+def image_version(config: FirecrackerConfig) -> str:
+    """The image a snapshot must have been taken from. In order: the config /
+    HARNESS_IMAGE_VERSION, the `IMAGE_VERSION` file next to the rootfs (written
+    by `make image`), else computed from the kernel and rootfs sha256 (slow
+    once per process: hashes ~350 MiB)."""
+    if config.image_version:
+        return config.image_version
+    if config.rootfs:
+        side = Path(config.rootfs).resolve().parent / IMAGE_VERSION_FILE
+        try:
+            text = side.read_text().strip()
+            if text:
+                return text
+        except OSError:
+            pass
+    if config.kernel and config.rootfs and Path(config.kernel).is_file() and Path(config.rootfs).is_file():
+        return image_version_from_shas(sha256_file(config.kernel), sha256_file(config.rootfs))
+    raise SandboxError("image version unknown: set HARNESS_IMAGE_VERSION or put "
+                       f"{IMAGE_VERSION_FILE} next to the rootfs")
+
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
 
 
 def _fits_sun_path(path: str) -> bool:
@@ -223,9 +361,10 @@ class _UnixHTTPConnection(http.client.HTTPConnection):
 
 
 class FirecrackerSandbox(_SandboxBase):
-    """One microVM. `start(session_dir)`, `stop()`, `is_alive()` are the
-    Sandbox interface; the rest is for the worker and the tests. A stopped
-    sandbox may be started again (a fresh VM on the same workspace.img).
+    """One microVM. `start`/`restore`, `snapshot`, `stop`, `is_alive`,
+    `has_snapshot` are the Sandbox interface; the rest is for the worker and
+    the tests. A stopped or snapshotted sandbox may be started or restored
+    again (a fresh Firecracker process on the same workspace.img).
     `config` defaults to the HARNESS_* environment (FirecrackerConfig.from_env)."""
 
     def __init__(self, config: FirecrackerConfig | None = None):
@@ -241,41 +380,31 @@ class FirecrackerSandbox(_SandboxBase):
         self.guest_cid: int | None = None
         self._proc: subprocess.Popen | None = None
         self._last_returncode: int | None = None
+        # M3: timings for the worker's `vm{op, source, ms}` host event (§6)
+        self.last_restore_ms: float | None = None
+        self.last_snapshot_ms: float | None = None
+        self.last_boot_ms: float | None = None
+        self.last_vm_event: dict | None = None
 
-    # ------------------------------------------------------------------ API
+    # ------------------------------------------------------------ interface
 
     def start(self, session_dir) -> None:
+        """Cold boot from the rootfs (M1; the M3 fallback when no snapshot)."""
         if self.is_alive():
             raise SandboxError("sandbox already started")
         self._proc = None
         self.config.validate()
-        self.session_dir = Path(session_dir)
-        self.vm_dir = self.session_dir / "vm"
-        ipc_dir = self.session_dir / "ipc"
-        self.vm_dir.mkdir(parents=True, exist_ok=True)
-        ipc_dir.mkdir(parents=True, exist_ok=True)
-
-        self.api_socket = self.vm_dir / API_SOCK_NAME
-        self.vsock_uds = ipc_dir / VSOCK_NAME
-        self.workspace_image = self.vm_dir / WORKSPACE_IMG_NAME
-        self.log_path = Path(self.config.log_path) if self.config.log_path else self.vm_dir / LOG_NAME
-        self.metrics_path = (
-            Path(self.config.metrics_path) if self.config.metrics_path else self.vm_dir / METRICS_NAME
-        )
-        self.instance_id = instance_id(self.session_dir.name)
+        self._prepare(Path(session_dir))
         self.guest_cid = (
             self.config.guest_cid
             if self.config.guest_cid is not None
             else derive_guest_cid(self.session_dir.name)
         )
-
         self._ensure_workspace_image()
-        # Firecracker binds both sockets itself; stale files make it fail.
-        _unlink(self.api_socket)
-        _unlink(self.vsock_uds)
-        self.log_path.touch(exist_ok=True)
-        self.metrics_path.touch(exist_ok=True)
+        self._link_rootfs()
+        self._fresh_runtime_files()
 
+        t0 = time.monotonic()
         self._launch()
         try:
             self._wait_for_api()
@@ -283,6 +412,89 @@ class FirecrackerSandbox(_SandboxBase):
         except BaseException:
             self._kill()
             raise
+        self.last_boot_ms = _ms_since(t0)
+        self.last_vm_event = {"op": "boot", "source": "rootfs", "ms": self.last_boot_ms}
+
+    def restore(self, session_dir, snapshot_dir=None) -> None:
+        """Start from a snapshot: `snapshot_dir=None` -> the BASE snapshot in
+        `{vm_cache}/base`, else a per-session snapshot. A new Firecracker
+        process with cwd = {session_dir}/vm loads it and resumes the VM.
+        SandboxError (before anything is launched) when the snapshot is
+        missing or was taken from another image / Firecracker version; the
+        worker then falls back to `start()`."""
+        if self.is_alive():
+            raise SandboxError("sandbox already started")
+        self._proc = None
+        self.config.validate(restore=True)
+        source = "base" if snapshot_dir is None else "session"
+        snap = self.config.base_snapshot_dir if snapshot_dir is None else Path(snapshot_dir)
+        meta = self._check_snapshot(snap, source)
+
+        self._prepare(Path(session_dir))
+        self.guest_cid = int(meta.get("guest_cid") or BASE_GUEST_CID)
+        self._ensure_workspace_image()
+        want = meta.get("workspace_bytes")
+        if source == "base" and want and self.workspace_image.stat().st_size != int(want):
+            # The guest's virtio-blk capacity is part of the vmstate; a
+            # different-sized image would not mount. A rootfs boot reads it fresh.
+            raise SandboxError(
+                f"workspace.img is {self.workspace_image.stat().st_size} bytes, the base "
+                f"snapshot was taken with {want} (rebuild the base or use start())")
+        self._link_rootfs()
+        self._fresh_runtime_files()
+
+        body: dict = {
+            "snapshot_path": str((snap / SNAPSHOT_STATE_NAME).absolute()),
+            "mem_backend": {"backend_type": "File",
+                            "backend_path": str((snap / SNAPSHOT_MEM_NAME).absolute())},
+            "resume_vm": True,
+        }
+        if self.config.vsock_override:
+            body["vsock_override"] = {"uds_path": self._vsock_rel()}
+
+        t0 = time.monotonic()
+        self._launch()
+        try:
+            self._wait_for_api()
+            for method, path in RESTORE_ORDER:
+                self._request(method, path, body)
+        except BaseException:
+            self._kill()
+            raise
+        self.last_restore_ms = _ms_since(t0)
+        self.last_vm_event = {"op": "restore", "source": source, "ms": self.last_restore_ms}
+        if source == "session":
+            # A session snapshot is single-use: the VM now runs on and changes
+            # workspace.img, so restoring the same vmstate again would hand the
+            # guest a page cache that no longer matches the disk.
+            meta_path = snap / META_NAME
+            try:
+                os.replace(meta_path, meta_path.with_name(META_NAME + CONSUMED_SUFFIX))
+            except OSError:
+                pass
+
+    def snapshot(self, snapshot_dir) -> None:
+        """Pause the VM, write a full snapshot (vmstate + mem + META.json) into
+        `snapshot_dir` (normally {session_dir}/vm/snapshot), then kill the
+        process. Files are written to a sibling staging dir and swapped in, so
+        a snapshot this VM was restored from is never truncated under it."""
+        meta = {
+            "format": SNAPSHOT_FORMAT,
+            "image_version": image_version(self.config),
+            "firecracker_version": self._fc_version(),
+            "guest_cid": self.guest_cid,
+            "session": self.session_dir.name if self.session_dir else None,
+        }
+        self._snapshot_into(Path(snapshot_dir), META_NAME, meta, source="session")
+
+    def has_snapshot(self, snapshot_dir=None) -> bool:
+        source = "base" if snapshot_dir is None else "session"
+        snap = self.config.base_snapshot_dir if snapshot_dir is None else Path(snapshot_dir)
+        try:
+            self._check_snapshot(snap, source)
+        except SandboxError:
+            return False
+        return True
 
     def stop(self) -> None:
         """Graceful: SendCtrlAltDel (the guest init syncs /workspace and powers
@@ -290,6 +502,7 @@ class FirecrackerSandbox(_SandboxBase):
         proc = self._proc
         if proc is None:
             return
+        t0 = time.monotonic()
         if proc.poll() is None:
             try:
                 self._request("PUT", "/actions", {"action_type": "SendCtrlAltDel"})
@@ -302,6 +515,7 @@ class FirecrackerSandbox(_SandboxBase):
         self._last_returncode = proc.returncode
         self._proc = None
         self._cleanup_sockets()
+        self.last_vm_event = {"op": "destroy", "source": "session", "ms": _ms_since(t0)}
 
     def is_alive(self) -> bool:
         return self._proc is not None and self._proc.poll() is None
@@ -331,7 +545,131 @@ class FirecrackerSandbox(_SandboxBase):
             raise SandboxError("sandbox not started")
         return self.vsock_uds.with_name(f"{self.vsock_uds.name}_{port}")
 
+    def flush_metrics(self) -> dict | None:
+        """FlushMetrics, then the last JSON line of metrics.json (deltas since
+        the previous flush), or None when there is none yet."""
+        self._request("PUT", "/actions", {"action_type": "FlushMetrics"})
+        try:
+            lines = self.metrics_path.read_text().splitlines()
+        except OSError:
+            return None
+        for line in reversed(lines):
+            line = line.strip()
+            if line:
+                try:
+                    return json.loads(line)
+                except ValueError:
+                    return None
+        return None
+
     # ------------------------------------------------------------ internals
+
+    def _prepare(self, session_dir: Path) -> None:
+        self.session_dir = session_dir
+        self.vm_dir = session_dir / "vm"
+        ipc_dir = session_dir / "ipc"
+        self.vm_dir.mkdir(parents=True, exist_ok=True)
+        ipc_dir.mkdir(parents=True, exist_ok=True)
+        self.api_socket = self.vm_dir / API_SOCK_NAME
+        self.vsock_uds = ipc_dir / VSOCK_NAME
+        self.workspace_image = self.vm_dir / WORKSPACE_IMG_NAME
+        self.log_path = Path(self.config.log_path) if self.config.log_path else self.vm_dir / LOG_NAME
+        self.metrics_path = (
+            Path(self.config.metrics_path) if self.config.metrics_path else self.vm_dir / METRICS_NAME
+        )
+        self.instance_id = instance_id(session_dir.name)
+
+    def _fresh_runtime_files(self) -> None:
+        # Firecracker binds both sockets itself; stale files make it fail.
+        _unlink(self.api_socket)
+        _unlink(self.vsock_uds)
+        self.log_path.touch(exist_ok=True)
+        self.metrics_path.touch(exist_ok=True)
+
+    def _vsock_rel(self) -> str:
+        """`../ipc/v.sock`: relative to the Firecracker cwd, recorded as such
+        in snapshots, so the base snapshot resolves per session."""
+        return os.path.relpath(str(self.vsock_uds), str(self.vm_dir))
+
+    def _link_rootfs(self) -> None:
+        """{vm}/rootfs.ext4 -> the configured rootfs: the drive path recorded
+        in a snapshot is the relative name, wherever the image lives."""
+        link = self.vm_dir / ROOTFS_LINK_NAME
+        target = str(Path(self.config.rootfs).absolute())
+        try:
+            if link.is_symlink() and os.readlink(link) == target:
+                return
+        except OSError:
+            pass
+        _unlink(link)
+        os.symlink(target, link)
+
+    def _fc_version(self) -> str:
+        return self.config.firecracker_version or firecracker_version(self.config.firecracker_bin)
+
+    def _check_snapshot(self, snap: Path, source: str) -> dict:
+        meta_name = MANIFEST_NAME if source == "base" else META_NAME
+        for name in (SNAPSHOT_STATE_NAME, SNAPSHOT_MEM_NAME):
+            p = snap / name
+            if not p.is_file() or p.stat().st_size == 0:
+                raise SandboxError(f"no {source} snapshot: {p} missing")
+        try:
+            meta = json.loads((snap / meta_name).read_text())
+        except (OSError, ValueError) as exc:
+            raise SandboxError(f"no {source} snapshot: {snap / meta_name}: {exc}") from exc
+        if not isinstance(meta, dict):
+            raise SandboxError(f"{snap / meta_name} is not an object")
+        if meta.get("format", SNAPSHOT_FORMAT) != SNAPSHOT_FORMAT:
+            raise SandboxError(f"{source} snapshot format {meta.get('format')} != {SNAPSHOT_FORMAT}")
+        want_img = image_version(self.config)
+        if meta.get("image_version") != want_img:
+            raise SandboxError(
+                f"{source} snapshot image_version {meta.get('image_version')!r} != "
+                f"current {want_img!r} (rebuild with `make snapshot`)")
+        want_fc = self._fc_version()
+        if meta.get("firecracker_version") != want_fc:
+            raise SandboxError(
+                f"{source} snapshot firecracker_version {meta.get('firecracker_version')!r} "
+                f"!= current {want_fc!r}")
+        return meta
+
+    def _snapshot_into(self, dest: Path, meta_name: str, meta: dict, *, source: str) -> None:
+        if not self.is_alive():
+            raise SandboxError("snapshot: the VM is not running")
+        t0 = time.monotonic()
+        staging = dest.parent / f".{dest.name}.tmp"
+        shutil.rmtree(staging, ignore_errors=True)
+        staging.mkdir(parents=True)
+        bodies = {
+            "/vm": {"state": "Paused"},
+            "/snapshot/create": {
+                "snapshot_type": "Full",
+                # relative to the Firecracker cwd ({session_dir}/vm), M3-CONTRACTS §2
+                "snapshot_path": os.path.relpath(str(staging / SNAPSHOT_STATE_NAME), str(self.vm_dir)),
+                "mem_file_path": os.path.relpath(str(staging / SNAPSHOT_MEM_NAME), str(self.vm_dir)),
+            },
+        }
+        try:
+            for method, path in SNAPSHOT_ORDER:
+                self._request(method, path, bodies[path])
+        except SandboxError:
+            try:  # leave a usable VM behind if only the create failed
+                self._request("PATCH", "/vm", {"state": "Resumed"})
+            except SandboxError:
+                pass
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+        meta = dict(meta, created_ms=_now_ms())
+        _write_json(staging / meta_name, meta)
+        # The VM is paused and its block files fsynced by Firecracker: kill it.
+        proc = self._proc
+        self._kill()
+        self._last_returncode = proc.returncode if proc is not None else None
+        self._proc = None
+        self._cleanup_sockets()
+        _swap_dir(staging, dest)
+        self.last_snapshot_ms = _ms_since(t0)
+        self.last_vm_event = {"op": "snapshot", "source": source, "ms": self.last_snapshot_ms}
 
     def _ensure_workspace_image(self) -> None:
         img = self.workspace_image
@@ -375,14 +713,14 @@ class FirecrackerSandbox(_SandboxBase):
             "--metrics-path", str(self.metrics_path),
             *self.config.extra_args,
         ]
-        console = open(self.vm_dir / "console.log", "ab")
+        console = open(self.vm_dir / CONSOLE_NAME, "ab")
         try:
             self._proc = subprocess.Popen(
                 argv,
                 stdin=subprocess.DEVNULL,
                 stdout=console,         # the guest's ttyS0 (boot messages, init output)
                 stderr=subprocess.STDOUT,
-                cwd=str(self.vm_dir),
+                cwd=str(self.vm_dir),   # relative drive / vsock / snapshot paths resolve here
                 start_new_session=True,  # our SIGKILL never reaches the worker
             )
         except OSError as exc:
@@ -397,7 +735,7 @@ class FirecrackerSandbox(_SandboxBase):
             if self._proc.poll() is not None:
                 raise SandboxError(
                     f"firecracker exited with {self._proc.returncode} before the API came up "
-                    f"(see {self.vm_dir / 'console.log'})"
+                    f"(see {self.vm_dir / CONSOLE_NAME})"
                 )
             if self.api_socket.exists():
                 try:
@@ -407,7 +745,7 @@ class FirecrackerSandbox(_SandboxBase):
                     pass
             if time.monotonic() > deadline:
                 raise SandboxError(f"firecracker API socket {self.api_socket} not ready")
-            time.sleep(0.02)
+            time.sleep(0.002)
 
     def _configure(self) -> None:
         cfg = self.config
@@ -423,19 +761,19 @@ class FirecrackerSandbox(_SandboxBase):
             },
             "/drives/rootfs": {
                 "drive_id": "rootfs",
-                "path_on_host": str(Path(cfg.rootfs)),
+                "path_on_host": ROOTFS_LINK_NAME,      # symlink in the cwd
                 "is_root_device": True,
                 "is_read_only": True,
             },
             "/drives/workspace": {
                 "drive_id": "workspace",
-                "path_on_host": str(self.workspace_image),
+                "path_on_host": WORKSPACE_IMG_NAME,    # relative to the cwd
                 "is_root_device": False,
                 "is_read_only": False,
             },
             "/vsock": {
                 "guest_cid": self.guest_cid,
-                "uds_path": firecracker_path(self.vsock_uds, self.vm_dir),
+                "uds_path": self._vsock_rel(),
             },
             "/actions": {"action_type": "InstanceStart"},
         }
@@ -483,6 +821,130 @@ class FirecrackerSandbox(_SandboxBase):
         _unlink(self.vsock_uds)
 
 
+# ------------------------------------------------------- base snapshot build
+
+def _vsock_activity(metrics: dict | None) -> int:
+    """Guest vsock traffic in one flush window (Firecracker metrics are deltas)."""
+    if not metrics:
+        return 0
+    v = metrics.get("vsock") or {}
+    return sum(int(v.get(k) or 0) for k in
+               ("tx_queue_event_count", "tx_packets_count", "rx_packets_count"))
+
+
+def wait_guest_idle(sb: FirecrackerSandbox, *, timeout_s: float = 120.0, poll_s: float = 0.2,
+                    windows: int = 3, settle_s: float = 1.0, fixed_delay_s: float | None = None,
+                    log=None) -> str:
+    """Block until the guest sits in its `--idle-wait vsock` loop.
+
+    With no host listener on v.sock_5000, each 50 ms connect attempt is a
+    REQUEST the VMM answers with RST: vsock packets in every metrics window,
+    and nothing else in the guest touches vsock before hello. `windows`
+    consecutive windows with traffic -> idle; then `settle_s` for the rest of
+    the system to quiesce. `fixed_delay_s` skips detection (sleep only).
+    Returns how idleness was decided ("metrics" | "fixed")."""
+    say = log or (lambda *_: None)
+    if fixed_delay_s is not None:
+        deadline = time.monotonic() + fixed_delay_s
+        while time.monotonic() < deadline:
+            if not sb.is_alive():
+                raise SandboxError(f"VM exited during settle (see {sb.vm_dir / CONSOLE_NAME})")
+            time.sleep(0.05)
+        return "fixed"
+    deadline = time.monotonic() + timeout_s
+    streak = 0
+    sb.flush_metrics()               # discard the boot window
+    while time.monotonic() < deadline:
+        time.sleep(poll_s)
+        if not sb.is_alive():
+            raise SandboxError(f"VM exited before idle (see {sb.vm_dir / CONSOLE_NAME})")
+        act = _vsock_activity(sb.flush_metrics())
+        streak = streak + 1 if act > 0 else 0
+        say(f"vsock activity {act} (streak {streak}/{windows})")
+        if streak >= windows:
+            time.sleep(settle_s)
+            return "metrics"
+    raise SandboxError(
+        f"guest never reached idle-wait within {timeout_s}s (no vsock connect attempts; "
+        f"see {sb.vm_dir / CONSOLE_NAME}); retry with a fixed delay")
+
+
+def build_base_snapshot(config: FirecrackerConfig, cache_dir: str | Path | None = None, *,
+                        idle_timeout_s: float = 120.0, settle_s: float = 1.0,
+                        fixed_delay_s: float | None = None, keep_build_dir: bool = False,
+                        log=None) -> dict:
+    """Boot the rootfs in a scratch session dir under the cache, wait for the
+    guest's idle-wait, snapshot into `{cache}/base` (atomic swap) with
+    MANIFEST.json. Returns the manifest."""
+    say = log or (lambda *_: None)
+    cache = Path(cache_dir or config.vm_cache)
+    cache.mkdir(parents=True, exist_ok=True)
+    cfg = copy.deepcopy(config)
+    cfg.vm_cache = str(cache)
+    cfg.guest_cid = BASE_GUEST_CID
+    cfg.validate()
+    kernel_sha = sha256_file(cfg.kernel)
+    rootfs_sha = sha256_file(cfg.rootfs)
+    version = cfg.image_version or image_version(cfg)
+    computed = image_version_from_shas(kernel_sha, rootfs_sha)
+    if version != computed:
+        say(f"note: image_version {version} (configured / IMAGE_VERSION file) != "
+            f"computed {computed}; the configured one is recorded")
+    build_dir = cache / ".build-base"
+    shutil.rmtree(build_dir, ignore_errors=True)
+    sb = FirecrackerSandbox(cfg)
+    try:
+        say(f"booting rootfs in {build_dir}")
+        sb.start(build_dir)
+        say(f"booted in {sb.last_boot_ms} ms; waiting for the guest's idle-wait")
+        how = wait_guest_idle(sb, timeout_s=idle_timeout_s, settle_s=settle_s,
+                              fixed_delay_s=fixed_delay_s, log=say)
+        manifest = {
+            "format": SNAPSHOT_FORMAT,
+            "image_version": version,
+            "kernel_sha256": kernel_sha,
+            "rootfs_sha256": rootfs_sha,
+            "firecracker_version": sb._fc_version(),
+            "guest_cid": BASE_GUEST_CID,
+            "vcpus": cfg.vcpus,
+            "mem_mib": cfg.mem_mib,
+            "workspace_bytes": sb.workspace_image.stat().st_size,
+            "boot_args": cfg.boot_args,
+            "idle_detect": how,
+        }
+        sb._snapshot_into(cfg.base_snapshot_dir, MANIFEST_NAME, manifest, source="base")
+        manifest = json.loads((cfg.base_snapshot_dir / MANIFEST_NAME).read_text())
+        say(f"base snapshot written to {cfg.base_snapshot_dir} in {sb.last_snapshot_ms} ms")
+        return manifest
+    finally:
+        sb._kill()
+        if not keep_build_dir:
+            shutil.rmtree(build_dir, ignore_errors=True)
+
+
+# ------------------------------------------------------------- helpers
+
+def _ms_since(t0: float) -> float:
+    return round((time.monotonic() - t0) * 1000, 1)
+
+
+def _write_json(path: Path, obj: dict) -> None:
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(obj, indent=2, sort_keys=True) + "\n")
+    os.replace(tmp, path)
+
+
+def _swap_dir(staging: Path, dest: Path) -> None:
+    """Replace `dest` with `staging`. A running VM mapping the old `mem` keeps
+    its inode; nothing is truncated in place."""
+    old = dest.parent / f".{dest.name}.old"
+    shutil.rmtree(old, ignore_errors=True)
+    if dest.exists():
+        os.replace(dest, old)
+    os.replace(staging, dest)
+    shutil.rmtree(old, ignore_errors=True)
+
+
 def _copy_sparse(src: Path, dst: Path, chunk: int = 1 << 20) -> None:
     """Copy a file keeping its holes (shutil.copyfile would fill them)."""
     with open(src, "rb") as sf, open(dst, "wb") as df:
@@ -514,3 +976,45 @@ def _unlink(path: Path | None) -> None:
         path.unlink()
     except FileNotFoundError:
         pass
+
+
+# ------------------------------------------------------------------ CLI
+
+def main(argv: list[str] | None = None) -> int:
+    """`python -m app.host.sandbox.firecracker build-base|check-base` (also
+    run by harness/image/build_snapshot.py). Configuration from HARNESS_*."""
+    import argparse
+    ap = argparse.ArgumentParser(prog="firecracker-sandbox")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    b = sub.add_parser("build-base", help="build {HARNESS_VM_CACHE}/base")
+    b.add_argument("--cache", default=None, help="cache dir (default HARNESS_VM_CACHE)")
+    b.add_argument("--idle-timeout", type=float, default=120.0)
+    b.add_argument("--settle", type=float, default=1.0, help="seconds after idle is detected")
+    b.add_argument("--fixed-delay", type=float, default=None,
+                   help="skip vsock-metrics detection; snapshot after this many seconds")
+    b.add_argument("--keep-build-dir", action="store_true")
+    c = sub.add_parser("check-base", help="is the base snapshot usable with this config?")
+    c.add_argument("--cache", default=None)
+    args = ap.parse_args(argv)
+    cfg = FirecrackerConfig.from_env()
+    if args.cache:
+        cfg.vm_cache = args.cache
+    log = lambda m: print(f"[snapshot] {m}", file=sys.stderr, flush=True)  # noqa: E731
+    try:
+        if args.cmd == "build-base":
+            manifest = build_base_snapshot(
+                cfg, idle_timeout_s=args.idle_timeout, settle_s=args.settle,
+                fixed_delay_s=args.fixed_delay, keep_build_dir=args.keep_build_dir, log=log)
+            print(json.dumps(manifest, indent=2, sort_keys=True))
+            return 0
+        sb = FirecrackerSandbox(cfg)
+        meta = sb._check_snapshot(cfg.base_snapshot_dir, "base")
+        print(json.dumps(meta, indent=2, sort_keys=True))
+        return 0
+    except SandboxError as exc:
+        log(f"error: {exc}")
+        return 1
+
+
+if __name__ == "__main__":  # pragma: no cover
+    sys.exit(main())

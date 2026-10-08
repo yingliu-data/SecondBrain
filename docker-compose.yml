@@ -63,6 +63,17 @@ services:
     volumes:
       - ./agent-api/data:/root/agent-api/data   # Persistent data (logs, db, tenants.json)
       - /var/run/docker.sock:/var/run/docker.sock  # Auto-start local LLM on fallback
+      # Harness VM cache (HARNESS_VM_CACHE default): vmlinux, rootfs.ext4,
+      # IMAGE_VERSION, workspace-template.img and the base snapshot in base/.
+      # Read-write so `python -m app.host.sandbox.firecracker build-base` can
+      # (re)build base/ in place (harness/docs/RUNBOOK-M3.md).
+      - ~/data/SecondBrain/vm:/var/lib/secondbrain/vm
+    # Firecracker microVMs for engine `harness` (PLAN.md section 3, D18). KVM is
+    # required; vhost-vsock is not used by Firecracker's (userspace) vsock but is
+    # kept per the plan -- `modprobe vhost_vsock` on the host first (RUNBOOK-M1 §2).
+    devices:
+      - /dev/kvm:/dev/kvm
+      - /dev/vhost-vsock:/dev/vhost-vsock
     networks:
       - llm_internal
       - tunnel_network
