@@ -114,5 +114,46 @@ Types: `ready`, `delta`, `log`, `bulk_ref`. No `seq`, no `session_id`.
 1. The worker restores the base snapshot on the same `workspace.img`.
 2. The worker sends `hello{resume: true}`.
 3. The worker streams the acked event log back to the guest on :5001.
-4. Open host-originated calls are recorded `op_state{lost}`.
+4. Open calls (every side) are recorded `op_state{lost}` with an error result.
 5. `max_resumes` is 1.
+
+### As built in M3 (guest side)
+
+- Park: the guest also parks while only host-originated operations or open
+  questions are pending. Running guest operations get `park_grace_s`, then are
+  killed (`op_state{killed}`). After `checkpoint` + `parked` are acked the
+  guest closes :5000 and polls it every 50 ms: **the worker must stop
+  accepting :5000 connections when it receives `parked` (before acking it)**,
+  or the guest reconnects at once. Resume is an ordinary reconnect (section 4).
+- Death: a fresh guest sends no handshake (it has no session yet); its first
+  line is the ack of the resume hello's cseq. It takes that cseq as its floor:
+  controls numbered below it are never delivered to it (the host should treat
+  them as delivered and re-send anything that still matters, e.g. a task not
+  yet in the log, with new cseqs after the hello). An `ack_seq` the host sends
+  before the guest has fetched the log is ignored (logged). After the log
+  return the guest's next event is the returned `last_seq + 1`.
+
+## 7. Bulk channel (:5001)
+
+Framing: `protocol/bulk.py`. The guest connects; one transfer per connection;
+every line is UTF-8 JSON + `"\n"`, at most 64 KiB.
+
+| op | guest sends | host answers |
+|---|---|---|
+| `put` | `{"op":"put","session_id","kind","path","bytes","sha256"}` then exactly `bytes` raw bytes | `{"ok":true}` or `{"ok":false,"error"}` after verifying bytes and sha256 |
+| `get` | `{"op":"get","session_id","kind":"log","after_seq"}` | `{"ok":true,"bytes","sha256","last_seq"}` then exactly `bytes` of JSONL (the acked events with seq > after_seq, in order), or `{"ok":false,"error"}` |
+
+Put kinds and where the host stores them: `spill` (path `.spill/<call_id>.txt`
+→ `workspace/.spill/`), `workspace` (the file's path under /workspace →
+`workspace/`), `manifest` (`manifest.json` → `workspace/manifest.json`). Paths
+are relative with no empty, `.` or `..` part.
+
+Who uses it: a spill file is put when the tool result is produced (before its
+`bulk` event); at settle every changed workspace file under 8 MiB, then the
+manifest (`{"version":1,"files":[{path,bytes,sha256,mode}],"total_bytes"}`,
+sorted by path, canonical JSON); on a death resume one `get` with
+`after_seq: 0`. The guest checks a `get` payload's byte count, sha256 and that
+its seqs run gapless from `after_seq + 1` to `last_seq` (an empty log must
+answer `last_seq` = `after_seq`). A host that refuses a `put` header may reply
+and close without reading the payload; the guest reads the reply even when
+its payload write fails.

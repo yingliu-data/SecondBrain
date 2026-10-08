@@ -21,6 +21,22 @@ Test controls: send(type, body) sends the next control; drop_link() closes
 the current connection; pause_acks()/resume_acks(); redeliver(msg) writes a
 control line again (a duplicate on the wire); wait_for(type, timeout) and the
 other wait_* helpers block on the state the guest produces.
+
+M3:
+  - bulk (default on): a :5001 server (`{dir}/v.sock_5001`) speaking
+    protocol/bulk.py: puts are verified (bytes, sha256) and kept in
+    `bulk_files[(kind, path)]` (latest bytes) and `bulk_puts` (headers, in
+    order); `get{log}` serves the delivered events with seq <= the highest
+    ack sent (or `log_override` when a test sets it); `bulk_gets` records the
+    get headers.
+  - park: with close_on_parked (default on) the host stops listening on
+    :5000 when a `parked` event arrives, before acking it (what the worker
+    must do so the guest's idle loop does not reconnect before the
+    snapshot); `listen()` opens the listener again (the restore).
+  - a side result of HOLD (or a callable returning HOLD) is not answered:
+    the test sends the side_result itself later.
+  - a guest killed and replaced: wait_connected(count=n) for the new one,
+    then send("hello", {..., "resume": True}) with the next cseq.
 """
 from __future__ import annotations
 
@@ -28,15 +44,19 @@ import os
 import socket
 import threading
 
+from protocol import bulk as bulkproto
 from protocol import messages
 from protocol.messages import Inbox, Outbox, ProtocolError, encode
 
 CONTROL_PORT = 5000
+BULK_PORT = 5001
+HOLD = object()          # a side result the test will send itself
 
 
 class FakeHost:
     def __init__(self, dir, hello_body: dict, side_results=None, auto_ack: bool = True,
-                 port: int = CONTROL_PORT, auto_hello: bool = True):
+                 port: int = CONTROL_PORT, auto_hello: bool = True, bulk: bool = True,
+                 close_on_parked: bool = True):
         self.dir = str(dir)
         self.port = port
         self.path = os.path.join(self.dir, f"v.sock_{port}")
@@ -65,35 +85,84 @@ class FakeHost:
         self._listener: socket.socket | None = None
         self._thread: threading.Thread | None = None
 
+        # M3
+        self.bulk = bulk
+        self.bulk_path = os.path.join(self.dir, f"v.sock_{BULK_PORT}")
+        self.bulk_files: dict = {}          # (kind, path) -> bytes (latest put)
+        self.bulk_puts: list[dict] = []     # put headers, in order
+        self.bulk_gets: list[dict] = []     # get headers, in order
+        self.log_override: list | None = None
+        self.close_on_parked = close_on_parked
+        self.listening = False
+        self._bulk_listener: socket.socket | None = None
+        self._bulk_thread: threading.Thread | None = None
+
     # ------------------------------------------------------------ lifecycle
 
     def start(self) -> "FakeHost":
+        self.listen()
+        if self.bulk:
+            try:
+                os.unlink(self.bulk_path)
+            except FileNotFoundError:
+                pass
+            self._bulk_listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self._bulk_listener.bind(self.bulk_path)
+            self._bulk_listener.listen(8)
+            self._bulk_thread = threading.Thread(target=self._bulk_accept_loop,
+                                                 name="fake-host-bulk", daemon=True)
+            self._bulk_thread.start()
+        return self
+
+    def listen(self) -> None:
+        """Open the :5000 listener (again, after close_listener)."""
         try:
             os.unlink(self.path)
         except FileNotFoundError:
             pass
-        self._listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self._listener.bind(self.path)
-        self._listener.listen(4)
-        self._thread = threading.Thread(target=self._accept_loop, name="fake-host", daemon=True)
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(self.path)
+        listener.listen(4)
+        self._listener = listener
+        self.listening = True
+        self._thread = threading.Thread(target=self._accept_loop, args=(listener,),
+                                        name="fake-host", daemon=True)
         self._thread.start()
-        return self
+
+    def close_listener(self) -> None:
+        """Stop accepting :5000 connections; the open one is untouched."""
+        listener, self._listener = self._listener, None
+        self.listening = False
+        if listener is not None:
+            try:
+                listener.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            listener.close()
+        try:
+            os.unlink(self.path)
+        except FileNotFoundError:
+            pass
 
     def stop(self) -> None:
         self._stop.set()
         self.drop_link()
-        if self._listener is not None:
+        thread = self._thread
+        self.close_listener()
+        if thread is not None:
+            thread.join(2.0)
+        if self._bulk_listener is not None:
             try:
-                self._listener.shutdown(socket.SHUT_RDWR)
+                self._bulk_listener.shutdown(socket.SHUT_RDWR)
             except OSError:
                 pass
-            self._listener.close()
-        if self._thread is not None:
-            self._thread.join(2.0)
-        try:
-            os.unlink(self.path)
-        except FileNotFoundError:
-            pass
+            self._bulk_listener.close()
+            if self._bulk_thread is not None:
+                self._bulk_thread.join(2.0)
+            try:
+                os.unlink(self.bulk_path)
+            except FileNotFoundError:
+                pass
 
     def __enter__(self):
         return self.start()
@@ -223,10 +292,10 @@ class FakeHost:
             self.acked_seq = max(self.acked_seq, n)
         self._write(messages.ack(self.session_id, ack_seq=n))
 
-    def _accept_loop(self) -> None:
+    def _accept_loop(self, listener) -> None:
         while not self._stop.is_set():
             try:
-                conn, _ = self._listener.accept()
+                conn, _ = listener.accept()
             except OSError:
                 return
             with self._cv:
@@ -315,6 +384,8 @@ class FakeHost:
             if verdict == "new":
                 self.events.append(ev)
             self._cv.notify_all()
+        if verdict == "new" and ev["type"] == "parked" and self.close_on_parked:
+            self.close_listener()        # before the ack: no reconnect until the "restore"
         if verdict == "new" and ev["type"] == "tool_call" and ev["body"].get("side") != "guest":
             self._answer_tool_call(ev["body"])
         if self.auto_ack and verdict != "gap":
@@ -326,6 +397,8 @@ class FakeHost:
             result = self.side_results(call)
         else:
             result = self.side_results.get(call_id)
+        if result is HOLD:
+            return
         if result is None:
             result = {"content": f"fake host: no result scripted for {call_id}", "ok": False}
         body = {"call_id": call_id, "side": call["side"],
@@ -338,3 +411,72 @@ class FakeHost:
         with self._cv:
             self.errors.append(text)
             self._cv.notify_all()
+
+    # ------------------------------------------------------------ bulk (:5001)
+
+    def wait_bulk(self, kind: str, path: str | None = None, timeout: float = 5.0) -> bytes:
+        """The bytes of the first put of `kind` (and `path`)."""
+        def found():
+            for (k, p), data in self.bulk_files.items():
+                if k == kind and (path is None or p == path):
+                    return data
+            return None
+        with self._cv:
+            if not self._cv.wait_for(lambda: found() is not None, timeout):
+                raise TimeoutError(f"no bulk put {kind} {path} within {timeout}s")
+            return found()
+
+    def _bulk_accept_loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                conn, _ = self._bulk_listener.accept()
+            except OSError:
+                return
+            threading.Thread(target=self._bulk_serve, args=(conn,), daemon=True).start()
+
+    def _bulk_serve(self, conn: socket.socket) -> None:
+        try:
+            rfile = conn.makefile("rb")
+            try:
+                header = bulkproto.check_header(bulkproto.decode_line(bulkproto.read_line(rfile)))
+                if header["session_id"] != self.session_id:
+                    raise bulkproto.BulkError(f"foreign session {header['session_id']!r}")
+            except bulkproto.BulkError as exc:
+                self._error(f"bulk: {exc}")
+                conn.sendall(bulkproto.encode_line(bulkproto.error_reply(str(exc))))
+                return
+            if header["op"] == "put":
+                try:
+                    data = bulkproto.read_exact(rfile, header["bytes"])
+                    if bulkproto.sha256_hex(data) != header["sha256"]:
+                        raise bulkproto.BulkError("sha256 mismatch")
+                except bulkproto.BulkError as exc:
+                    self._error(f"bulk put: {exc}")
+                    conn.sendall(bulkproto.encode_line(bulkproto.error_reply(str(exc))))
+                    return
+                with self._cv:
+                    self.bulk_puts.append(header)
+                    self.bulk_files[(header["kind"], header["path"])] = data
+                    self._cv.notify_all()
+                conn.sendall(bulkproto.encode_line(bulkproto.ok_reply()))
+                return
+            with self._cv:
+                self.bulk_gets.append(header)
+                if self.log_override is not None:
+                    events = list(self.log_override)
+                else:
+                    events = [e for e in self.events if e["seq"] <= self.acked_seq]
+            after = header["after_seq"]
+            events = [e for e in events if e["seq"] > after]
+            payload = "".join(encode(e) for e in events).encode("utf-8")
+            last = events[-1]["seq"] if events else after
+            conn.sendall(bulkproto.encode_line(bulkproto.ok_reply(
+                bytes=len(payload), sha256=bulkproto.sha256_hex(payload), last_seq=last)))
+            conn.sendall(payload)
+        except OSError:
+            pass
+        finally:
+            try:
+                conn.close()
+            except OSError:
+                pass

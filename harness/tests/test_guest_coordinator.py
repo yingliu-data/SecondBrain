@@ -941,12 +941,20 @@ def test_second_hello_is_fatal():
     check_log(scn)
 
 
-def test_park_is_logged_and_ignored_in_m1():
+def test_park_between_tasks_parks_at_once_and_the_link_resumes_it():
+    """M3: no turn in flight -> checkpoint + parked straight away; a task
+    that lands while parked waits for the link to come back."""
     scn = Scenario(script=[text("ok")])
     scn.control("park", {"reason": "idle"})
     scn.task("x")
+    scn.start()
+    scn.wait_event("input")
+    assert scn.types() == ["session_start", "clock", "checkpoint", "parked", "input"]
+    assert scn.coord.parked
+    scn.inbound.put(("link", "down"))
+    scn.inbound.put(("link", "up"))
     scn.run()
-    assert any("park" in b["message"] for b in scn.transport.live_of("log"))
+    assert scn.types()[-3:] == ["turn_start", "llm_response", "settle"]
     check_log(scn)
 
 

@@ -294,6 +294,16 @@ class Outbox:
         _check_ack_value(self.field, n)
         return [m for m in self._pending if m[self.field] > n]
 
+    def resume_from(self, n: int) -> None:
+        """Continue a stream whose messages 1..n the peer already holds (a
+        fresh process taking over a session after a log return, PROTOCOL.md
+        section 6): the next message is n + 1. Only on an unused Outbox."""
+        _check_ack_value(self.field, n)
+        if self.highest_sent or self._pending:
+            raise ProtocolError(f"resume_from({n}) on an outbox that already sent "
+                                f"{self.field} {self.highest_sent}")
+        self._reserved = self.highest_sent = self.highest_acked = n
+
     @property
     def pending(self) -> list[dict]:
         return list(self._pending)
@@ -322,6 +332,17 @@ class Inbox:
             self.last_delivered = n
             return "new"
         return "gap"
+
+    def resume_from(self, n: int) -> None:
+        """Treat 1..n as delivered: the next expected number is n + 1. A
+        fresh guest process learns its cseq floor from the resume hello's own
+        cseq (docs/M3-CONTRACTS.md section 4). Only before anything was
+        delivered."""
+        _check_ack_value(self.field, n)
+        if self.last_delivered:
+            raise ProtocolError(f"resume_from({n}) after {self.field} "
+                                f"{self.last_delivered} was delivered")
+        self.last_delivered = n
 
     def ack_value(self) -> int:
         """Alias of `last_delivered`: the value to put in the ack."""

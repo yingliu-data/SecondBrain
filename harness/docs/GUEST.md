@@ -186,3 +186,68 @@ on the host sets it false), `limits.context_window_tokens` (32768),
 - The host declares `HARNESS_CONTEXT_WINDOW_TOKENS`, `HARNESS_RESERVE_TOKENS`
   and `LLM_STREAM` in hello; `HARNESS_TOKEN_BUDGET` configures only the proxy,
   which answers 402 once a session's `total_tokens` reach the budget.
+
+## M3 as built (park, resume, bulk, manifest)
+
+Contracts: docs/M3-CONTRACTS.md. What the guest does, and the refinements:
+
+- **Flags** (`guest.main`): `--idle-wait vsock` (the snapshot point: the
+  transport tries :5000 every 50 ms, silently, no backoff; idle-wait ends with
+  the first line the host sends, so any connect error *or* a reset right after
+  connecting, as a Firecracker snapshot causes, goes back to polling);
+  `--idle-wait FILE` (the M1 form, kept); `--mount-workspace DEV` (after
+  idle-wait, before hello is read: `mount -o noatime DEV WORKSPACE` unless the
+  workspace is already a mountpoint; a missing DEV is skipped; a failed mount
+  is logged and the guest goes on); `--exit-on-park` (exit 4 once parked);
+  `--multi-task` (stay up after a settle; `Coordinator.run()` handles one task
+  per call). Without `--multi-task` the guest still exits after one task.
+- **Limits**: `park_grace_s` (default 30) joins `hello.config.limits`.
+- **Park** (`Coordinator`): honoured when no provider call is in flight and no
+  guest operation runs; host/device/mcp calls and open questions do not hold
+  it. While a park waits, no turn starts. Guest ops still running after
+  `park_grace_s` → `clock{grace_park}` → `ops.abort_all()` → `op_state{killed}`
+  + error `tool_result` (+ `wake` when that ends the round). Then: every timer
+  paused (remaining time kept), `checkpoint{through_seq = last seq,
+  state_hash = fold.state_hash(state), prev_hash}` (first: `hash_value(the
+  session_start event)`, then the previous checkpoint's `state_hash`),
+  `parked{checkpoint_seq, reason}`, wait (≤ 60 s) for the host's ack of
+  `parked`, `Transport.park()` (close, back to idle-wait). The next
+  `("link", "up")` resumes: timers re-armed with what they had left, a
+  deferred turn starts (nothing is emitted for the resume itself). A second
+  `park` while parking is ignored. With `--exit-on-park` the process exits 4
+  instead of going idle. LocalSandbox's SIGSTOP/SIGCONT works on the same
+  path (the stopped process resumes polling and reconnects).
+- **Death resume**: a fresh process gets `hello{resume: true}`; its transport
+  takes the hello's cseq as its floor (`Inbox.resume_from(cseq - 1)`; controls
+  that arrived before the hello with other cseqs are never delivered). main
+  then does a bulk `get{log, after_seq: 0}` (3 attempts; failure → exit 2),
+  moves any older local buffer to `events.before-resume-N`, writes the
+  returned events as the new buffer (all marked acked), `Transport.seed_seq
+  (last_seq)` (next event = last_seq + 1) and `Coordinator.restore(events)`:
+  the log is folded into a fresh State and the loop's bookkeeping rebuilt (the
+  open task, the round, side calls, questions, attachments, user memory,
+  doom-loop counts; each regular turn's preamble text is rebuilt and kept when
+  its hash matches `turn_start.preamble_hash`). `run()` then emits
+  `clock{host_hello, at}` (when hello.at > 0), `error{transient, ref: turn}`
+  for a turn whose response never came, `op_state{lost}` + `tool_result
+  {"error: operation lost (VM restarted)"}` per open call, and wakes:
+  `wake{tool_result}` + the next turn when a round was open; the settle the
+  dead guest owed when the last recorded response had no tool calls; a new
+  turn otherwise. The wall clock gets what the task had left. No second
+  `session_start`. A returned log whose last event is `parked` (a fresh
+  process after `--exit-on-park`) loses nothing: side calls and questions wait
+  again with fresh timeouts. The usage correction restarts at 1.0.
+- **Bulk** (`guest/bulk.py`, :5001, one transfer per connection): `BulkClient
+  (connector, session_id, port).put(kind, path, data)` / `.get_log(after_seq)`
+  (checks bytes, sha256 and gapless seqs). Spill files are put by the
+  operation manager's worker thread as `spill` `.spill/{call_id}.txt` before
+  the result is posted; the `bulk` event and `tool_result.spill_ref` carry that
+  relative path (the local copy stays in `.harness/spill/`). An upload failure
+  is logged; the event is still written.
+- **Settle manifest**: `settle.manifest = guest.bulk.settle_manifest(...)`:
+  regular files under the workspace minus `.spill/`, `.git/` and the guest's
+  own `.harness/` (top level), symlinks skipped; each file whose sha256 the
+  host does not have yet (tracked per process, recovered from the last
+  `settle.manifest` after a restore) and under 8 MiB is put as `workspace`,
+  then the manifest as `manifest` `manifest.json` (canonical JSON: sorted keys,
+  no spaces). Upload failures are logged; the settle still carries the manifest.

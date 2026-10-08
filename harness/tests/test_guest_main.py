@@ -137,7 +137,7 @@ def test_main_exit_2_on_bad_connect_spec(tmp_path):
 def test_main_hands_hello_config_to_run_session(tmp_path, monkeypatch):
     seen = {}
 
-    def fake_run_session(cfg, inbound, transport, log_dir, workspace, image_version="dev"):
+    def fake_run_session(cfg, inbound, transport, log_dir, workspace, image_version="dev", **kw):
         seen.update(cfg=cfg, log_dir=log_dir, workspace=workspace,
                     connected=transport.connected, session=transport.session_id)
         return 0

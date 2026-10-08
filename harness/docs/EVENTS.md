@@ -51,6 +51,26 @@ strings. Times (`at`, `deadline`) are int milliseconds since the epoch.
 | `error` | `class` in `transient`/`overflow`/`budget`/`limit`/`protocol`/`fatal`, `message` str, `retry` bool (whether the harness will retry), `ref`? str | any |
 | `settle` | `input_id` str (the task's), `outcome` in `done`/`failed`/`timeout`/`escalated`, `answer` str, `usage` dict (totals), `manifest` dict or list (workspace manifest) | coordinator |
 
+## M3 notes (what the guest writes)
+
+- `clock.kind` `grace_park`: a park's grace expired with guest operations
+  running; they are killed next (`op_state{killed}` + an error `tool_result`).
+- `checkpoint` + `parked` are written back to back when the guest parks:
+  `checkpoint.through_seq` is the seq before the checkpoint, `state_hash` the
+  fold through it, `prev_hash` the chain (see the fold rules below);
+  `parked.checkpoint_seq` is that checkpoint's seq. Nothing is written on a
+  park resume. Note the fold keeps `parked_at` until the next `settle`.
+- After a death resume: `clock{host_hello}` (from the resume hello's `at`),
+  `error{transient, retry: true, ref: turn_id}` for a turn whose response was
+  lost, `op_state{lost}` + `tool_result{content: "error: operation lost (VM
+  restarted)"}` per open call, then `wake{tool_result}` and the next turn. Never
+  a second `session_start`.
+- `bulk{kind: spill}.path` and `tool_result.spill_ref` are the bulk path
+  `.spill/<call_id>.txt` (relative), the file the host holds.
+- `settle.manifest` is the workspace manifest
+  `{"version": 1, "files": [{path, bytes, sha256, mode}], "total_bytes"}`
+  (`protocol/bulk.py`), `{}` when the guest has no workspace.
+
 ## Log rules (`validate_log`)
 
 Per-event rules (`validate_event`) run on every event first. The whole-log rules

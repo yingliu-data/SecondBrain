@@ -16,7 +16,8 @@ the config must equal protocol.SCHEMA_VERSION.
 M2 (docs/GUEST.md "M2 contracts"): `params.stream` (bool, default True; the
 coordinator reads it with `stream_enabled(cfg)`) and the limits
 `context_window_tokens` (32768) and `reserve_tokens` (4096: the compaction
-threshold is window - reserve). The token budget is the host proxy's knob
+threshold is window - reserve). M3: `park_grace_s` (30): how long running
+guest operations may finish after a `park` before they are killed. The token budget is the host proxy's knob
 alone (it answers 402); it is not guest config, so an ops change to it does
 not change config_hash.
 
@@ -53,6 +54,7 @@ class Limits:
     idle_wake_s: int = 600
     context_window_tokens: int = 32768   # M2: the model's context length
     reserve_tokens: int = 4096           # M2: headroom kept for the response
+    park_grace_s: float = 30.0           # M3: guest ops get this long after `park`, then killed
 
 
 @dataclass
@@ -166,7 +168,7 @@ def _limits(raw) -> Limits:
                         f"hello.config.limits.op_timeout_s: unknown side {side!r}")
                 timeouts[side] = _number(t, f"config.limits.op_timeout_s.{side}")
             merged[key] = timeouts
-        elif key == "grace_s":
+        elif key in ("grace_s", "park_grace_s"):
             merged[key] = _number(value, f"config.limits.{key}")
         else:
             merged[key] = _int(value, f"config.limits.{key}")

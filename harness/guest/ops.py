@@ -2,7 +2,7 @@
 thread and posts their results on the coordinator's inbound queue.
 
 Contract (docs/GUEST.md):
-  OperationManager(workspace, limits, inbound: queue.Queue, pool_size=4)
+  OperationManager(workspace, limits, inbound: queue.Queue, pool_size=4, bulk=None)
     submit(call_id, name, args) -> None   run the tool; posts
         ("op", call_id, result) with result = {"ok": bool, "content": str,
         "state": "done|failed|timeout|killed", "duration_ms": int,
@@ -42,11 +42,18 @@ and `spill` carries path/sha256/bytes. `limits.spill_quota_bytes` bounds the
 total bytes spilled in the session (files already in the spill dir count);
 over quota no file is written and the note says so.
 
+M3: with a `bulk` client (guest.bulk.BulkClient) every spill file is also put
+on :5001 as kind "spill", path `.spill/{call_id}.txt`, from the operation's
+worker thread before the result is posted; `spill` then carries
+`bulk_path` (that path) and `uploaded` (bool). The coordinator records the
+`bulk` event and `spill_ref` with `bulk_path`.
+
 Only `inbound.put` touches the coordinator; `State` is never read here.
 """
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import queue
 import signal
@@ -60,6 +67,8 @@ from pathlib import Path
 
 from guest import tools
 from guest.tools import builtin
+
+log = logging.getLogger("guest.ops")
 
 HARNESS_DIR = ".harness"
 SPILL_DIR = "spill"
@@ -194,8 +203,9 @@ class _TreeCache:
 
 
 class OperationManager:
-    def __init__(self, workspace, limits, inbound: queue.Queue, pool_size: int = 4):
+    def __init__(self, workspace, limits, inbound: queue.Queue, pool_size: int = 4, bulk=None):
         self.workspace = Path(workspace)
+        self.bulk = bulk
         self.limits = limits
         self.inbound = inbound
         self.spill_threshold = int(getattr(limits, "spill_threshold", DEFAULT_SPILL_THRESHOLD))
@@ -405,6 +415,14 @@ class OperationManager:
                 self._spill_used -= len(data)
             return head + f"\n[truncated: {dropped} chars; spill failed: {e.strerror or e}]", None
         spill = {"path": str(path), "sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data)}
+        if self.bulk is not None:
+            spill["bulk_path"] = f".spill/{call_id}.txt"
+            try:
+                self.bulk.put("spill", spill["bulk_path"], data)
+                spill["uploaded"] = True
+            except Exception as e:   # noqa: BLE001 - the local file is still there
+                log.warning("spill upload of %s failed: %s", call_id, e)
+                spill["uploaded"] = False
         return head + f"\n[truncated: {dropped} chars; spill {call_id}]", spill
 
 

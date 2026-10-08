@@ -27,7 +27,22 @@ tags queued items, the writer drops items from an older generation because
 the Outbox already covers them); then ("link", "up") is posted.
 
 The session_id is learned from the first control message (hello) when the
-transport is built without one. Bulk (:5001) is not part of M1.
+transport is built without one. A fresh transport takes the hello's own cseq
+as its floor (a resumed session's hello is not cseq 1: docs/M3-CONTRACTS.md
+section 4); controls that arrive before the hello with a higher cseq are gaps
+and are never delivered.
+
+Idle-wait (M3, the snapshot point): built with `idle=True`, the link thread
+tries to connect every `idle_poll_s` (IDLE_POLL_S, 50 ms), silently and
+without backoff, and stays in that loop until the host has sent a first line
+on a connection (any connect error, or a reset before that, e.g. the vsock
+reset a Firecracker snapshot causes, is retried the same way); `wait_up(timeout)`
+blocks until a connection is usable. `park()` closes the connection and puts
+the link thread back into that idle loop (the guest keeps its state, the
+worker snapshots the VM, and after a restore the first attempt reconnects
+with the normal handshake + resend). `seed_seq(n)` continues the event
+stream after a log return: the host holds 1..n, the next event is n + 1.
+Bulk (:5001) is guest/bulk.py: one connection per transfer, not this class.
 """
 from __future__ import annotations
 
@@ -46,6 +61,7 @@ log = logging.getLogger("guest.transport")
 CONTROL_PORT = 5000
 BACKOFF_INITIAL_S = 0.1
 BACKOFF_MAX_S = 5.0
+IDLE_POLL_S = 0.05
 
 
 # ---------------------------------------------------------------- connectors
@@ -119,12 +135,15 @@ def _shutdown(sock: socket.socket) -> None:
 class Transport:
     def __init__(self, connector, inbound: queue.Queue, session_id: str | None = None,
                  port: int = CONTROL_PORT, backoff_initial: float = BACKOFF_INITIAL_S,
-                 backoff_max: float = BACKOFF_MAX_S):
+                 backoff_max: float = BACKOFF_MAX_S, idle: bool = False,
+                 idle_poll_s: float = IDLE_POLL_S):
         self.connector = connector
         self.inbound = inbound
         self.port = port
         self.backoff_initial = backoff_initial
         self.backoff_max = backoff_max
+        self.idle_poll_s = idle_poll_s
+        self._idle = idle                              # poll silently, no backoff
 
         self.session_id: str | None = None
         self.inbox: messages.Inbox | None = None    # host -> guest controls (cseq)
@@ -142,6 +161,7 @@ class Transport:
         self._link_thread: threading.Thread | None = None
         self._writer_thread: threading.Thread | None = None
         self.connections = 0                           # successful connects so far
+        self._up_event = threading.Event()
 
     # ------------------------------------------------------------ lifecycle
 
@@ -168,6 +188,34 @@ class Transport:
     @property
     def connected(self) -> bool:
         return self._up
+
+    @property
+    def idle(self) -> bool:
+        """True while the link thread is in the idle-wait loop."""
+        return self._idle
+
+    def wait_up(self, timeout: float | None = None) -> bool:
+        """Block until a connection is usable (handshake done). False on timeout."""
+        return self._up_event.wait(timeout)
+
+    def park(self) -> None:
+        """Close the connection and return to the idle-wait loop (M3 park):
+        state, Outbox and Inbox are kept; the next connection that succeeds
+        opens with the handshake and resends whatever is unacked."""
+        with self._lock:
+            self._idle = True
+        sock = self._sock
+        if sock is not None:
+            _shutdown(sock)
+
+    def seed_seq(self, last_seq: int) -> None:
+        """The host already holds events 1..last_seq (a log return on resume):
+        the next event sent is last_seq + 1 and nothing below it is resent."""
+        with self._ack_cv:
+            if self.outbox is None:
+                raise RuntimeError("session_id unknown: nothing to seed")
+            self.outbox.resume_from(last_seq)
+            self._ack_cv.notify_all()
 
     @property
     def last_delivered_cseq(self) -> int:
@@ -221,13 +269,20 @@ class Transport:
     def _link(self) -> None:
         delay = self.backoff_initial
         while not self._stop.is_set():
+            idle = self._idle
             try:
                 sock = self.connector.connect(self.port)
             except OSError as exc:
+                if idle:        # the snapshot point: poll silently, never back off
+                    self._stop.wait(self.idle_poll_s)
+                    continue
                 log.debug("connect to :%d failed (%s); retry in %.1fs", self.port, exc, delay)
                 self._stop.wait(delay)
                 delay = min(delay * 2, self.backoff_max)
                 continue
+            # idle-wait ends with the first line the host sends, not with the
+            # connect: a connection reset right after it (a snapshot restore
+            # resets vsock connections) goes back to silent polling
             delay = self.backoff_initial
             self.connections += 1
             self._sock = sock
@@ -241,6 +296,8 @@ class Transport:
                 _shutdown(sock)
             if was_up and not self._stop.is_set():
                 self.inbound.put(("link", "down"))
+            if self._idle:
+                self._stop.wait(self.idle_poll_s)
 
     def _serve(self, sock: socket.socket) -> None:
         """One connection: handshake, then read lines until the stream ends."""
@@ -255,6 +312,10 @@ class Transport:
         for raw in reader:
             if self._stop.is_set():
                 return
+            if self._idle:
+                with self._lock:
+                    self._idle = False
+                log.info("idle-wait over: the host answered on :%d", self.port)
             if not raw.strip():
                 continue
             try:
@@ -284,6 +345,10 @@ class Transport:
         with self._lock:
             if self.session_id is None:
                 self._set_session(msg["session_id"])
+            if (msg["type"] == "hello" and self.inbox.last_delivered == 0
+                    and msg["session_id"] == self.session_id and msg["cseq"] > 1):
+                # a fresh process taking over a session: the hello's cseq is the floor
+                self.inbox.resume_from(msg["cseq"] - 1)
             try:
                 verdict = self.inbox.accept(msg)
             except ProtocolError as exc:
@@ -336,6 +401,7 @@ class Transport:
                 self._ack_cv.notify_all()
             ack = self.inbox.ack() if self.inbox is not None else None
             self._up = True
+            self._up_event.set()
             self._wq.put(("up", gen, sock, resend, ack))
         if advanced:
             self.inbound.put(("ack", self.outbox.highest_acked))
@@ -345,6 +411,7 @@ class Transport:
         with self._lock:
             was_up = self._up
             self._up = False
+            self._up_event.clear()
             self._gen += 1      # items queued while down are void: the Outbox covers them
         return was_up
 
