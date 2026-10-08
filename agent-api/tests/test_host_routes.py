@@ -61,6 +61,32 @@ def test_tenant_engine_field():
         Tenant(name="a", api_key="k", engine="other")
 
 
+def test_example_default_tenant_runs_on_harness_over_the_env_default(tmp_path, monkeypatch):
+    """M3-CONTRACTS §7: AGENT_ENGINE stays legacy; the default tenant's entry
+    in tenants.json.example says harness, and Tenant.engine wins."""
+    import json as _json
+    from pathlib import Path
+
+    import app.routes.chat as chat_mod
+    from app.tenants import TenantRegistry
+
+    assert chat_mod.AGENT_ENGINE == "legacy"
+    doc = _json.loads((Path(__file__).parent.parent / "tenants.json.example").read_text())
+    for i, t in enumerate(doc["tenants"]):
+        t["api_key"] = "env-key" if t["name"] == "default" else f"key-{i}"
+    p = tmp_path / "tenants.json"
+    p.write_text(_json.dumps(doc))
+    reg = TenantRegistry(p, "env-key")
+    default = reg.get_by_api_key("env-key")
+    assert default.is_default and default.session_key("abc") == "abc"
+    assert sum(1 for t in reg.all_tenants() if t.name == "default") == 1
+    assert chat_mod.engine_for(default) == "harness"
+    wcc = next(t for t in reg.all_tenants() if t.name == "wcc-event")
+    assert chat_mod.engine_for(wcc) == "legacy"                  # no engine: the env default
+    monkeypatch.setattr(chat_mod, "AGENT_ENGINE", "harness")
+    assert chat_mod.engine_for(Tenant(name="x", api_key="k", engine="legacy")) == "legacy"
+
+
 def test_harness_chat_streams_and_device_result_resolves(client):
     c, workers = client
     raw, h = _headers("harn-key", {"message": "calendar?", "session_id": "s1",

@@ -1,6 +1,17 @@
 """Fakes for the host tests: a scripted guest speaking the vsock control
 protocol over the session's Unix sockets, a Sandbox that runs it in a
 thread, a fake registry of skills, and a scripted upstream LLM over TCP.
+
+M3 (harness/docs/M3-CONTRACTS.md): the FakeGuest honours `park` (at a turn
+boundary, or at once while it waits on a host-originated result): it emits
+checkpoint + parked, waits for the acks, closes its socket and idle-waits
+in memory until the FakeSandbox restores it from the session "snapshot"; it
+then reconnects with a handshake ack of its cseq and emits nothing special.
+A guest started for `hello{resume: true}` pulls the log return over :5001
+(protocol.bulk get), continues the seq, marks open calls op_state{lost}
+with an error result, and finishes the open task with `resume_text`.
+`die=True` makes a guest die at its first host-originated call (or right
+after a log return).
 """
 from __future__ import annotations
 
@@ -13,12 +24,22 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from protocol.allowlist import effective_tools
+from protocol.bulk import decode_line, encode_line, get_header, read_exact, read_line, sha256_hex
 from protocol.messages import ack, encode, parse
 from protocol.sse import DONE_FRAME, response_chunks, sse_frame
 
 from app.host.sandbox import Sandbox
 
 HASH = "0" * 64
+LOST_TEXT = "error: operation lost (VM restarted)"
+
+
+class _Stopped(Exception):
+    """The sandbox stopped the guest (also while it idle-waits after park)."""
+
+
+class _Died(Exception):
+    """The guest dies on purpose (die=True)."""
 
 
 def ts_now() -> str:
@@ -42,7 +63,7 @@ class FakeGuest:
     non-streamed whole-message delta), and `reasoning` fragments."""
 
     def __init__(self, script, *, guest_result="ok", exit_after_settle=True,
-                 dedupe=True, seq_start=0):
+                 dedupe=True, seq_start=0, die=False, resume_text="resumed answer"):
         self.script = list(script)
         self.guest_result = guest_result
         self.exit_after_settle = exit_after_settle
@@ -64,6 +85,17 @@ class FakeGuest:
         self.thread: threading.Thread | None = None
         self.error: BaseException | None = None
         self.turn_n = 0
+        # M3
+        self.die = die
+        self.resume_text = resume_text
+        self.ipc: Path | None = None
+        self.parked = threading.Event()        # idle-waiting after parked
+        self._restore = threading.Event()      # set by FakeSandbox.restore / stop
+        self._park_req: str | None = None
+        self._suspending = False
+        self.parks = 0
+        self.returned: list[dict] | None = None   # the log return, if any
+        self.log_return_reply: dict | None = None
 
     # ---------------------------------------------------------------- wire
     def connect(self, ipc: Path, port: int = 5000, timeout: float = 5.0) -> None:
@@ -113,11 +145,25 @@ class FakeGuest:
                             self.acked = max(self.acked, msg.get("ack_seq", 0))
                             self._ack_cv.notify_all()
                     elif kind == "control":
+                        n = msg["cseq"]
+                        if msg["type"] == "hello" and self.hello is None:
+                            pass                # a fresh inbox takes hello's cseq as next
+                        elif n <= self.highest_cseq:
+                            self.send(ack(msg["session_id"], ack_cseq=self.highest_cseq))
+                            continue            # duplicate (a resend)
+                        elif n != self.highest_cseq + 1:
+                            continue            # gap: wait for the resend
                         self.controls.append(msg)
-                        self.highest_cseq = max(self.highest_cseq, msg["cseq"])
+                        self.highest_cseq = n
                         self.send(ack(msg["session_id"], ack_cseq=self.highest_cseq))
                         if msg["type"] == "hello":
                             self._tasks.put(msg)
+                        elif msg["type"] == "park":
+                            self._park_req = msg["body"]["reason"]
+                            self._tasks.put(("park",))
+                            self._side_results.put(("park",))
+                        elif msg["type"] == "ui_response":
+                            pass                # recorded in self.controls only
                         elif msg["type"] in ("task", "follow_up", "steer", "ui_response"):
                             iid = msg["body"]["input_id"]
                             if self.dedupe and iid in self.seen_inputs:
@@ -132,10 +178,43 @@ class FakeGuest:
         except (OSError, ValueError):
             pass
         finally:
-            self._tasks.put(None)
+            if not self._suspending:
+                self._tasks.put(None)
+
+    # ---------------------------------------------------------------- park
+    def _do_park(self) -> None:
+        """M3-CONTRACTS §3: checkpoint, parked, wait acked, close, idle-wait;
+        on restore reconnect and handshake. Keeps every in-memory counter."""
+        reason, self._park_req = self._park_req, None
+        cp = self.emit("checkpoint", {"through_seq": self.seq, "state_hash": HASH,
+                                      "prev_hash": HASH})
+        p = self.emit("parked", {"checkpoint_seq": cp["seq"], "reason": reason})
+        self.wait_acked(p["seq"])
+        self._suspending = True
+        try:
+            self.sock.shutdown(socket.SHUT_RDWR)
+            self.sock.close()
+        except OSError:
+            pass
+        self.parks += 1
+        self.parked.set()
+        self._restore.wait()
+        self._restore.clear()
+        if self._stop.is_set():
+            raise _Stopped()
+        self.parked.clear()
+        self._suspending = False
+        self.connect(self.ipc)
+        self.send(ack(self.session_id, ack_cseq=self.highest_cseq))   # the handshake
+        threading.Thread(target=self._reader, daemon=True).start()
+
+    def _maybe_park(self) -> None:
+        if self._park_req is not None:
+            self._do_park()
 
     # ---------------------------------------------------------------- run
     def run(self, ipc: Path) -> None:
+        self.ipc = Path(ipc)
         try:
             self.connect(ipc)
             threading.Thread(target=self._reader, daemon=True).start()
@@ -143,14 +222,22 @@ class FakeGuest:
                 msg = self._tasks.get()
                 if msg is None:
                     return
+                if isinstance(msg, tuple):          # a park marker
+                    self._maybe_park()
+                    continue
                 if msg["type"] == "hello":
                     self._on_hello(msg)
                     continue
                 if self.hello is None:
                     continue
-                done = self._on_input(msg)
+                if msg["type"] == "_resume":
+                    done = self._finish_resumed(msg["body"]["input_id"])
+                else:
+                    done = self._on_input(msg)
                 if done and self.exit_after_settle:
                     return
+        except (_Stopped, _Died):
+            pass
         except BaseException as e:  # noqa: BLE001
             self.error = e
         finally:
@@ -165,6 +252,10 @@ class FakeGuest:
         self.session_id = self.hello["session_id"]
         self.tools = effective_tools(self.hello["config"])
         p = self.hello["principal"]
+        if self.hello.get("resume") and self.seq == 0:
+            self._log_return()
+            self.live("ready", {"at": int(time.time() * 1000)})
+            return
         if self.seq == 0:
             self.emit("session_start", {
                 "user": p["user"], "tenant": p["tenant"],
@@ -174,6 +265,68 @@ class FakeGuest:
                 "resumed": bool(self.hello.get("resume")),
             })
         self.live("ready", {"at": int(time.time() * 1000)})
+
+    def _log_return(self) -> None:
+        """M3-CONTRACTS §4.4: bulk get of the acked log, fold, op_state{lost}."""
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.connect(str(self.ipc / "v.sock_5001"))
+        try:
+            s.sendall(encode_line(get_header(self.session_id, 0)))
+            f = s.makefile("rb")
+            reply = decode_line(read_line(f))
+            self.log_return_reply = reply
+            payload = read_exact(f, reply["bytes"])
+            assert sha256_hex(payload) == reply["sha256"]
+        finally:
+            s.close()
+        events = [json.loads(l) for l in payload.decode().splitlines() if l.strip()]
+        self.returned = events
+        self.seq = reply["last_seq"]
+        settled = {e["body"]["input_id"] for e in events if e["type"] == "settle"}
+        open_input = None
+        calls: dict[str, bool] = {}
+        for e in events:
+            t, b = e["type"], e["body"]
+            if t == "input" and b["dedupe"] == "new":
+                self.seen_inputs.add(b["input_id"])
+                if b["input_id"] not in settled:
+                    open_input = b["input_id"]
+            elif t == "turn_start":
+                self.turn_n += 1
+            elif t == "tool_call":
+                calls[b["call_id"]] = True
+            elif t == "tool_result":
+                calls[b["call_id"]] = False
+        lost = [cid for cid, is_open in calls.items() if is_open]
+        for cid in lost:
+            self.emit("op_state", {"call_id": cid, "state": "lost"})
+            self.emit("tool_result", {"call_id": cid, "content": LOST_TEXT})
+        if lost:
+            self.emit("wake", {"reason": "tool_result", "result_ids": lost, "input_ids": []})
+        if self.die:
+            raise _Died()
+        if open_input is not None:
+            self._tasks.put({"type": "_resume", "body": {"input_id": open_input}})
+
+    def _finish_resumed(self, input_id: str) -> bool:
+        self.turn_n += 1
+        turn_id = f"turn_{self.turn_n:04d}"
+        self.emit("turn_start", {
+            "turn_id": turn_id, "type": "regular", "includes_through_seq": self.seq,
+            "model": self.hello["config"]["model"], "params": self.hello["config"]["params"],
+            "request_hash": HASH, "preamble_hash": HASH, "workspace_tree_id": None,
+        })
+        self.emit("llm_response", {
+            "turn_id": turn_id, "finish_reason": "stop",
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            "message": {"role": "assistant", "content": self.resume_text},
+        })
+        settle = self.emit("settle", {
+            "input_id": input_id, "outcome": "done", "answer": self.resume_text,
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5}, "manifest": {},
+        })
+        self.wait_acked(settle["seq"])
+        return True
 
     def _side(self, name: str) -> str:
         for t in self.tools:
@@ -195,6 +348,7 @@ class FakeGuest:
         usage_total = {"prompt_tokens": 0, "completion_tokens": 0}
         answer = ""
         for turn in self.script:
+            self._maybe_park()                  # a turn boundary
             self.turn_n += 1
             turn_id = f"turn_{self.turn_n:04d}"
             self.emit("clock", {"kind": "turn_clock", "at": int(time.time() * 1000)})
@@ -235,7 +389,14 @@ class FakeGuest:
             if side == "guest":
                 content, ok = self.guest_result, True
             else:
-                res = self._side_results.get(timeout=turn.get("wait_s", 10))
+                if self.die:
+                    raise _Died()           # the VM dies mid host-originated call
+                while True:
+                    res = self._side_results.get(timeout=turn.get("wait_s", 10))
+                    if isinstance(res, tuple):  # park while only host ops run: at once
+                        self._maybe_park()
+                        continue
+                    break
                 content, ok = res["content"], res["ok"]
             self.emit("op_state", {"call_id": call["id"], "state": "done" if ok else "failed",
                                    "duration_ms": 1})
@@ -252,29 +413,81 @@ class FakeGuest:
 
 class FakeSandbox(Sandbox):
     """Runs a FakeGuest in a thread for every start(); a new FakeGuest
-    (fresh seq) per run, like a fresh guest process."""
+    (fresh seq) per run, like a fresh guest process.
 
-    def __init__(self, script, **guest_kwargs):
+    M3: `base=True` offers a base snapshot (restore(dir, None) spawns a new
+    guest, like a restore of the idle image); snapshot() waits for the guest
+    to idle-wait after `parked` and keeps it as the session snapshot (META.json
+    in snapshot_dir); restore(dir, snapshot_dir) wakes that same guest.
+    The first `die_runs` guests get die=True."""
+
+    def __init__(self, script, *, base: bool = False, die_runs: int = 0,
+                 restore_delay: float = 0.0, **guest_kwargs):
         self.script = script
         self.guest_kwargs = guest_kwargs
         self.guests: list[FakeGuest] = []
         self.guest: FakeGuest | None = None
         self.starts = 0
+        self.base = base
+        self.die_runs = die_runs
+        self.restore_delay = restore_delay
+        self.restores: list[str] = []
+        self.snapshots: list[str] = []
+        self._parked_guest: FakeGuest | None = None
 
-    def start(self, session_dir: Path) -> None:
-        if self.is_alive():
-            return
-        self.starts += 1
-        g = FakeGuest(self.script, **self.guest_kwargs)
+    def _spawn(self, session_dir: Path) -> None:
+        kwargs = dict(self.guest_kwargs)
+        if len(self.guests) < self.die_runs:
+            kwargs["die"] = True
+        g = FakeGuest(self.script, **kwargs)
         g.thread = threading.Thread(target=g.run, args=(Path(session_dir) / "ipc",), daemon=True)
         g.thread.start()
         self.guest = g
         self.guests.append(g)
 
+    def start(self, session_dir: Path) -> None:
+        if self.is_alive():
+            return
+        self.starts += 1
+        self._spawn(session_dir)
+
+    def restore(self, session_dir: Path, snapshot_dir: Path | None = None) -> None:
+        if self.restore_delay:
+            time.sleep(self.restore_delay)
+        if snapshot_dir is None:
+            if not self.base:
+                raise RuntimeError("no base snapshot")
+            self.restores.append("base")
+            self._spawn(session_dir)
+            return
+        g = self._parked_guest
+        if g is None or not (Path(snapshot_dir) / "META.json").exists():
+            raise RuntimeError("no session snapshot")
+        self._parked_guest = None
+        self.restores.append("session")
+        self.guest = g
+        g._restore.set()
+
+    def snapshot(self, snapshot_dir: Path) -> None:
+        g = self.guest
+        if g is None or not g.parked.wait(5):
+            raise RuntimeError("guest is not parked")
+        Path(snapshot_dir).mkdir(parents=True, exist_ok=True)
+        (Path(snapshot_dir) / "META.json").write_text(json.dumps({"seq": g.seq}))
+        self.snapshots.append(str(snapshot_dir))
+        self._parked_guest = g
+        self.guest = None          # the VM is stopped; its memory is the snapshot
+
+    def has_snapshot(self, snapshot_dir: Path | None = None) -> bool:
+        if snapshot_dir is None:
+            return self.base
+        return self._parked_guest is not None and (Path(snapshot_dir) / "META.json").exists()
+
     def stop(self) -> None:
         g = self.guest
         if g is not None:
             g._stop.set()
+            g._restore.set()
             try:
                 if g.sock:
                     g.sock.shutdown(socket.SHUT_RDWR)

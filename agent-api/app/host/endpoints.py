@@ -9,6 +9,7 @@ connects to. One listener code path serves both.
   Endpoints(session_dir, ports)    create/unlink/chmod the listeners
     .accept_control(timeout)       blocking accept on :5000 (call from a thread)
     .listener(port)                the raw listening socket (the LLM proxy takes :5010)
+    .close_port(port) .reopen(port)  M3: no listener while the guest is parked
     .close()                       close and unlink everything
 
   ControlChannel(sock, loop, inbound)
@@ -26,6 +27,7 @@ import os
 import queue
 import socket
 import threading
+import time
 from pathlib import Path
 
 from protocol.messages import ProtocolError, encode, parse
@@ -90,18 +92,39 @@ class Endpoints:
         return conn
 
     def accept_control(self, timeout: float | None = None) -> socket.socket | None:
+        if 5000 not in self._listeners:
+            # closed while the guest is parked: nothing to accept (no busy loop)
+            time.sleep(timeout if timeout is not None else 0.1)
+            return None
         return self.accept(5000, timeout)
 
-    def close(self) -> None:
-        for port, lst in list(self._listeners.items()):
+    def is_open(self, port: int) -> bool:
+        return port in self._listeners
+
+    def close_port(self, port: int) -> None:
+        """Stop listening on one port (M3: between the acked `parked` and the
+        snapshot, so the guest's idle-wait loop finds no listener and stays
+        idle; a pending, not yet accepted connection is dropped with it)."""
+        lst = self._listeners.pop(port, None)
+        if lst is not None:
             try:
                 lst.close()
             except OSError:
                 pass
-            try:
-                os.unlink(socket_path(self.session_dir, port))
-            except FileNotFoundError:
-                pass
+        try:
+            os.unlink(socket_path(self.session_dir, port))
+        except FileNotFoundError:
+            pass
+
+    def reopen(self, port: int) -> socket.socket:
+        """Listen on `port` again (before a restore); no-op when open."""
+        if port not in self._listeners:
+            self._listeners[port] = self._listen(port)
+        return self._listeners[port]
+
+    def close(self) -> None:
+        for port in list(self._listeners):
+            self.close_port(port)
         self._listeners.clear()
 
 

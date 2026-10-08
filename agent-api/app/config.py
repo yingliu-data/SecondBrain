@@ -79,7 +79,15 @@ HARNESS_QUESTION_TIMEOUT_S = int(os.environ.get("HARNESS_QUESTION_TIMEOUT_S", 30
 HARNESS_HOST_TOOL_TIMEOUT_S = int(os.environ.get("HARNESS_HOST_TOOL_TIMEOUT_S", 120))
 HARNESS_SPILL_THRESHOLD = int(os.environ.get("HARNESS_SPILL_THRESHOLD", 2000))
 HARNESS_SEGMENT_EVENTS = int(os.environ.get("HARNESS_SEGMENT_EVENTS", 1000))   # events per segment
-HARNESS_STOP_AT_SETTLE = os.environ.get("HARNESS_STOP_AT_SETTLE", "true").lower() in ("1", "true", "yes")
+# M3: the guest outlives a settle (one long-lived guest per session, one log
+# run); the idle timer parks it. "true" restores the M1/M2 guest-per-task runs.
+HARNESS_STOP_AT_SETTLE = os.environ.get("HARNESS_STOP_AT_SETTLE", "false").lower() in ("1", "true", "yes")
+# M3 snapshots, park and resume (harness/docs/M3-CONTRACTS.md)
+HARNESS_SESSION_IDLE_S = float(os.environ.get("HARNESS_SESSION_IDLE_S", 1800))  # idle -> park + snapshot + destroy
+HARNESS_PARK_GRACE_S = float(os.environ.get("HARNESS_PARK_GRACE_S", 30))        # hello limit park_grace_s
+HARNESS_PARK_TIMEOUT_S = float(os.environ.get("HARNESS_PARK_TIMEOUT_S", 60))    # park sent -> acked `parked` (> park_grace_s)
+HARNESS_MAX_RESUMES = int(os.environ.get("HARNESS_MAX_RESUMES", 1))             # death resumes per task
+HARNESS_BULK_MAX_BYTES = int(os.environ.get("HARNESS_BULK_MAX_BYTES", 64 * 1024 * 1024))  # one :5001 put
 HARNESS_TOKEN_BUDGET = int(os.environ.get("HARNESS_TOKEN_BUDGET", 0))        # total_tokens per session; 0 = unlimited
 # Context window the guest plans against (M2 compaction trigger: estimate > window - reserve).
 HARNESS_CONTEXT_WINDOW_TOKENS = int(os.environ.get("HARNESS_CONTEXT_WINDOW_TOKENS", 32768))

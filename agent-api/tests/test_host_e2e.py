@@ -37,11 +37,17 @@ def upstream():
     u.stop()
 
 
+# The M3 guest knows the park_grace_s limit; an older guest rejects unknown
+# limits, so the e2e worker only sends it to a guest that has it.
+_GUEST_HAS_PARK = "park_grace_s" in (GUEST_ROOT / "guest" / "config.py").read_text()
+
+
 def make_worker(session, upstream, registry=None, dc=None):
     return Worker(session, FakeTenant(system_prompt="You are a test. {current_time}"),
                   FakeRegistry() if registry is None else registry, LocalSandbox(GUEST_ROOT),
                   device_calls=DeviceCalls() if dc is None else dc,
-                  llm_url=upstream.url, hello_timeout_s=20, heartbeat_s=1, wall_clock_s=60)
+                  llm_url=upstream.url, hello_timeout_s=20, heartbeat_s=1, wall_clock_s=60,
+                  park_grace_s=30 if _GUEST_HAS_PARK else None)
 
 
 async def drain(q):

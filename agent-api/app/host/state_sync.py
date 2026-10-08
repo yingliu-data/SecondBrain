@@ -15,9 +15,10 @@
 Segments hold HARNESS_SEGMENT_EVENTS events each (seq 1..N in 000001.jsonl,
 N+1..2N in 000002.jsonl), so the segment of a seq is a function of the seq.
 
-Runs. In M1 every guest start is a fresh guest (rootfs boot or a new
-subprocess; snapshots and log return are M3), so every guest run begins with
-its own `session_start` at seq 1. Each run is therefore its own log under
+Runs. A fresh guest (hello{resume: false}) begins with its own
+`session_start` at seq 1, so it opens a new run; a resumed guest (a parked
+snapshot restored, or a death resume with the log return, M3) continues the
+current run's seq. Each run is therefore its own log under
 `events/rNNNN/` (segments inside) with its own folded State; `begin_run()`
 opens the next one. What must hold across runs - the input_ids seen and the
 settle of each task - is folded from every run at load (`seen_inputs`,
@@ -178,6 +179,14 @@ class StateSync:
                         out.append(ev)
         out.sort(key=lambda e: e["seq"])
         return out
+
+    def log_after(self, after_seq: int = 0) -> tuple[list[dict], int]:
+        """The log return (M3-CONTRACTS §4): the acked events of the current
+        run with seq > after_seq, and last_seq, read under the lock so the
+        two agree (the bulk server calls this from its own thread). Every
+        stored event is acked: the host acks only after the append."""
+        with self._lock:
+            return self.read(after_seq), self.state.last_seq
 
     @property
     def last_seq(self) -> int:

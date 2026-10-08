@@ -17,6 +17,25 @@ A redelivered input (an input_id already seen) is sent again anyway - the
 guest dedupes - and the caller attaches to the running stream; one that
 already settled gets its answer replayed from the stored settle, no guest.
 
+M3 (harness/docs/M3-CONTRACTS.md): one long-lived guest per session.
+  vm_state      none -> running -> parking -> parked -> running ...
+  boot          a fresh session restores the BASE snapshot when the sandbox
+                has one (else a rootfs start) and sends hello{resume: false}
+  .park(reason) control `park`, wait for the acked `parked`, snapshot to
+                {session}/vm/snapshot, vm/parked.json for a restarted worker
+  wake          the next act() / ui_response / side_result of a parked
+                session restores the session snapshot (no hello; seq, cseq
+                continue) and sends the held controls ui_response first;
+                fallback base restore + hello{resume: true} + log return
+  idle          session_idle_s after a settle: park + snapshot + destroy
+  death         link down + sandbox not alive mid-task: base restore +
+                hello{resume: true}; the guest pulls the acked log on :5001
+                (bulk_server.py), marks open calls op_state{lost}, and the
+                worker cancels them (a late side_result is dropped and logged
+                input{dedupe: late}); max_resumes per task, then the task fails
+  host events   vm{op: boot|restore|snapshot|destroy, source: rootfs|base|
+                session, ms}; workflow{parked|resume|idle|heartbeat ...}
+
 Threads touch sockets only (endpoints.py); everything reaches the asyncio
 loop through loop.call_soon_threadsafe and one inbound asyncio.Queue that a
 pump task drains. The pump is the single writer of state_sync.
@@ -24,6 +43,7 @@ pump task drains. The pump is the single writer of state_sync.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import threading
@@ -35,13 +55,15 @@ from protocol.messages import Outbox, ProtocolError, ack, control_message
 
 from app.config import (
     HARNESS_CONTEXT_WINDOW_TOKENS, HARNESS_GUEST_ROOT, HARNESS_HEARTBEAT_S,
-    HARNESS_HELLO_TIMEOUT_S, HARNESS_HOST_TOOL_TIMEOUT_S, HARNESS_MAX_TURNS,
-    HARNESS_PORTS, HARNESS_QUESTION_TIMEOUT_S, HARNESS_RESERVE_TOKENS,
-    HARNESS_SANDBOX, HARNESS_SPILL_THRESHOLD, HARNESS_STOP_AT_SETTLE,
+    HARNESS_HELLO_TIMEOUT_S, HARNESS_HOST_TOOL_TIMEOUT_S, HARNESS_MAX_RESUMES,
+    HARNESS_MAX_TURNS, HARNESS_PARK_GRACE_S, HARNESS_PARK_TIMEOUT_S, HARNESS_PORTS, HARNESS_QUESTION_TIMEOUT_S,
+    HARNESS_RESERVE_TOKENS, HARNESS_SANDBOX, HARNESS_SESSION_IDLE_S,
+    HARNESS_SPILL_THRESHOLD, HARNESS_STOP_AT_SETTLE,
     HARNESS_TOKEN_BUDGET, HARNESS_WALL_CLOCK_S, LLM_ENABLE_THINKING,
     LLM_MAX_TOKENS, LLM_MODEL, LLM_STREAM, LLM_TEMPERATURE, LLM_URL, MAX_TOOLS,
     SYSTEM_PROMPT, TOOL_TIMEOUT,
 )
+from app.host.bulk_server import BulkServer
 from app.host.endpoints import ControlChannel, Endpoints
 from app.host.llm_proxy import LLMProxy
 from app.host.sandbox import Sandbox
@@ -52,7 +74,7 @@ from app.user.context_builder import ContextBuilder
 
 logger = logging.getLogger("host.worker")
 
-HARNESS_VERSION = "0.0.2"
+HARNESS_VERSION = "0.0.3"
 
 
 class GuestError(RuntimeError):
@@ -90,7 +112,8 @@ def make_sandbox() -> Sandbox:
         from app.host.sandbox.firecracker import FirecrackerSandbox  # type: ignore
         return FirecrackerSandbox()
     from app.host.sandbox.local import LocalSandbox
-    return LocalSandbox(HARNESS_GUEST_ROOT)
+    # --multi-task: the guest outlives a settle (the idle/park model, M3)
+    return LocalSandbox(HARNESS_GUEST_ROOT, extra_args=["--multi-task"])
 
 
 class Worker:
@@ -99,7 +122,11 @@ class Worker:
                  ports: dict = HARNESS_PORTS, hello_timeout_s: float = HARNESS_HELLO_TIMEOUT_S,
                  heartbeat_s: float = HARNESS_HEARTBEAT_S,
                  wall_clock_s: float = HARNESS_WALL_CLOCK_S,
-                 stop_at_settle: bool = HARNESS_STOP_AT_SETTLE) -> None:
+                 stop_at_settle: bool = HARNESS_STOP_AT_SETTLE,
+                 session_idle_s: float | None = HARNESS_SESSION_IDLE_S,
+                 park_timeout_s: float = HARNESS_PARK_TIMEOUT_S,
+                 max_resumes: int = HARNESS_MAX_RESUMES,
+                 park_grace_s: float | None = HARNESS_PARK_GRACE_S) -> None:
         self.session = session
         self.tenant = tenant
         self.registry = registry
@@ -113,6 +140,10 @@ class Worker:
         self.heartbeat_s = heartbeat_s
         self.wall_clock_s = wall_clock_s
         self.stop_at_settle = stop_at_settle
+        self.session_idle_s = session_idle_s
+        self.park_timeout_s = park_timeout_s
+        self.max_resumes = max_resumes
+        self.park_grace_s = park_grace_s
 
         meta = session.read_meta()
         self.session_id: str = meta.get("session_id") or session.root.name
@@ -138,6 +169,22 @@ class Worker:
         self._current: tuple[str, asyncio.Future] | None = None
         self.last_hello: dict | None = None
         self.closed = False
+        # M3: park, resume, idle, death
+        self.bulk: BulkServer | None = None
+        self.vm_state = "none"                      # none | running | parking | parked
+        self.snapshot_dir = session.root / "vm" / "snapshot"
+        self.parked_file = session.root / "vm" / "parked.json"
+        self._session_snapshot = False              # snapshot_dir holds the parked guest
+        self._parked_evt = asyncio.Event()
+        self._vm_lock = asyncio.Lock()
+        self._deferred: list[tuple[str, dict]] = []  # controls held while parked
+        self._wake_task: asyncio.Task | None = None
+        self._idle_handle: asyncio.TimerHandle | None = None
+        self._resumes = 0                           # death resumes of the running task
+        self._lost_calls: set[str] = set()
+        self._side_tasks: dict[str, asyncio.Task] = {}
+        self._joined: dict[str, str] = {}           # answer input_id -> the task it joins
+        self._load_parked()
 
     # ------------------------------------------------------------ sinks
     def attach(self, input_id: str | None = None) -> asyncio.Queue:
@@ -168,7 +215,8 @@ class Worker:
             input_id = self._current[0]
         for q in list(self.sinks):
             scope = self._sink_input.get(id(q))
-            if scope is None or input_id is None or scope == input_id:
+            if (scope is None or input_id is None or scope == input_id
+                    or self._joined.get(scope) == input_id):
                 q.put_nowait(item)
 
     def _emit_many(self, items, input_id: str | None = None) -> None:
@@ -241,6 +289,8 @@ class Worker:
             # (the token budget is a proxy knob, not a guest limit)
             "context_window_tokens": HARNESS_CONTEXT_WINDOW_TOKENS,
             "reserve_tokens": HARNESS_RESERVE_TOKENS,
+            # M3: running guest ops get this long after `park`, then killed
+            **({"park_grace_s": self.park_grace_s} if self.park_grace_s is not None else {}),
         }
 
     def build_hello(self, resume: bool = False) -> dict:
@@ -274,7 +324,22 @@ class Worker:
     # ------------------------------------------------------------ control
     def send_control(self, type: str, body: dict) -> dict:
         """Mint the next cseq, keep the message until acked, send it if the
-        link is up (else it goes with the resend on the next link)."""
+        link is up (else it goes with the resend on the next link).
+
+        While the guest is parked a control is held back unnumbered and wakes
+        the guest (restore); the wake numbers held controls `ui_response`
+        first. A `side_result` for a call the guest declared lost is dropped
+        and logged `input{dedupe: late}` (PLAN.md 5)."""
+        if type == "side_result" and body.get("call_id") in self._lost_calls:
+            self.sync.host_event("input", {"kind": "side_result", "call_id": body.get("call_id"),
+                                           "side": body.get("side"), "dedupe": "late"})
+            return {}
+        if self.vm_state == "parked":
+            if type in ("heartbeat", "park"):
+                return {}
+            self._deferred.append((type, body))
+            self._request_wake()
+            return {"type": type, "body": body, "deferred": True}
         assert self._outbox is not None
         msg = control_message(self.session_id, self._outbox.next_number(), type, body)
         self._outbox.push(msg)
@@ -286,6 +351,18 @@ class Worker:
         if self._channel is not None and not self._channel.closed:
             self._channel.send(msg)
 
+    def _send_ui_first(self, items: list[tuple[str, dict]]) -> None:
+        """Number and send held controls, `ui_response` first (M3-CONTRACTS §3.5)."""
+        for t, b in sorted(items, key=lambda tb: tb[0] != "ui_response"):
+            self.send_control(t, b)
+
+    def _rebased_outbox(self, highest: int) -> Outbox:
+        """A cseq outbox continuing after `highest` with nothing pending: cseq
+        belongs to the session and is never reused (PROTOCOL.md 3)."""
+        ob = Outbox(self.session_id, "cseq")
+        ob._reserved = ob.highest_sent = ob.highest_acked = highest
+        return ob
+
     # ------------------------------------------------------------ plumbing
     def _ensure_plumbing(self) -> None:
         loop = asyncio.get_running_loop()
@@ -293,11 +370,16 @@ class Worker:
             self._loop = loop
             self._inbound = asyncio.Queue()
             self._link_up = asyncio.Event()
+            self._parked_evt = asyncio.Event()
         if self.endpoints is None:
             self.endpoints = Endpoints(self.session.root, self.ports)
             self.proxy = LLMProxy(self.endpoints.listener(self.ports["llm"]), self.llm_url,
                                   self.sync.host_event, token_budget=HARNESS_TOKEN_BUDGET)
             self.proxy.start()
+            if self.vm_state == "parked":
+                self._close_guest_ports()       # a restarted worker: listen at the wake
+            else:
+                self._open_guest_ports()
             self._accept_thread = threading.Thread(target=self._accept_loop, daemon=True,
                                                    name=f"accept:{self.session_key}")
             self._accept_thread.start()
@@ -310,6 +392,9 @@ class Worker:
         if self._pump is None or self._pump.done():
             self._pump = loop.create_task(self._pump_loop(), name=f"pump:{self.session_key}")
 
+    def _on_bulk_put(self, kind: str, path: str, nbytes: int, sha256: str) -> None:
+        self.sync.host_event("bulk", {"kind": kind, "path": path, "bytes": nbytes, "sha256": sha256})
+
     def _accept_loop(self) -> None:
         n = 0
         while not self._stop_accept.is_set():
@@ -320,40 +405,291 @@ class Worker:
             ch = ControlChannel(conn, self._loop, self._inbound, name=f":{n}")
             self._loop.call_soon_threadsafe(self._inbound.put_nowait, ("link", "up", ch))
 
-    async def _start_guest(self) -> None:
-        """Start a fresh guest run (new log run), wait for its :5000
-        connection, send hello."""
-        self.sync.begin_run()
-        self._outbox = Outbox(self.session_id, "cseq")   # a fresh guest's inbox starts at 0
-        self._link_up.clear()
+    # ------------------------------------------------------------ vm lifecycle
+    def _vm_event(self, op: str, source: str | None, t0: float, **extra) -> None:
+        """vm{op, source, ms}: ms is the sandbox's own figure for the op when
+        it reports one (`last_vm_event`), else the host's wall time; ready_ms
+        is the host's (restore/boot: until the guest's link is up)."""
+        ready_ms = int((time.monotonic() - t0) * 1000)
+        body = {"op": op, "ms": ready_ms, "ready_ms": ready_ms, "run": self._guest_run,
+                "sandbox": type(self.sandbox).__name__, **extra}
+        if source is not None:
+            body["source"] = source
+        sb = getattr(self.sandbox, "last_vm_event", None)
+        if isinstance(sb, dict) and sb.get("op") == op and isinstance(sb.get("ms"), (int, float)):
+            body["ms"] = int(sb["ms"])
+            if sb.get("source") and source is None:
+                body["source"] = sb["source"]
+        self.sync.host_event("vm", body)
+
+    def _close_guest_ports(self) -> None:
+        """No :5000/:5001 listener while the guest is parked: its idle-wait
+        loop must not reconnect before the snapshot (sandbox finding)."""
+        if self.endpoints is None:
+            return
+        self.endpoints.close_port(self.ports["control"])
+        if "bulk" in self.ports:
+            if self.bulk is not None:
+                self.bulk.stop(join=False)
+                self.bulk = None
+            self.endpoints.close_port(self.ports["bulk"])
+
+    def _open_guest_ports(self) -> None:
+        """Listen again before a restore or boot."""
+        if self.endpoints is None:
+            return
+        self.endpoints.reopen(self.ports["control"])
+        if "bulk" in self.ports and self.bulk is None:
+            self.bulk = BulkServer(self.endpoints.reopen(self.ports["bulk"]), self.session.root,
+                                   self.session_id, self.sync.log_after,
+                                   on_put=self._on_bulk_put).start()
+
+    def _drop_link(self) -> None:
         if self._channel is not None:
             self._channel.close()
             self._channel = None
-        self._guest_run += 1
-        self.sync.host_event("vm", {"kind": "start", "run": self._guest_run,
-                                    "sandbox": type(self.sandbox).__name__})
-        await asyncio.to_thread(self.sandbox.start, self.session.root)
+        self._link_up.clear()
+
+    async def _wait_link(self) -> bool:
         try:
             await asyncio.wait_for(self._link_up.wait(), timeout=self.hello_timeout_s)
+            return True
         except asyncio.TimeoutError:
-            await self._stop_guest("no connection")
+            return False
+
+    async def _boot(self, *, resume: bool) -> None:
+        """Start a guest run and send hello. Fresh (resume=False): a new log
+        run, cseq from 1. Resume (death, or a park whose snapshot is gone):
+        cseq continues, `hello{resume: true}`, the guest takes the log return
+        on :5001 and continues the run's seq; the unacked controls of the
+        previous guest are numbered again after the hello. Base snapshot
+        restore when the sandbox has one, else a rootfs boot (start)."""
+        t0 = time.monotonic()
+        carried: list[tuple[str, dict]] = []
+        if resume and self._outbox is not None:
+            carried = [(m["type"], m["body"]) for m in self._outbox.pending
+                       if m["type"] not in ("hello", "heartbeat", "park")]
+            self._outbox = self._rebased_outbox(self._outbox.highest_sent)
+        elif resume:
+            self._outbox = self._rebased_outbox(0)
+        else:
+            self.sync.begin_run()
+            self._outbox = Outbox(self.session_id, "cseq")   # a fresh guest's inbox starts at 0
+        held, self._deferred = self._deferred, []
+        self._drop_link()
+        if self.sandbox.is_alive():
+            await asyncio.to_thread(self.sandbox.stop)
+        self._guest_run += 1
+        self._open_guest_ports()
+        op, source = "boot", "rootfs"
+        if self.sandbox.has_snapshot():
+            try:
+                await asyncio.to_thread(self.sandbox.restore, self.session.root, None)
+                op, source = "restore", "base"
+            except Exception as e:      # SandboxError, NotImplementedError: boot instead
+                logger.warning("session %s: base restore failed (%s); rootfs boot",
+                               self.session_key, e)
+        if source == "rootfs":
+            await asyncio.to_thread(self.sandbox.start, self.session.root)
+        if not await self._wait_link():
+            self._deferred = held + self._deferred
+            await self._destroy("no connection")
             raise GuestError(f"guest did not connect within {self.hello_timeout_s}s")
-        hello = self.build_hello(resume=False)
+        hello = self.build_hello(resume=resume)
         self.last_hello = hello
+        self.vm_state = "running"
         self.send_control("hello", hello)
         self._hello_run = self._guest_run
+        self._session_snapshot = False
+        self._clear_parked_file()
+        self._vm_event(op, source, t0, resume=resume)
+        self._send_ui_first(carried + held)
 
-    async def _stop_guest(self, reason: str = "settle") -> None:
-        if self._channel is not None:
-            self._channel.close()
-            self._channel = None
-        self._link_up.clear()
+    async def _destroy(self, reason: str) -> None:
+        """Stop the VM. A parked session stays parked (its snapshot is on disk)."""
+        t0 = time.monotonic()
+        self._drop_link()
         await asyncio.to_thread(self.sandbox.stop)
-        self.sync.host_event("vm", {"kind": "stop", "run": self._guest_run, "reason": reason})
+        if self.vm_state != "parked":
+            self.vm_state = "none"
+        self._vm_event("destroy", None, t0, reason=reason)
 
     def _guest_ready(self) -> bool:
-        return (self.sandbox.is_alive() and self._channel is not None
-                and not self._channel.closed and self._hello_run == self._guest_run)
+        return (self.vm_state == "running" and self.sandbox.is_alive()
+                and self._channel is not None and not self._channel.closed
+                and self._hello_run == self._guest_run)
+
+    # ------------------------------------------------------------ park / wake
+    async def park(self, reason: str = "requested") -> bool:
+        """Park the guest (M3-CONTRACTS §3): send `park`, wait for the acked
+        `parked`, snapshot the VM to {session}/vm/snapshot. True when parked.
+        The next act()/ui_response/side_result restores it."""
+        self._ensure_plumbing()
+        async with self._vm_lock:
+            if reason == "idle" and (self._task_lock.locked() or self._current_future()):
+                return False            # a task arrived: not idle any more
+            if self.vm_state != "running" or not self._guest_ready():
+                return False
+            self.vm_state = "parking"
+            self._parked_evt.clear()
+            self.send_control("park", {"reason": reason})
+            return await self._park_locked(reason)
+
+    async def _park_locked(self, reason: str) -> bool:
+        deadline = time.monotonic() + self.park_timeout_s
+        while not self._parked_evt.is_set():
+            if self.vm_state != "parking":
+                return False            # the guest died meanwhile: the death path owns it
+            if time.monotonic() > deadline:
+                logger.warning("session %s: no parked within %ss", self.session_key,
+                               self.park_timeout_s)
+                self.sync.host_event("workflow", {"kind": "park_timeout", "reason": reason})
+                self.vm_state = "running"
+                return False
+            try:
+                await asyncio.wait_for(self._parked_evt.wait(), timeout=0.1)
+            except asyncio.TimeoutError:
+                pass
+        t0 = time.monotonic()
+        ok, error = True, None
+        try:
+            await asyncio.to_thread(self.sandbox.snapshot, self.snapshot_dir)
+        except Exception as e:
+            ok, error = False, str(e) or type(e).__name__
+            logger.warning("session %s: snapshot failed (%s); a resume will replay the log",
+                           self.session_key, error)
+        extra = {"ok": ok} if ok else {"ok": ok, "error": error[:200]}
+        self._vm_event("snapshot", "session", t0, **extra)
+        if not ok:
+            await asyncio.to_thread(self.sandbox.stop)   # its memory is lost: resume from the log
+        self._drop_link()
+        self._session_snapshot = ok
+        self.vm_state = "parked"
+        cp = self.sync.state.parked_at
+        self._write_parked_file(reason, cp)
+        self.sync.host_event("workflow", {"kind": "parked", "reason": reason, "checkpoint_seq": cp,
+                                          "snapshot": ok})
+        return True
+
+    async def _adopt_park(self, reason: str) -> None:
+        """The guest parked on its own (a question with ui_attached=false, M5)."""
+        async with self._vm_lock:
+            if self.vm_state == "parking":
+                await self._park_locked(reason)
+
+    def _request_wake(self) -> None:
+        if self._loop is None or self.closed:
+            return
+        if self._wake_task is None or self._wake_task.done():
+            self._wake_task = self._loop.create_task(self._wake_guarded())
+
+    async def _wake_guarded(self) -> None:
+        try:
+            await self.wake()
+        except Exception as e:
+            logger.exception("session %s: wake failed", self.session_key)
+            fut = self._current_future()
+            if fut is not None:
+                fut.set_exception(GuestError(f"resume after park failed: {e}"))
+
+    async def wake(self) -> None:
+        async with self._vm_lock:
+            await self._wake_locked()
+
+    async def _wake_locked(self) -> None:
+        """Resume a parked guest: restore its session snapshot (no hello, seq
+        and cseq continue; the link handshake resends what it has not acked),
+        then send the held controls `ui_response` first. Fallback: base
+        restore (or rootfs boot) + hello{resume: true} + the log return."""
+        if self.vm_state != "parked":
+            return
+        self._cancel_idle()
+        t0 = time.monotonic()
+        if self._session_snapshot and self.sandbox.has_snapshot(self.snapshot_dir):
+            self._drop_link()
+            self._guest_run += 1
+            self._open_guest_ports()
+            restored = True
+            try:
+                await asyncio.to_thread(self.sandbox.restore, self.session.root, self.snapshot_dir)
+            except Exception as e:
+                restored = False
+                logger.warning("session %s: snapshot restore failed (%s)", self.session_key, e)
+                self._vm_event("restore", "session", t0, ok=False, error=str(e)[:200])
+            self._session_snapshot = False        # a snapshot is restored once
+            if restored and await self._wait_link():
+                self._hello_run = self._guest_run     # the guest keeps its hello
+                self.vm_state = "running"
+                self._clear_parked_file()
+                self._vm_event("restore", "session", t0)
+                held, self._deferred = self._deferred, []
+                self._send_ui_first(held)
+                return
+            if restored:
+                self._vm_event("restore", "session", t0, ok=False, error="no connection")
+                await asyncio.to_thread(self.sandbox.stop)
+        self.vm_state = "none"
+        await self._boot(resume=True)
+
+    # ------------------------------------------------------------ idle
+    def _cancel_idle(self) -> None:
+        if self._idle_handle is not None:
+            self._idle_handle.cancel()
+            self._idle_handle = None
+
+    def _arm_idle(self) -> None:
+        self._cancel_idle()
+        if self.session_idle_s is None or self.session_idle_s <= 0 or self._loop is None:
+            return
+        self._idle_handle = self._loop.call_later(
+            self.session_idle_s, lambda: self._loop.create_task(self._idle_park()))
+
+    async def _idle_park(self) -> None:
+        """session_idle_s after a settle: park + snapshot + destroy (D18)."""
+        self._idle_handle = None
+        if self.closed or self._task_lock.locked():
+            return
+        self.sync.host_event("workflow", {"kind": "idle", "idle_s": self.session_idle_s})
+        try:
+            parked = await self.park("idle")
+            async with self._vm_lock:
+                if self._task_lock.locked() or self.vm_state not in ("parked", "running"):
+                    return
+                if parked or self.sandbox.is_alive():
+                    # not parked (a guest without park support): a fresh run next time
+                    await self._destroy("idle")
+        except Exception:
+            logger.exception("session %s: idle park failed", self.session_key)
+
+    # ------------------------------------------------------------ parked file
+    def _write_parked_file(self, reason: str, checkpoint_seq) -> None:
+        """What a new Worker (agent-api restart) needs to resume the parked
+        guest: cseq continues; whether the session snapshot is usable."""
+        try:
+            self.parked_file.parent.mkdir(parents=True, exist_ok=True)
+            self.parked_file.write_text(json.dumps({
+                "cseq": self._outbox.highest_sent if self._outbox is not None else 0,
+                "snapshot": self._session_snapshot, "reason": reason,
+                "checkpoint_seq": checkpoint_seq, "last_seq": self.sync.last_seq,
+                "at": now_ms()}))
+        except OSError as e:
+            logger.warning("could not write %s: %s", self.parked_file, e)
+
+    def _clear_parked_file(self) -> None:
+        try:
+            self.parked_file.unlink()
+        except FileNotFoundError:
+            pass
+
+    def _load_parked(self) -> None:
+        try:
+            info = json.loads(self.parked_file.read_text())
+        except (OSError, ValueError):
+            return
+        self.vm_state = "parked"
+        self._outbox = self._rebased_outbox(int(info.get("cseq", 0)))
+        self._session_snapshot = bool(info.get("snapshot")) and self.sandbox.has_snapshot(
+            self.snapshot_dir)
 
     # ------------------------------------------------------------ act
     async def act(self, task_input: dict) -> dict:
@@ -369,11 +705,20 @@ class Worker:
             raise GuestError(f"host plumbing failed: {e}") from e
 
         cur = self._current
-        if cur is not None and cur[0] == input_id and not cur[1].done():
-            # redelivered while running: send it anyway (the guest dedupes), attach
-            if self._guest_ready():
+        if cur is not None and not cur[1].done():
+            if cur[0] == input_id:
+                # redelivered while running: send it anyway (the guest dedupes), attach
+                if self.vm_state == "parked" or self._guest_ready():
+                    self.send_control(*self._task_message(task_input))
+                return await asyncio.shield(cur[1])
+            if task_input.get("answer_to"):
+                # an answer to the running task's question: deliver it now
+                # (a parked guest is restored, ui_response first) and join its stream
+                self._joined[input_id] = cur[0]
+                self.sync.host_event("workflow", {"kind": "answer_signal", "input_id": input_id,
+                                                  "question_id": task_input["answer_to"]})
                 self.send_control(*self._task_message(task_input))
-            return await asyncio.shield(cur[1])
+                return await asyncio.shield(cur[1])
 
         async with self._task_lock:
             if input_id in self.sync.settled:
@@ -418,14 +763,21 @@ class Worker:
         input_id = task_input["input_id"]
         self.sync.ticket_id = task_input.get("ticket_id")
         self.sync.host_event("workflow", {"kind": "task_signal", "input_id": input_id})
+        self._cancel_idle()
+        self._resumes = 0
+        guest_settled = False
         try:
-            if not self._guest_ready():
-                await self._start_guest()
+            async with self._vm_lock:        # waits out a park in progress
+                if self.vm_state == "parked":
+                    await self._wake_locked()
+                elif not self._guest_ready():
+                    await self._boot(resume=False)
             self.projector.begin_task()         # before any delta can arrive
             self.send_control(*self._task_message(task_input))
             hb = self._loop.create_task(self._heartbeat())
             try:
                 result = await asyncio.wait_for(asyncio.shield(fut), timeout=self.wall_clock_s + 5)
+                guest_settled = True
             except asyncio.TimeoutError:
                 result = self._fail(input_id, "timeout",
                                     f"The task exceeded its wall clock of {int(self.wall_clock_s)}s.")
@@ -438,12 +790,20 @@ class Worker:
             result = self._fail(input_id, "failed", f"The agent failed: {e}")
         self.sync.host_event("workflow", {"kind": "completed", "input_id": input_id,
                                           "outcome": result.get("outcome")})
-        if self.stop_at_settle or not self.sandbox.is_alive():
-            await self._stop_guest("settle" if result.get("outcome") == "done" else result.get("outcome", "failed"))
+        async with self._vm_lock:
+            if self.vm_state != "parked" and (self.stop_at_settle or not guest_settled
+                                              or not self.sandbox.is_alive()):
+                # a guest that did not settle may still be working: never keep it
+                await self._destroy("settle" if result.get("outcome") == "done"
+                                    else result.get("outcome", "failed"))
         if self.sides is not None:
             await self.sides.cancel_all()
         self._end_stream()
         self.sync.ticket_id = None
+        for k in [k for k, v in self._joined.items() if v == input_id]:
+            del self._joined[k]
+        if self.vm_state == "running" and not self.closed:
+            self._arm_idle()
         return result
 
     def _fail(self, input_id: str, outcome: str, message: str, *,
@@ -462,9 +822,15 @@ class Worker:
                 "usage": {}, "manifest": {}}
 
     async def _heartbeat(self) -> None:
+        """Every heartbeat_s while a task runs, parked or not (Temporal's
+        activity heartbeat, M5); a parked guest gets no heartbeat message."""
         while True:
             await asyncio.sleep(self.heartbeat_s)
-            if self._guest_ready():
+            if self.vm_state in ("parked", "parking"):
+                self.sync.host_event("workflow", {"kind": "heartbeat", "at": now_ms(),
+                                                  "acked_seq": self.sync.last_seq,
+                                                  "parked": True})
+            elif self._guest_ready():
                 self.send_control("heartbeat", {"at": now_ms()})
                 self.sync.host_event("workflow", {"kind": "heartbeat", "at": now_ms(),
                                                   "acked_seq": self.sync.last_seq})
@@ -524,17 +890,53 @@ class Worker:
             return
         self._channel = None
         self._link_up.clear()
+        if self.vm_state == "parked" or (self.vm_state == "parking" and self._parked_evt.is_set()):
+            return                      # the parked guest closed its sockets on purpose
         fut = self._current_future()
-        if fut is None:
+        await asyncio.sleep(0.2)      # a settled guest exits right after settle's ack
+        if self.sandbox.is_alive() or self._channel is not None:
+            return                      # a stream drop: the guest reconnects
+        if fut is None or self._current_future() is not fut:
+            if self.vm_state == "running":
+                self.vm_state = "none"  # an idle guest went away (exit at settle)
             return
-        await asyncio.sleep(0.2)      # the guest exits right after settle's ack
-        if not self.sandbox.is_alive() and self._current_future() is fut:
-            fut.set_exception(GuestError("the guest exited before settling the task"))
+        # death mid-task (M3-CONTRACTS §4)
+        if self.vm_state == "parking":
+            self.vm_state = "running"   # the waiting park() gives up
+        if self._resumes >= self.max_resumes:
+            msg = ("the guest died again after a resume" if self._resumes
+                   else "the guest exited before settling the task")
+            fut.set_exception(GuestError(msg))
+            return
+        self._resumes += 1
+        self._loop.create_task(self._death_resume(fut))
+
+    async def _death_resume(self, fut: asyncio.Future) -> None:
+        """Restore the base snapshot on the same workspace, hello{resume:
+        true}; the guest pulls the log return on :5001 and marks open calls
+        lost. max_resumes per task."""
+        self.sync.host_event("workflow", {"kind": "resume", "reason": "guest_died",
+                                          "resumes": self._resumes,
+                                          "acked_seq": self.sync.last_seq})
+        try:
+            async with self._vm_lock:
+                if self._current_future() is not fut:
+                    return
+                self.vm_state = "none"
+                await self._boot(resume=True)
+        except Exception as e:
+            logger.exception("session %s: resume after death failed", self.session_key)
+            if not fut.done():
+                fut.set_exception(GuestError(f"resume after the guest died failed: {e}"))
 
     def _on_event(self, ev: dict) -> None:
         if ev.get("session_id") != self.session_id:
             raise StateSyncError(f"event for foreign session {ev.get('session_id')!r}")
         before = self.sync.last_seq
+        if ev.get("type") == "parked" and ev.get("seq") == before + 1:
+            # before the ack: once it is acked the guest closes and idle-waits,
+            # and must find no listener (M3-CONTRACTS §3, sandbox finding)
+            self._close_guest_ports()
         try:
             acked = self.sync.accept(ev)
         finally:
@@ -545,7 +947,20 @@ class Worker:
         self._emit_many(self.projector.project(ev))
         etype, body = ev["type"], ev["body"]
         if etype == "tool_call" and self.sides is not None:
-            self.sides.handle_tool_call(ev)
+            if body["call_id"] in self._lost_calls:
+                return
+            task = self.sides.handle_tool_call(ev)
+            if task is not None:
+                cid = body["call_id"]
+                self._side_tasks[cid] = task
+                task.add_done_callback(lambda _t, cid=cid: self._side_tasks.pop(cid, None))
+        elif etype == "op_state" and body["state"] == "lost":
+            self._on_lost(body["call_id"])
+        elif etype == "parked":
+            self._parked_evt.set()
+            if self.vm_state == "running":      # not asked for: the guest parked itself
+                self.vm_state = "parking"
+                self._loop.create_task(self._adopt_park(body["reason"]))
         elif etype == "settle":
             fut = self._current_future()
             if fut is not None and body["input_id"] == self._current[0]:
@@ -554,6 +969,19 @@ class Worker:
             fut = self._current_future()
             if fut is not None:
                 fut.set_exception(GuestError(body["message"]))
+
+    def _on_lost(self, call_id: str) -> None:
+        """The resumed guest gave up on a host-originated call: stop running
+        it; a result that still turns up is dropped (send_control)."""
+        self._lost_calls.add(call_id)
+        task = self._side_tasks.pop(call_id, None)
+        if task is not None and not task.done():
+            task.cancel()
+        was_device = self.device_calls.is_open(call_id)
+        self.device_calls.discard(call_id)     # a late POST /tool-result is a 409
+        if task is not None or was_device:
+            self.sync.host_event("side_call", {"call_id": call_id, "state": "lost",
+                                               "cancelled": True})
 
     def _on_live(self, msg: dict) -> None:
         t = msg.get("type")
@@ -569,14 +997,17 @@ class Worker:
         if self.closed:
             return
         self.closed = True
+        self._cancel_idle()
         self._stop_accept.set()
         fut = self._current_future()
         if fut is not None:
             fut.set_exception(GuestError("worker closed"))
+        if self._wake_task is not None and not self._wake_task.done():
+            self._wake_task.cancel()
         if self.sides is not None:
             await self.sides.cancel_all()
         try:
-            await self._stop_guest("close")
+            await self._destroy("close")
         except Exception:
             pass
         if self._pump is not None:
@@ -587,6 +1018,8 @@ class Worker:
                 pass
         if self.proxy is not None:
             await asyncio.to_thread(self.proxy.stop)
+        if self.bulk is not None:
+            await asyncio.to_thread(self.bulk.stop)
         if self.endpoints is not None:
             self.endpoints.close()
         if self._accept_thread is not None:
