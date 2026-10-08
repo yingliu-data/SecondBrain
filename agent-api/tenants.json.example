@@ -1,5 +1,5 @@
 {
-  "_comment": "Copy to data/tenants.json (gitignored, chmod 600) and restart. Generate keys with: openssl rand -hex 32. The env API_SECRET_KEY always maps to a built-in unrestricted 'default' tenant. The three wcc groups are one MCP server process routed by path+token (see wcc-pipeline/workspace/mcp_server/README.md).",
+  "_comment": "Copy to data/tenants.json (gitignored, chmod 600) and restart. Generate keys with: openssl rand -hex 32. The env API_SECRET_KEY always maps to a built-in unrestricted 'default' tenant. The three wcc groups are one MCP server process routed by path+token (see wcc-pipeline/workspace/mcp_server/README.md). To configure the default tenant, add an entry whose api_key equals API_SECRET_KEY with is_default true (it is then not synthesized); its engine wins over the AGENT_ENGINE env default (M3: the default tenant runs on harness).",
   "mcp_servers": {
     "wcc-events": {
       "url": "http://host.docker.internal:8765/mcp/events",
@@ -22,6 +22,12 @@
     }
   },
   "tenants": [
+    {
+      "name": "default",
+      "api_key": "<the same value as the env API_SECRET_KEY>",
+      "is_default": true,
+      "engine": "harness"
+    },
     {
       "name": "wcc-event",
       "api_key": "<openssl rand -hex 32>",

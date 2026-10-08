@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import logging
 
 from fastapi import APIRouter, Request, Depends
@@ -146,10 +147,14 @@ async def _harness_turn(tenant: Tenant, session_id: str, message: str, input_id:
     task in the sandbox; this generator streams the Worker's SSE sink and
     keeps the connection alive. The task outlives a client disconnect; a
     redelivered `input_id` attaches to the running task or gets the stored
-    answer again."""
+    answer again. An answer (`answer_to`) does not queue behind the session:
+    the task it answers holds the queue while it waits for it (the Worker
+    delivers it as `ui_response`, restoring a parked guest first, M3)."""
     session = sessions.get_or_create(tenant.user, tenant.name, session_id)
 
-    async with session_queue.run(f"{tenant.user}/{tenant.name}_{session_id}"):
+    queue_cm = (contextlib.nullcontext() if answer_to
+                else session_queue.run(f"{tenant.user}/{tenant.name}_{session_id}"))
+    async with queue_cm:
         ticket = Ticket.start(session, "chat.turn",
                               inputs={"message": message, "input_id": input_id})
         set_current_context(session, tenant.user)

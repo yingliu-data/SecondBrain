@@ -54,8 +54,11 @@ async def test_text_answer_streams_legacy_tokens_and_stores_the_log(session):
     assert state_hash(fold(stored)) == state_hash(w.sync.state)
     assert session.read_history() == [{"role": "user", "content": "hi"},
                                       {"role": "assistant", "content": "Hello there world"}]
-    kinds = [h["body"].get("kind") for h in w.sync.read_host() if h["type"] in ("vm", "workflow")]
-    assert kinds == ["task_signal", "start", "completed", "stop"]
+    kinds = [h["body"].get("kind") or h["body"]["op"]
+             for h in w.sync.read_host() if h["type"] in ("vm", "workflow")]
+    assert kinds == ["task_signal", "boot", "completed", "destroy"]
+    boot = next(h["body"] for h in w.sync.read_host() if h["type"] == "vm")
+    assert boot["source"] == "rootfs" and boot["ms"] >= 0 and boot["resume"] is False
     assert not sandbox.is_alive()
     await w.close()
 
@@ -182,12 +185,13 @@ async def test_guest_death_fails_the_task_with_error_and_done(session):
                 return True
             g._on_input = die
 
+    # max_resumes=0: the M1 behaviour (M3's death resume: test_host_m3.py)
     w = Worker(session, FakeTenant(), FakeRegistry(), Dying([]), device_calls=DeviceCalls(),
-               **worker_kwargs())
+               **worker_kwargs(max_resumes=0))
     sink = w.attach()
     result = await w.act({"input_id": "in_1", "text": "hi"})
     sse = await drain(sink)
-    assert result["outcome"] == "failed"
+    assert result["outcome"] == "failed" and "exited before settling" in result["answer"]
     assert any(s.startswith("event: error") for s in sse) and sse[-1] == DONE
     assert session.read_history()[-1]["role"] == "assistant"
     await w.close()
@@ -235,6 +239,7 @@ async def test_hello_carries_the_m2_stream_and_limit_keys(session, monkeypatch):
     limits = hello["config"]["limits"]
     assert limits["context_window_tokens"] == 32768 and limits["reserve_tokens"] == 4096
     assert "token_budget" not in limits                             # a proxy knob only
+    assert limits["park_grace_s"] == 30                             # M3
     # the env flip, the window, and the budget the proxy is built with
     monkeypatch.setattr(worker_mod, "LLM_STREAM", False)
     monkeypatch.setattr(worker_mod, "HARNESS_CONTEXT_WINDOW_TOKENS", 8192)
