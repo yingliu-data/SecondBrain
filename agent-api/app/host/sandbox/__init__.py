@@ -29,3 +29,28 @@ class Sandbox(ABC):
 
     @abstractmethod
     def is_alive(self) -> bool: ...
+
+    # --- M3: snapshots (PLAN.md D18, docs/PROTOCOL.md §5–6) -----------------
+    # Default implementations raise; LocalSandbox emulates them (a parked
+    # "snapshot" is the guest process exiting after `parked`; restore starts
+    # a fresh guest process that reconnects with resume semantics).
+
+    def restore(self, session_dir: Path, snapshot_dir: Path | None = None) -> None:
+        """Start the guest for `session_dir` from a snapshot instead of a cold
+        boot. `snapshot_dir=None` → the shared BASE snapshot (harness idle
+        before connecting out); otherwise a per-session snapshot previously
+        written by `snapshot()` (normally `{session_dir}/vm/snapshot/`).
+        Raises SandboxError when no usable snapshot exists; the worker then
+        falls back to `start()` (rootfs boot)."""
+        raise NotImplementedError
+
+    def snapshot(self, snapshot_dir: Path) -> None:
+        """Pause the running guest and write a full snapshot (vmstate + memory
+        + a copy-on-write-safe reference to workspace.img) into `snapshot_dir`,
+        then stop the VM. Called only after the guest emitted `parked` (or is
+        idle at the base snapshot point)."""
+        raise NotImplementedError
+
+    def has_snapshot(self, snapshot_dir: Path | None = None) -> bool:
+        """True when restore(…, snapshot_dir) would find a usable snapshot."""
+        return False
