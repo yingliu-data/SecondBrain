@@ -14,7 +14,6 @@ from app.auth.guest import (
     GUEST_SYSTEM_PROMPT,
     ALLOWED_ORIGINS,
     MAX_INPUT_CHARS,
-    MAX_OUTPUT_TOKENS,
 )
 
 logger = logging.getLogger("guest")

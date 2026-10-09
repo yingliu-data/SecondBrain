@@ -5,7 +5,7 @@ import json
 
 from conftest import IDENT, UPSTREAM_TOKEN, make_config, text_of
 
-from app.gateway import META_TOOLS
+from app.gateway import META_DEFNS
 from app.pins import pin_of
 
 
@@ -76,7 +76,7 @@ async def test_upstream_error_is_result(upstream, harness, agent_api):
 async def test_unreachable_upstream(harness, agent_api):
     async with harness(make_config("http://127.0.0.1:9/mcp")) as gw:
         r = await gw.rpc("tools/list")
-        assert [t["name"] for t in r.json()["result"]["tools"]] == list(META_TOOLS)
+        assert [t["name"] for t in r.json()["result"]["tools"]] == list(META_DEFNS)
         res = await gw.call("call_tool", {"name": "fake__echo", "arguments": {"text": "x"}})
         assert res["isError"] is True
         await gw.events.drain()
@@ -115,10 +115,10 @@ async def test_pins_persist_across_restart(upstream, harness, tmp_path):
 
 async def test_quarantine_mid_session(upstream, harness, agent_api):
     async with harness(make_config(upstream.url)) as gw:
-        gw.gateway.upstreams["fake"].cfg.tool_defs_ttl_s = 0   # always refetch
         assert (await gw.call("fake__echo", {"text": "a"}))["isError"] is False
         upstream.change_echo()
         upstream.add_tool()
+        await gw.gateway.upstreams["fake"].refresh()   # what the TTL's background refresh does
         res = await gw.call("fake__echo", {"text": "b"})
         assert res["isError"] is True
         assert "tool definition changed since this session started (quarantined)" in text_of(res)

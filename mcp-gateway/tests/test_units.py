@@ -6,13 +6,15 @@ from pathlib import Path
 
 import pytest
 from mcp import types
+from protocol.mcp import split_namespaced
 
 from app import ssrf
 from app.config import GatewayConfig, UpstreamConfig
 from app.migrate_config import migrate
 from app.pins import Identity, PinStore, pin_of
 from app.policy import ConcurrencyLimiter, Policy
-from app.schema import mcp_tool_to_openai, split_namespaced, tool_defn
+from app.schema import defn_to_openai, tool_defn
+from app.upstreams import Upstream, UpstreamUnavailable
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -61,7 +63,7 @@ def test_pin_is_stable_and_conversion_does_not_mutate():
                                    "properties": {"x": {"type": "string"}}},
                       annotations=types.ToolAnnotations(readOnlyHint=True))
     before = pin_of(tool_defn(tool))
-    openai = mcp_tool_to_openai("up", tool)
+    openai = defn_to_openai("up__t", tool_defn(tool), via="up")
     assert "$schema" not in openai["function"]["parameters"]
     assert "$schema" in tool.inputSchema
     assert pin_of(tool_defn(tool)) == before
@@ -149,3 +151,15 @@ def test_migrate_cli_on_example(tmp_path):
     assert set(out["upstreams"]) == {"wcc-events", "wcc-mentorship", "wcc-analytic"}
     assert out["tenants"]["default"]["upstreams"] == ["wcc-events", "wcc-mentorship", "wcc-analytic"]
     assert out["tenants"]["wcc-event"]["upstreams"] == ["wcc-events"]
+
+
+async def test_upstream_failure_is_cached():
+    up = Upstream(UpstreamConfig(name="x", url="http://127.0.0.1:9/mcp", allow_private=True), [], hold_s=0)
+    try:
+        with pytest.raises(Exception) as first:
+            await up.tools()
+        assert not isinstance(first.value, UpstreamUnavailable)
+        with pytest.raises(UpstreamUnavailable):        # no reconnect inside the backoff
+            await up.tools()
+    finally:
+        await up.aclose()

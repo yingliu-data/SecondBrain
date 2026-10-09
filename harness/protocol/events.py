@@ -5,7 +5,7 @@ Public contract (other modules import these names):
   EVENT_TYPES: frozenset of the 18 type names in PLAN.md section 5
   REQUIRED_BODY / OPTIONAL_BODY / ENUMS: the per-type body schema
   MIN_INT / STR_LISTS / OPEN_ENUMS: the per-type shape rules beyond types
-  TERMINAL_OP_STATES, UNANSWERED
+  TERMINAL_OP_STATES, OP_INPUT_REQUIRED, UNANSWERED
   make_event(session_id, seq, ts, type, body) -> dict
   validate_event(event) -> list[str]        empty list == valid; never raises
   validate_log(events) -> list[str]         whole-log rules; never raises
@@ -118,12 +118,12 @@ REQUIRED_BODY: dict[str, dict[str, tuple]] = {
 OPTIONAL_BODY: dict[str, dict[str, tuple]] = {
     "input": {"question_id": STR, "answer": STR},
     "llm_response": {"response_id": OPT_STR},
-    "op_state": {"duration_ms": INT, "pid": INT, "side_ref": STR},
+    # M4: `attempt` = the gateway POST of an mcp call (0 = the first);
+    # `input_request` {request_state, schema} only with state input_required
+    "op_state": {"duration_ms": INT, "pid": INT, "side_ref": STR, "attempt": INT,
+                 "input_request": DICT},
     "tool_result": {"spill_ref": OPT_STR, "rewrite": OPT_STR, "late": BOOL},
     "error": {"ref": STR},
-    # M4: a question relayed from a gateway input request (MCP elicitation)
-    # carries what the re-send needs: {request_state, schema}
-    "question": {"input_request": DICT},
 }
 
 ENUMS: dict[str, dict[str, frozenset]] = {
@@ -135,7 +135,7 @@ ENUMS: dict[str, dict[str, frozenset]] = {
     "tool_call": {"side": frozenset(SIDES), "state": frozenset({"RUNNING"})},
     "guard_decision": {"decision": frozenset({"allow", "deny", "ask"})},
     "op_state": {"state": frozenset({
-        "queued", "running", "done", "failed", "timeout", "lost", "killed",
+        "queued", "running", "input_required", "done", "failed", "timeout", "lost", "killed",
     })},
     "wake": {"reason": frozenset({
         "input", "tool_result", "grace", "idle", "question",
@@ -168,7 +168,7 @@ MIN_INT: dict[str, dict[str, int]] = {
     "turn_start": {"includes_through_seq": 0},
     "question": {"deadline": 0},
     "compaction": {"tokens_before": 0, "tokens_after": 0},
-    "op_state": {"duration_ms": 0},
+    "op_state": {"duration_ms": 0, "attempt": 0},
     "bulk": {"bytes": 0},
     "checkpoint": {"through_seq": 1},
     "parked": {"checkpoint_seq": 1},
@@ -181,6 +181,9 @@ STR_LISTS: dict[str, tuple[str, ...]] = {
 }
 
 TERMINAL_OP_STATES = frozenset({"done", "failed", "timeout", "lost", "killed"})
+# M4: an mcp op suspended on a gateway input request (not terminal: the
+# re-send after the answer is op_state{running, attempt + 1})
+OP_INPUT_REQUIRED = "input_required"
 
 
 # ---------------------------------------------------------------- helpers
@@ -220,6 +223,23 @@ def _validate_compaction_range(rng, errors: list[str]) -> None:
         errors.append(f"body.range: need 1 <= from_seq <= to_seq, got {rng}")
 
 
+def _validate_input_request(body: dict, errors: list[str]) -> None:
+    """op_state.input_request: present exactly when state is input_required,
+    {request_state: non-empty str, schema: dict}."""
+    request = body.get("input_request")
+    if body.get("state") != OP_INPUT_REQUIRED:
+        if request is not None:
+            errors.append(f"body.input_request: only with state {OP_INPUT_REQUIRED!r}")
+        return
+    if request is None:
+        errors.append(f"body.input_request: missing (state {OP_INPUT_REQUIRED!r})")
+    elif isinstance(request, dict):
+        if not isinstance(request.get("request_state"), str) or not request["request_state"]:
+            errors.append("body.input_request.request_state: expected non-empty str")
+        if not isinstance(request.get("schema"), dict):
+            errors.append("body.input_request.schema: expected dict")
+
+
 def _validate_body_extras(etype: str, body: dict, errors: list[str]) -> None:
     """Shape rules beyond key presence/type/enum, driven by the tables above."""
     for key, minimum in MIN_INT.get(etype, {}).items():
@@ -238,6 +258,8 @@ def _validate_body_extras(etype: str, body: dict, errors: list[str]) -> None:
         _validate_session_start_tools(body.get("tools"), errors)
     elif etype == "compaction":
         _validate_compaction_range(body.get("range"), errors)
+    elif etype == "op_state":
+        _validate_input_request(body, errors)
 
 
 def validate_event(event) -> list[str]:

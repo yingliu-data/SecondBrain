@@ -54,7 +54,7 @@ class SessionPins:
         return {
             "user": self.ident.user, "tenant": self.ident.tenant, "session": self.ident.session,
             "created_at": self.created_at,
-            "tools": self.tools,
+            "tools": dict(self.tools),   # a snapshot: may be written from a worker thread
             "quarantined": sorted(self.quarantined),
             "unlisted": self.unlisted,
         }
@@ -75,7 +75,11 @@ class PinStore:
     def path(self, ident: Identity) -> Path:
         return self._root / ident.user / ident.tenant / f"{ident.session}.json"
 
+    def cached(self, ident: Identity) -> SessionPins | None:
+        return self._cache.get(ident.key)
+
     def get(self, ident: Identity) -> SessionPins | None:
+        """Memory first, then disk (blocking I/O)."""
         sp = self._cache.get(ident.key)
         if sp is not None:
             return sp
@@ -93,12 +97,16 @@ class PinStore:
         return sp
 
     def save(self, sp: SessionPins) -> None:
-        p = self.path(sp.ident)
+        self.write(sp.ident, sp.to_json())
+
+    def write(self, ident: Identity, data: dict) -> None:
+        """Atomic write of a `SessionPins.to_json()` snapshot (blocking I/O)."""
+        p = self.path(ident)
         p.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=p.parent, prefix=f".{p.name}.", suffix=".tmp")
         try:
             with os.fdopen(fd, "w") as f:
-                json.dump(sp.to_json(), f, sort_keys=True)
+                json.dump(data, f, sort_keys=True)
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp, p)

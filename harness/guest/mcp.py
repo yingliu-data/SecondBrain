@@ -58,16 +58,12 @@ import threading
 from dataclasses import dataclass
 
 from guest.provider import ConnectorConnection, close_quietly, read_lines
+from protocol.mcp import ACTIONS, CALL_HEADER, INPUT_REQUIRED, INPUT_RESPONSE, REATTACH_HEADER
 from protocol.sse import iter_sse_data
 
 DEFAULT_PORT = 5011
 PATH = "/mcp"
 ACCEPT = "application/json, text/event-stream"
-INPUT_REQUIRED = "sb/input_required"
-INPUT_RESPONSE = "sb/input_response"
-ACTIONS = ("accept", "decline", "cancel")
-CALL_HEADER = "X-SB-Call"            # M4-CONTRACTS 3.3: the forwarder keys held calls by it
-REATTACH_HEADER = "X-SB-Reattach"    # "1": join the held call, never re-execute
 GONE = 410                           # a re-attach the forwarder does not know
 _TRUE = frozenset({"true", "yes", "y", "1", "ok", "accept", "approve", "approved"})
 _FALSE = frozenset({"false", "no", "n", "0", "reject", "rejected", "deny"})
@@ -247,11 +243,12 @@ def input_response(request_state: str, answer, schema) -> dict:
     """`_meta["sb/input_response"]` for a user's answer: action "decline" or
     "cancel" when the answer is exactly that word, otherwise "accept" with
     answer_content(schema, answer)."""
-    word = ("" if answer is None else str(answer)).strip().lower()
-    if word in ("decline", "cancel"):
+    answer = "" if answer is None else str(answer)
+    word = answer.strip().lower()
+    if word in ACTIONS and word != "accept":
         return {"request_state": request_state, "action": word}
     return {"request_state": request_state, "action": "accept",
-            "content": answer_content(schema, "" if answer is None else str(answer))}
+            "content": answer_content(schema, answer)}
 
 
 # ---------------------------------------------------------------- the client
@@ -299,52 +296,53 @@ class McpCall:
                 pass
 
     def run(self) -> McpResult:
-        payload = json.dumps(self.request, ensure_ascii=False).encode("utf-8")
         conn = _CallConnection(self, self.client.connector, self.client.port, self.timeout_s,
                                host=self.client.host)
         try:
-            try:
-                headers = {
-                    "Content-Type": "application/json",
-                    "Content-Length": str(len(payload)),
-                    "Accept": ACCEPT,
-                    CALL_HEADER: self.call_id,
-                }
-                if self.reattach:
-                    headers[REATTACH_HEADER] = "1"
-                conn.request("POST", self.client.path, body=payload, headers=headers)
-                resp = conn.getresponse()
-                status = resp.status
-                content_type = (resp.getheader("Content-Type") or "").lower()
-                if status == 200 and "text/event-stream" in content_type:
-                    response = self._from_sse(resp)
-                else:
-                    raw = resp.read()
-                    if status != 200:
-                        raise McpError(f"gateway HTTP {status}: "
-                                       f"{raw.decode('utf-8', 'replace')[:300]}", status=status)
-                    try:
-                        message = json.loads(raw.decode("utf-8"))
-                    except ValueError as exc:
-                        raise McpError(f"gateway response is not JSON: {exc}", status=status) from None
-                    response = _rpc_response(message, self.id)
-                    if response is None:
-                        raise McpError("gateway response carries no JSON-RPC response for "
-                                       f"id {self.id!r}", status=status)
-            except McpError:
-                if self._closed:
-                    raise McpAborted("aborted") from None
-                raise
-            except (OSError, http.client.HTTPException) as exc:
-                if self._closed:
-                    raise McpAborted("aborted") from None
-                if isinstance(exc, socket.timeout):
-                    raise McpError(f"gateway timed out after {self.timeout_s:g} s",
-                                   timed_out=True) from None
-                raise McpError(f"gateway unreachable: {exc.__class__.__name__}: {exc}") from None
-            return parse_call_result(_check_rpc(response))
+            response = self._exchange(conn)
+        except McpError:
+            if self._closed:
+                raise McpAborted("aborted") from None
+            raise
+        except (OSError, http.client.HTTPException) as exc:
+            if self._closed:
+                raise McpAborted("aborted") from None
+            if isinstance(exc, socket.timeout):
+                raise McpError(f"gateway timed out after {self.timeout_s:g} s", timed_out=True) from None
+            raise McpError(f"gateway unreachable: {exc.__class__.__name__}: {exc}") from None
         finally:
             close_quietly(conn)
+        return parse_call_result(_check_rpc(response))
+
+    def _exchange(self, conn) -> dict:
+        """POST the request; the JSON-RPC response object for our id."""
+        payload = json.dumps(self.request, ensure_ascii=False).encode("utf-8")
+        headers = {
+            "Content-Type": "application/json",
+            "Content-Length": str(len(payload)),
+            "Accept": ACCEPT,
+            CALL_HEADER: self.call_id,
+        }
+        if self.reattach:
+            headers[REATTACH_HEADER] = "1"
+        conn.request("POST", self.client.path, body=payload, headers=headers)
+        resp = conn.getresponse()
+        status = resp.status
+        if status == 200 and "text/event-stream" in (resp.getheader("Content-Type") or "").lower():
+            return self._from_sse(resp)
+        raw = resp.read()
+        if status != 200:
+            raise McpError(f"gateway HTTP {status}: {raw.decode('utf-8', 'replace')[:300]}",
+                           status=status)
+        try:
+            message = json.loads(raw.decode("utf-8"))
+        except ValueError as exc:
+            raise McpError(f"gateway response is not JSON: {exc}", status=status) from None
+        response = _rpc_response(message, self.id)
+        if response is None:
+            raise McpError(f"gateway response carries no JSON-RPC response for id {self.id!r}",
+                           status=status)
+        return response
 
     def _from_sse(self, resp) -> dict:
         for data in iter_sse_data(read_lines(resp)):

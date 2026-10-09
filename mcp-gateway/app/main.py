@@ -30,7 +30,8 @@ IDENTITY_PATHS = {"/mcp", "/internal/tools", "/internal/call"}
 
 class AuthMiddleware:
     """Bearer on every route but /healthz (§1); identity headers on
-    IDENTITY_PATHS (§2), trusted only together with the bearer."""
+    IDENTITY_PATHS (§2), trusted only together with the bearer. The parsed
+    Identity goes in the scope state (`identity.request_identity`)."""
 
     def __init__(self, app: ASGIApp, token: str):
         self.app = app
@@ -46,6 +47,7 @@ class AuthMiddleware:
             ident, err = identity_from_headers(headers)
             if ident is None:
                 return await _json(send, 400, {"error": err})
+            scope.setdefault("state", {})["identity"] = ident
         return await self.app(scope, receive, send)
 
 

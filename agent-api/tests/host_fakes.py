@@ -509,19 +509,19 @@ class FakeRegistry:
                                               "parameters": {"type": "object", "properties": {}}}},
         ]
 
-    def get_active_tool_definitions(self, allowed=None):
+    def get_active_tool_definitions(self, allowed=None, engine=None):
         return self._defs()
 
     def get_tools_for_query(self, query, allowed=None):
         return self._defs()
 
-    def get_server_tool_names(self, allowed=None):
+    def get_server_tool_names(self, allowed=None, engine=None):
         return {"web_search", "set_pose"}
 
-    def get_device_tool_names(self, allowed=None):
+    def get_device_tool_names(self, allowed=None, engine=None):
         return {"get_calendar_events"}
 
-    async def execute_server_tool(self, name, arguments, allowed=None):
+    async def execute_server_tool(self, name, arguments, allowed=None, engine=None):
         self.calls.append((name, arguments))
         r = self.results.get(name, f"{name} result")
         if isinstance(r, Exception):

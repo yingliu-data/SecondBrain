@@ -3,8 +3,7 @@ sb/input_response resume, expiry, cancel, concurrency while held."""
 import asyncio
 
 from conftest import IDENT, make_config, text_of
-
-from app.gateway import INPUT_REQUIRED, INPUT_RESPONSE
+from protocol.mcp import INPUT_REQUIRED, INPUT_RESPONSE
 
 
 def _req(result: dict) -> dict:

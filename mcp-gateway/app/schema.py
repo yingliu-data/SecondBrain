@@ -1,9 +1,9 @@
-"""Tool naming and format conversion (moved from agent-api app/mcp/schema.py).
+"""Tool definition and format conversion (moved from agent-api app/mcp/schema.py).
 
-Names everywhere are `{upstream}__{tool}`. `tool_defn` is the canonical MCP
-definition a pin hashes (M4-CONTRACTS.md §5); `defn_to_openai` turns a
-definition into the OpenAI function format used by hello entries and the
-legacy engine.
+Names everywhere are `{upstream}__{tool}` (`protocol.mcp.namespaced`).
+`tool_defn` is the canonical MCP definition a pin hashes (M4-CONTRACTS.md §5);
+`defn_to_openai` turns a definition into the OpenAI function format used by
+hello entries and the legacy engine.
 """
 from __future__ import annotations
 
@@ -11,19 +11,7 @@ import copy
 
 from mcp import types
 
-NAMESPACE_SEP = "__"
-
-
-def namespaced(server_name: str, tool_name: str) -> str:
-    return f"{server_name}{NAMESPACE_SEP}{tool_name}"
-
-
-def split_namespaced(tool_name: str) -> tuple[str, str]:
-    """'wcc__draft_event' -> ('wcc', 'draft_event'). Tool names may contain
-    '__' themselves, so split on the FIRST separator only (upstream names are
-    validated to never contain '__')."""
-    server, _, tool = tool_name.partition(NAMESPACE_SEP)
-    return server, tool
+_DEFN_KEYS = ("name", "description", "inputSchema", "outputSchema", "annotations")
 
 
 def tool_defn(tool: types.Tool) -> dict:
@@ -35,9 +23,6 @@ def tool_defn(tool: types.Tool) -> dict:
     defn = {k: dumped[k] for k in _DEFN_KEYS if k in dumped}
     defn.setdefault("inputSchema", {"type": "object", "properties": {}})
     return defn
-
-
-_DEFN_KEYS = ("name", "description", "inputSchema", "outputSchema", "annotations")
 
 
 def defn_to_openai(name: str, defn: dict, via: str | None = None) -> dict:
@@ -53,8 +38,3 @@ def defn_to_openai(name: str, defn: dict, via: str | None = None) -> dict:
         "type": "function",
         "function": {"name": name, "description": description, "parameters": parameters},
     }
-
-
-def mcp_tool_to_openai(server_name: str, tool: types.Tool) -> dict:
-    """What MCPProxySkill returned for one upstream tool."""
-    return defn_to_openai(namespaced(server_name, tool.name), tool_defn(tool), via=server_name)

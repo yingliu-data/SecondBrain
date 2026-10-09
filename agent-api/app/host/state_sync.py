@@ -8,6 +8,8 @@
                                   (seq > last_seq + 1) are not appended; the ack
                                   is the highest contiguous seq either way.
     .host_event(type, body)       the worker's own log: events/host-NNNNNN.jsonl
+                                  (through host_log(events_dir): one writer per
+                                  directory in the process)
     .read(after_seq=0)            events from disk, in seq order (safe from another
                                   thread: the bulk server's log return)
     .state                        protocol.fold.State folded from the log
@@ -109,6 +111,40 @@ def append_host_event(events_dir: Path, hseq: int, session_id: str | None, type:
     return rec
 
 
+class HostLog:
+    """The one writer of a session's host log in this process: hseq counted
+    from disk once, then incremented in memory under one lock. Get it with
+    host_log(events_dir); StateSync and POST /internal/gateway-events share it."""
+
+    def __init__(self, events_dir: Path, segment_events: int = HARNESS_SEGMENT_EVENTS) -> None:
+        self.events_dir = Path(events_dir)
+        self.segment_events = max(1, int(segment_events))
+        self._lock = threading.Lock()
+        self._count: int | None = None
+
+    def append(self, session_id: str | None, type: str, body: dict) -> dict:
+        with self._lock:
+            if self._count is None:
+                self._count = count_host_events(self.events_dir, self.segment_events)
+            self._count += 1
+            return append_host_event(self.events_dir, self._count, session_id, type, body,
+                                     self.segment_events)
+
+
+_host_logs: dict[Path, HostLog] = {}
+_host_logs_guard = threading.Lock()
+
+
+def host_log(events_dir: Path, segment_events: int = HARNESS_SEGMENT_EVENTS) -> HostLog:
+    """The process-wide HostLog of `events_dir`."""
+    key = Path(events_dir).resolve()
+    with _host_logs_guard:
+        log = _host_logs.get(key)
+        if log is None:
+            log = _host_logs[key] = HostLog(key, segment_events)
+        return log
+
+
 def _truncate(path: Path, size: int) -> None:
     try:
         with path.open("r+b") as f:
@@ -131,7 +167,7 @@ class StateSync:
         self.run = 1
         self.state = State()
         self.ticket_id: str | None = None
-        self._host_count = 0
+        self._host_log = host_log(self.events_dir, self.segment_events)
         self.seen_inputs: set[str] = set()       # across runs
         self.settled: dict[str, dict] = {}       # input_id -> settle body, across runs
         self._load()
@@ -168,7 +204,6 @@ class StateSync:
                     self.settled[ev["body"]["input_id"]] = ev["body"]
             self.seen_inputs |= state.seen_input_ids
             self.run, self.state = run, state
-        self._host_count = count_host_events(self.events_dir, self.segment_events)
 
     def begin_run(self) -> int:
         """Open the next run (a fresh guest with its own session_start at
@@ -266,10 +301,7 @@ class StateSync:
     # ------------------------------------------------------------ host log
     def host_event(self, type: str, body: dict) -> dict:
         """Append a host-session event (workflow, side_call, vm, usage, ...)."""
-        with self._lock:
-            self._host_count += 1
-            return append_host_event(self.events_dir, self._host_count, self.state.session_id,
-                                     type, body, self.segment_events)
+        return self._host_log.append(self.state.session_id, type, body)
 
     def read_host(self) -> list[dict]:
         out: list[dict] = []

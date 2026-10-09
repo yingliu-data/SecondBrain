@@ -1,5 +1,7 @@
 from pydantic import BaseModel, field_validator
 
+from protocol.mcp import valid_upstream_name
+
 
 class MCPServerConfig(BaseModel):
     """A remote MCP server (gateway upstream) that tenants reference by name.
@@ -17,9 +19,9 @@ class MCPServerConfig(BaseModel):
 
     @field_validator("name")
     @classmethod
-    def _no_namespace_separator(cls, v: str) -> str:
-        if "__" in v or ":" in v:
-            raise ValueError("MCP server name must not contain '__' or ':'")
+    def _valid_upstream_name(cls, v: str) -> str:
+        if not valid_upstream_name(v):
+            raise ValueError("MCP server name must be non-empty without '__' or ':'")
         return v
 
 

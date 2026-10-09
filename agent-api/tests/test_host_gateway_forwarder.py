@@ -128,14 +128,12 @@ def test_guest_drops_mid_call_and_reattach_gets_the_stored_answer(fwd):
     assert wait_for(lambda: len(gw.mcp_requests()) == 1)
     assert gw.mcp_requests()[0]["headers"]["x-sb-call"] == "call_1"
     s.close()                                      # the guest goes away (park, link loss)
-    time.sleep(0.7)                                # the handler notices; the call runs on
-    assert relay.pending() == {"call_1": "running"}
+    time.sleep(0.3)                                # the handler notices; the call runs on
     gw.hold.set()                                  # the gateway answers later
-    assert wait_for(lambda: relay.pending() == {"call_1": "done"})
+    assert wait_for(lambda: gw.answered == 1)
     r = client.post("/mcp", json=CALL, headers={"X-SB-Call": "call_1", "X-SB-Reattach": "1"})
     assert r.status_code == 200 and r.json()["result"]["seen"]["id"] == 1
     assert len(gw.mcp_requests()) == 1             # never re-executed
-    assert relay.pending() == {}                   # delivered: dropped
     # a re-attach after delivery: gone
     r = client.post("/mcp", json=CALL, headers={"X-SB-Call": "call_1", "X-SB-Reattach": "1"})
     assert r.status_code == 410 and len(gw.mcp_requests()) == 1
@@ -145,6 +143,37 @@ def test_unknown_call_on_reattach_is_410_and_not_forwarded(fwd):
     gw, relay, f, ep, client, _ = fwd
     r = client.post("/mcp", json=CALL, headers={"X-SB-Call": "ghost", "X-SB-Reattach": "1"})
     assert r.status_code == 410 and gw.requests == []
+    assert r.json()["error"]["type"] == "call_gone"
+
+
+def test_plain_request_is_not_reattachable(fwd):
+    gw, relay, f, ep, client, _ = fwd
+    gw.hold = threading.Event()
+    s = raw_post(ep.path(5011), {}, CALL)          # no X-SB-Call
+    assert wait_for(lambda: len(gw.mcp_requests()) == 1)
+    s.close()
+    time.sleep(0.3)                                # the handler noticed and dropped it
+    gw.hold.set()
+    assert wait_for(lambda: gw.answered == 1)
+    assert relay._calls == {}
+
+
+def test_waiting_handler_wakes_at_once_on_the_answer(fwd):
+    gw, relay, f, ep, client, _ = fwd
+    gw.hold = threading.Event()
+    out: dict = {}
+
+    def call():
+        out["r"] = client.post("/mcp", json=CALL, headers={"X-SB-Call": "call_w"})
+        out["t"] = time.monotonic()
+
+    t = threading.Thread(target=call)
+    t.start()
+    assert wait_for(lambda: len(gw.mcp_requests()) == 1)
+    released = time.monotonic()
+    gw.hold.set()
+    t.join(5)
+    assert out["r"].status_code == 200 and out["t"] - released < 0.3   # no 0.5 s poll
 
 
 def test_reattach_joins_a_running_call_and_a_new_send_after_delivery_is_new(fwd):
@@ -182,7 +211,7 @@ def test_held_call_survives_the_listener_closing_around_a_park(fwd):
     f.stop(join=False)                             # park: the port closes
     ep.close_port(5011)
     gw.hold.set()
-    assert wait_for(lambda: relay.pending() == {"call_3": "done"})
+    assert wait_for(lambda: gw.answered == 1)
     f2 = GatewayForwarder(ep.reopen(5011), relay).start()   # restore: a new listener
     try:
         with httpx.Client(transport=httpx.HTTPTransport(uds=str(ep.path(5011))),

@@ -95,9 +95,8 @@ def test_ports_merge_over_defaults():
     assert cfg.ports == {"control": 5000, "bulk": 5001, "llm": 6010, "gateway": 5011}
     body["config"]["ports"] = {"gateway": 6011}
     assert from_hello(body).ports["gateway"] == 6011
-    body["config"]["ports"] = {"proxy": 5012}
-    with pytest.raises(ValueError, match="ports: unknown port 'proxy'"):
-        from_hello(body)
+    body["config"]["ports"] = {"proxy": 5012, "gateway": 6011}   # unknown names are ignored
+    assert from_hello(body).ports == {**DEFAULT_PORTS, "gateway": 6011}
 
 
 def test_tool_entries_keep_schema_description_and_timeout():

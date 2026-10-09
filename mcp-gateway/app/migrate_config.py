@@ -15,9 +15,13 @@ import json
 import os
 import sys
 
-from app.config import DEFAULT_MAX_CONCURRENT
+from app.config import TenantPolicy
 
 _UPSTREAM_KEYS = ("url", "auth_token", "timeout_s", "tool_defs_ttl_s", "allow_private")
+
+
+def _tenant(upstreams: list[str], promoted: list[str] | None = None) -> dict:
+    return TenantPolicy(upstreams=upstreams, promoted=promoted or []).model_dump()
 
 
 def migrate(tenants_file: dict, api_secret_key: str | None = None) -> dict:
@@ -34,16 +38,9 @@ def migrate(tenants_file: dict, api_secret_key: str | None = None) -> dict:
         ups = all_upstreams if is_default else list(entry.get("mcp_servers") or [])
         if not ups:
             continue
-        tenants[entry["name"]] = {
-            "upstreams": ups,
-            "allow": ["*"],
-            "deny": [],
-            "promoted": list(entry.get("promoted") or []),
-            "max_concurrent": DEFAULT_MAX_CONCURRENT,
-        }
+        tenants[entry["name"]] = _tenant(ups, list(entry.get("promoted") or []))
     if not has_default and all_upstreams:
-        tenants["default"] = {"upstreams": all_upstreams, "allow": ["*"], "deny": [],
-                              "promoted": [], "max_concurrent": DEFAULT_MAX_CONCURRENT}
+        tenants["default"] = _tenant(all_upstreams)
     return {"upstreams": upstreams, "tenants": tenants}
 
 

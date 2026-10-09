@@ -60,6 +60,8 @@ worker), through the guest.mcp client:
       asks for input, as ("op_input", call_id, input_required) — the job is
       then dropped (the operation is suspended: no thread, no connection) and
       the coordinator re-submits it with the user's answer (attempt + 1).
+      An isError text gets the model-visible `error: ` prefix here
+      (error_content: the one place, unless it already starts with "error:").
   detach_mcp() -> set[call_id]  park: close every in-flight mcp connection
       and forget the jobs without reporting (the forwarder holds the calls;
       the coordinator re-attaches with submit_mcp(..., reattach=True)). A
@@ -68,7 +70,8 @@ worker), through the guest.mcp client:
       coordinator's op timeout already recorded the outcome); closes its
       connection.
   send_mcp(call_id, name, args, *, attempt, input_response) fire-and-forget
-      re-send whose result nobody waits for (a cancel when the task ends).
+      re-send whose result nobody waits for (a cancel when the task ends;
+      socket timeout RESEND_TIMEOUT_S).
 abort_all() closes every in-flight mcp connection (state "killed").
 
 Only `inbound.put` touches the coordinator; `State` is never read here.
@@ -89,6 +92,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from guest import tools
+from guest.mcp import GONE, McpAborted, McpError
 from guest.tools import builtin
 from protocol.bulk import spill_path as bulk_spill_path
 
@@ -99,6 +103,15 @@ LOCAL_SPILL_DIR = "spill"             # local spill copies: {workspace}/.harness
 DEFAULT_SPILL_THRESHOLD = 2000
 DEFAULT_SPILL_QUOTA = 50_000_000
 DEFAULT_OP_TIMEOUT = 120.0
+RESEND_TIMEOUT_S = 30.0               # send_mcp: a fire-and-forget re-send nobody waits for
+LOST_MCP = "error: operation lost (the gateway forwarder no longer holds this call)"
+KILLED, DROPPED = "killed", "dropped"  # _Job.stop: abort_all (report "killed") / cancel, detach (report nothing)
+
+
+def error_content(text: str) -> str:
+    """The model-visible text of a failed gateway result: the one place the
+    `error: ` prefix is added (unless the text already carries one)."""
+    return text if text[:6].lower() == "error:" else f"error: {text}"
 
 
 @dataclass
@@ -109,10 +122,9 @@ class _Job:
     keys: frozenset[str]              # paths this op serialises on
     submitted: float
     proc: subprocess.Popen | None = None
-    killed: bool = False
+    stop: str | None = None           # None, KILLED or DROPPED
     held: bool = False                # keys are in OperationManager._busy
     mcp: object | None = None         # the in-flight guest.mcp.McpCall
-    cancelled: bool = False           # dropped by cancel()/detach_mcp(): report nothing
     mcp_job: bool = False             # an mcp call (submit_mcp)
     lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -295,7 +307,7 @@ class OperationManager:
         aborted = set()
         for job in jobs:
             with job.lock:
-                job.killed = True
+                job.stop = job.stop or KILLED
                 proc, call = job.proc, job.mcp
             aborted.add(job.call_id)
             if proc is not None:
@@ -328,13 +340,8 @@ class OperationManager:
     def cancel(self, call_id: str) -> None:
         with self._lock:
             job = self._jobs.pop(call_id, None)
-        if job is None:
-            return
-        with job.lock:
-            job.cancelled = job.killed = True
-            call = job.mcp
-        if call is not None:
-            call.close()
+        if job is not None:
+            self._drop(job)
 
     def send_mcp(self, call_id: str, name: str, args: dict, *, attempt: int,
                  input_response: dict | None = None) -> None:
@@ -344,7 +351,7 @@ class OperationManager:
         def run():
             try:
                 self.mcp.call_tool(call_id, name, args, attempt=attempt,
-                                   input_response=input_response, timeout_s=30.0)
+                                   input_response=input_response, timeout_s=RESEND_TIMEOUT_S)
             except Exception as e:   # noqa: BLE001 - nobody waits for this one
                 log.info("mcp re-send for %s (attempt %d) failed: %s", call_id, attempt, e)
         threading.Thread(target=run, name=f"mcp-send-{call_id}", daemon=True).start()
@@ -358,58 +365,54 @@ class OperationManager:
             for j in jobs:
                 del self._jobs[j.call_id]
         for j in jobs:
-            with j.lock:
-                j.cancelled = j.killed = True
-                call = j.mcp
-            if call is not None:
-                call.close()
+            self._drop(j)
         return {j.call_id for j in jobs}
 
+    @staticmethod
+    def _drop(job: _Job) -> None:
+        """Forget a job (already out of _jobs): it reports nothing; its
+        connection is closed."""
+        with job.lock:
+            job.stop = DROPPED
+            call = job.mcp
+        if call is not None:
+            call.close()
+
     def _run_mcp(self, job: _Job, attempt: int, input_response, timeout_s, reattach=False) -> None:
-        from guest.mcp import GONE, McpError
+        result = error = None
         try:
             call = self.mcp.start(job.call_id, job.name, job.args, attempt=attempt,
                                   input_response=input_response, reattach=reattach,
                                   timeout_s=float(timeout_s) if timeout_s else None)
             with job.lock:
-                aborted = job.killed
+                stopped = job.stop is not None
                 job.mcp = call
-            if aborted:
-                raise McpError("aborted")
+            if stopped:
+                raise McpAborted("aborted")
             result = call.run()
         except McpError as e:
-            if job.cancelled:
-                return
-            if job.killed:
-                state = "killed"
-            elif e.status == GONE:
-                self._finish(job, False, "error: operation lost (the gateway forwarder no longer "
-                                         "holds this call)", "lost")
-                return
-            else:
-                state = "timeout" if e.timed_out else "failed"
-            self._finish(job, False, f"error: {e.message}", state)
-            return
+            error = e
         except Exception as e:   # noqa: BLE001 - a client bug must not lose the call
-            if not job.cancelled:
-                self._finish(job, False, f"error: internal error in the mcp client: {e!r}", "failed")
+            error = McpError(f"internal error in the mcp client: {e!r}")
+        if job.stop == DROPPED:
             return
-        if job.cancelled:
-            return
-        if job.killed:
-            self._finish(job, False, "error: aborted", "killed")
-            return
-        if result.input_required is not None:
+        if job.stop is None and error is None and result.input_required is not None:
             with self._lock:
                 if self._jobs.get(job.call_id) is job:
                     del self._jobs[job.call_id]
             self.inbound.put(("op_input", job.call_id, result.input_required))
             return
-        if result.is_error:
-            text = result.text if result.text.lower().startswith("error") else f"error: {result.text}"
-            self._finish(job, False, text, "failed")
+        if job.stop == KILLED:
+            ok, content, state = False, "error: aborted", "killed"
+        elif error is not None:
+            ok = False
+            content = LOST_MCP if error.status == GONE else f"error: {error.message}"
+            state = "lost" if error.status == GONE else "timeout" if error.timed_out else "failed"
+        elif result.is_error:
+            ok, content, state = False, error_content(result.text), "failed"
         else:
-            self._finish(job, True, result.text, "done")
+            ok, content, state = True, result.text, "done"
+        self._finish(job, ok, content, state)
 
     def running(self) -> set[str]:
         with self._lock:
@@ -447,12 +450,12 @@ class OperationManager:
         self._pending = still
 
     def _report_immediate(self, job: _Job, message: str) -> None:
-        state = "killed" if job.killed else "failed"
+        state = "killed" if job.stop == KILLED else "failed"
         self._finish(job, False, message, state)
 
     def _run(self, job: _Job) -> None:
         try:
-            if job.killed:
+            if job.stop == KILLED:
                 self._finish(job, False, "Error: aborted before it ran", "killed")
                 return
             if job.name == "bash":
@@ -464,7 +467,7 @@ class OperationManager:
                     content = str(content)
                 ok = not content.startswith("Error:")
                 state = "done" if ok else "failed"
-            if job.killed:
+            if job.stop == KILLED:
                 ok, state = False, "killed"
             self._finish(job, ok, content, state)
         except Exception as e:   # programming error in a tool: never kill the worker
@@ -474,7 +477,7 @@ class OperationManager:
     def _run_bash(self, job: _Job) -> tuple[bool, str, str]:
         argv, timeout = builtin.bash_command(job.args, self.limits)
         with job.lock:
-            if job.killed:
+            if job.stop == KILLED:
                 return False, "Error: aborted before it ran", "killed"
             proc = subprocess.Popen(
                 argv, cwd=str(self.workspace), stdin=subprocess.DEVNULL,
@@ -490,7 +493,7 @@ class OperationManager:
             out = _reap(proc)
             state = "timeout"
         text = (out or b"").decode("utf-8", errors="replace")
-        if job.killed:
+        if job.stop == KILLED:
             return False, _note(text, "[killed: aborted]"), "killed"
         if state == "timeout":
             return False, _note(text, f"[timeout after {timeout:g}s: process group killed]"), "timeout"

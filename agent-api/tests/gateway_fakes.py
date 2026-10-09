@@ -1,6 +1,7 @@
 """A fake mcp-gateway on 127.0.0.1 (TCP) for the M4 host tests.
 
-Records every request as {method, path, headers (lower-cased), body}.
+Records every request as {method, path, headers (lower-cased), body};
+`answered` counts the POST /mcp answers fully written.
   POST /mcp                         JSON-RPC echo `{"jsonrpc", "id", "result": {"seen": body}}`;
                                     `sse=True` answers text/event-stream in chunks;
                                     `hold` (threading.Event) delays the answer until set
@@ -25,6 +26,7 @@ class FakeGateway:
         self.status = 200
         self.sse = False
         self.hold: threading.Event | None = None
+        self.answered = 0
         outer = self
 
         class H(BaseHTTPRequestHandler):
@@ -71,6 +73,7 @@ class FakeGateway:
                 answer = {"jsonrpc": "2.0", "id": req.get("id"), "result": {"seen": req}}
                 if not outer.sse:
                     self._json(answer)
+                    outer.answered += 1
                     return
                 self.send_response(outer.status)
                 self.send_header("Content-Type", "text/event-stream")
@@ -80,6 +83,7 @@ class FakeGateway:
                     self.wfile.write(b"%x\r\n%s\r\n" % (len(part), part))
                     self.wfile.flush()
                 self.wfile.write(b"0\r\n\r\n")
+                outer.answered += 1
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), H)
         self.server.daemon_threads = True

@@ -16,13 +16,17 @@ the contract.
 | `app/tool_server.py` | Low-level MCP `Server` behind a stateless, JSON-response `StreamableHTTPSessionManager` |
 | `app/internal.py` | `/internal/tools`, `/internal/upstreams/{name}/tools`, `/internal/call` |
 | `app/gateway.py` | Core: session surface, pins, policy checks, calls, input-required relay, events |
-| `app/upstreams.py` | One client per upstream, tool-def cache (`tool_defs_ttl_s`), `UpstreamCall` (one call in its own task) |
+| `app/upstreams.py` | One client per upstream (pooled httpx clients), tool-def cache `{tool: (defn, pin)}` with stale-while-revalidate and a failure backoff, `UpstreamCall` (one call in its own task) |
 | `app/policy.py` | Allow/deny globs, default deny, `max_concurrent` limiter |
 | `app/pins.py` | `pin_of`, per-session pin files (atomic write) |
-| `app/schema.py` | `{upstream}__{tool}` naming, MCP to OpenAI conversion, canonical definition |
+| `app/schema.py` | Canonical definition, MCP to OpenAI conversion |
 | `app/ssrf.py` | Upstream URL guard (moved from agent-api) |
 | `app/events.py` | Fire-and-forget poster to agent-api `/internal/gateway-events` |
 | `app/migrate_config.py` | `tenants.json` to `gateway.json` |
+
+Wire constants, `{upstream}__{tool}` naming, the identity header names and
+the id rule come from `harness/protocol/mcp.py`, which the guest, the host
+forwarder and agent-api import too.
 
 ## Running
 
@@ -33,7 +37,10 @@ docker build -f mcp-gateway/Dockerfile -t mcp-gateway .  # build context = repo 
 docker compose up -d --build mcp-gateway
 ```
 
-The image needs the `secondbrain-harness` package for `protocol.canonical`.
+The image needs the `secondbrain-harness` package for `protocol.canonical` and
+`protocol.mcp`. Like agent-api, the gateway installs it as an editable path
+dependency (`../harness`), so changes to `harness/protocol` are picked up without
+a reinstall.
 The build context is the repo root. The Dockerfile copies `harness/pyproject.toml`,
 `harness/protocol` and `harness/guest` to `/srv/harness`, next to
 `/srv/mcp-gateway`, so the lock's `../harness` path dependency resolves.
@@ -71,19 +78,19 @@ tools anyway. Add `promoted` lists by hand afterwards, for example
 
 1. `AuthMiddleware` checks every route except `/healthz`.
    - `Authorization: Bearer $INTERNAL_TOKEN` is required (constant-time compare). If it is wrong or missing, the response is 401.
-   - `/mcp`, `/internal/tools` and `/internal/call` also need `X-SB-User`, `X-SB-Tenant` and `X-SB-Session`. Each value must match `[A-Za-z0-9._@-]{1,128}` and must not be `.` or `..`, or the response is 400.
+   - `/mcp`, `/internal/tools` and `/internal/call` also need `X-SB-User`, `X-SB-Tenant` and `X-SB-Session`. Each value must pass `protocol.mcp.is_safe_id` (`[A-Za-z0-9_-]{1,64}`, the rule agent-api uses for user and session ids), or the response is 400. The values become pin-file path segments. The parsed identity is stored in the request's scope state; handlers read it from there.
 2. `/mcp` goes to the SDK session manager in stateless mode with `json_response=True`.
    - Stateless sessions start in the Initialized state, so `tools/call` works without `initialize`.
    - The client must send `Accept: application/json`. The SDK returns 406 without it.
-3. The handlers are registered directly in `Server.request_handlers` (see the SDK notes below). They read the identity from `server.request_context.request.headers`.
+3. The handlers are registered directly in `Server.request_handlers` (see the SDK notes below). They read the identity from `server.request_context.request.state`.
 
 ### Session surface and pins
 
 The first `/internal/tools`, `tools/list` or `tools/call` for an identity builds the pin table:
 
-- It lists every upstream the tenant's policy allows, through the per-upstream cache.
+- It lists every upstream the tenant's policy allows, concurrently, through the per-upstream cache.
 - It keeps every tool that policy allows. Each one is stored as `{pin, defn}` under its namespaced name.
-- It writes `{state}/pins/{user}/{tenant}/{session}.json` atomically: temp file, fsync, rename, then fsync of the directory.
+- It writes `{state}/pins/{user}/{tenant}/{session}.json` atomically: temp file, fsync, rename, then fsync of the directory. Pin-file reads and writes run in a worker thread.
 
 `defn` comes from `tool.model_dump(mode="json", exclude_none=True)`, limited to `name`, `description`, `inputSchema`, `outputSchema` and `annotations`. `pin = sha256_hex(canonical_json(defn))`. The OpenAI conversion always works on a copy.
 
@@ -92,7 +99,9 @@ Later calls use the stored table (memory first, then disk), so a restart keeps e
 1. Policy, re-checked against the current `gateway.json`.
 2. Pin present. If not: "tool not available in this session".
 3. Sticky quarantine set.
-4. Current definition hash against the pin. If it differs, or the tool is gone upstream, the tool joins `quarantined`, the file is rewritten and a `quarantine` event is posted.
+4. Current definition hash against the pin, from the upstream's cache. If it differs, or the tool is gone upstream, the tool joins `quarantined`, the file is rewritten and a `quarantine` event is posted.
+
+The upstream cache holds `{tool: (defn, pin)}`, computed once per fetch. When it is older than `tool_defs_ttl_s`, the cached copy is still served and one background refresh starts, so a changed definition is caught on the first call after that refresh lands. A tools/list that fails with nothing cached is remembered for 30 s; in that window callers fail at once instead of reconnecting.
 
 ### Calls
 
@@ -104,7 +113,9 @@ Later calls use the stored table (memory first, then disk), so a restart keeps e
 | `upstream__tool` | Direct call. Only the tenant's promoted tools; any other name gets an error that says to use `call_tool`. |
 
 The upstream call runs in its own asyncio task (`UpstreamCall`) on a
-short-lived streamable-HTTP client session with the upstream's bearer.
+short-lived streamable-HTTP client session with the upstream's bearer, over a
+long-lived httpx client per upstream (one for tools/list, one for tools/call),
+closed at shutdown.
 Redirects are not followed, because they would bypass the SSRF check, and the
 SSRF check runs again before every connect.
 
@@ -112,7 +123,8 @@ SSRF check runs again before every connect.
 budget runs out, the task is cancelled and the guest gets an error result. The
 upstream `_meta` is removed from the result, so an upstream cannot forge
 `sb/*` keys. Every gateway-side failure is a `CallToolResult` with
-`isError: true`. JSON-RPC errors happen only when the SDK rejects a malformed
+`isError: true` and a plain message; the guest and the legacy skill add the
+model-visible `Error:` prefix. JSON-RPC errors happen only when the SDK rejects a malformed
 request.
 
 ### Input-required relay
@@ -150,7 +162,7 @@ The gateway posts `list` (tools/list, /internal/tools), `call` (upstream answere
 
 ## Beyond the contract (deviations)
 
-- **Unlisted upstreams.** If an allowed upstream cannot be listed when a session pins, its name goes in the pin file's `unlisted` list. Each later call for that session tries to list it again and pins its tools when it answers. No existing pin changes. Under the strict contract, those tools would stay "not available" for the rest of the session.
+- **Unlisted upstreams.** If an allowed upstream cannot be listed when a session pins, its name goes in the pin file's `unlisted` list. Each later call for that session tries to list it again (all such upstreams concurrently; inside the failure backoff this costs nothing) and pins its tools when it answers. The `error` event is posted only for the first failure. No existing pin changes. Under the strict contract, those tools would stay "not available" for the rest of the session.
 - **`describe_tool` extras.** It adds `quarantined: true` for a quarantined tool. Its `inputSchema` is the stored one, and `$schema` is kept.
 - **Direct calls.** A direct `tools/call` for a non-promoted `upstream__tool` is refused, and the error says to use `call_tool`.
 - **`input_expires_s`.** An optional top-level `gateway.json` key (default 3600) that caps `expires_in_s` further.

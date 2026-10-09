@@ -189,6 +189,16 @@ class FakeOps:
     def running(self):
         return set(self._running)
 
+    # M4 mcp surface (no mcp calls run in these scenarios)
+    def detach_mcp(self):
+        return set()
+
+    def cancel(self, call_id):
+        self._running.discard(call_id)
+
+    def send_mcp(self, call_id, name, args, *, attempt, input_response=None):
+        pass
+
 
 def stream_fragments(response) -> list:
     """The fragments guest.provider hands on_delta for `response` served as

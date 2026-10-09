@@ -10,8 +10,8 @@ arguments against a tool cache it fills by calling the list handler, and
 wraps the result; we need the raw `params._meta` (for `sb/input_response`)
 and to return a `CallToolResult` whose `_meta` carries `sb/input_required`.
 The identity comes from the Starlette request the transport attaches to
-each message (`request_context.request`), already validated by the ASGI
-wrapper in `main.py`.
+each message (`request_context.request`): `main.AuthMiddleware` validated it
+and stored it in the request's scope state.
 """
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ from mcp.server.lowlevel import Server
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 
 from app.gateway import Gateway, error_result
-from app.identity import identity_from_headers
+from app.identity import request_identity
 
 logger = logging.getLogger("gateway.tool_server")
 
@@ -32,10 +32,9 @@ def build_server(gateway: Gateway) -> Server:
 
     def _ident():
         request = server.request_context.request
-        ident, err = identity_from_headers(request.headers if request is not None else {})
-        if ident is None:
-            raise ValueError(err)
-        return ident
+        if request is None:
+            raise ValueError("no HTTP request for this message")
+        return request_identity(request)
 
     async def list_tools(_req: types.ListToolsRequest) -> types.ServerResult:
         tools = await gateway.mcp_tools(_ident())

@@ -55,10 +55,11 @@ class SkillRegistry:
         for skill in self._skills.values():
             skill.set_llm(llm)
 
-    def _visible(self, name: str, allowed: set[str] | None) -> bool:
-        """A skill is visible if enabled and within the caller's allowed set
-        (None = unrestricted)."""
-        return self._enabled.get(name, True) and (allowed is None or name in allowed)
+    def _visible(self, name: str, allowed: set[str] | None, engine: str | None = None) -> bool:
+        """A skill is visible if enabled, within the caller's allowed set
+        (None = unrestricted) and offered to the caller's engine (None = any)."""
+        return (self._enabled.get(name, True) and (allowed is None or name in allowed)
+                and (engine is None or engine in self._skills[name].engines))
 
     # ── Public API ────────────────────────────────────────────
 
@@ -73,10 +74,6 @@ class SkillRegistry:
     def unregister(self, name: str):
         self._skills.pop(name, None)
         self._enabled.pop(name, None)
-
-    def skill_names(self) -> list[str]:
-        """Every registered skill's name (enabled or not)."""
-        return list(self._skills)
 
     def list_all(self) -> list[dict]:
         """List all skills with metadata. Used by /api/v1/skills GET."""
@@ -104,12 +101,13 @@ class SkillRegistry:
         logger.info(f"Skill '{skill_name}' {'enabled' if enabled else 'disabled'}")
         return True
 
-    def get_active_tool_definitions(self, allowed: set[str] | None = None) -> list[dict]:
+    def get_active_tool_definitions(self, allowed: set[str] | None = None,
+                                    engine: str | None = None) -> list[dict]:
         """Return tool definitions for ALL enabled skills (fallback path).
         Prefer get_tools_for_query() to filter by relevance."""
         defs = []
         for name, skill in self._skills.items():
-            if self._visible(name, allowed):
+            if self._visible(name, allowed, engine):
                 defs.extend(skill.get_tool_definitions())
         return defs
 
@@ -141,29 +139,32 @@ class SkillRegistry:
         # No keyword hits — fall back to all visible tools
         return self.get_active_tool_definitions(allowed)
 
-    def get_server_tool_names(self, allowed: set[str] | None = None) -> set[str]:
+    def get_server_tool_names(self, allowed: set[str] | None = None,
+                              engine: str | None = None) -> set[str]:
         """Names of all tools that execute on the server."""
         names = set()
         for name, skill in self._skills.items():
-            if self._visible(name, allowed) and skill.execution_side == "server":
+            if self._visible(name, allowed, engine) and skill.execution_side == "server":
                 for t in skill.get_tool_definitions():
                     names.add(t["function"]["name"])
         return names
 
-    def get_device_tool_names(self, allowed: set[str] | None = None) -> set[str]:
+    def get_device_tool_names(self, allowed: set[str] | None = None,
+                              engine: str | None = None) -> set[str]:
         """Names of all tools that execute on the iPhone."""
         names = set()
         for name, skill in self._skills.items():
-            if self._visible(name, allowed) and skill.execution_side == "device":
+            if self._visible(name, allowed, engine) and skill.execution_side == "device":
                 for t in skill.get_tool_definitions():
                     names.add(t["function"]["name"])
         return names
 
     async def execute_server_tool(self, tool_name: str, arguments: dict,
-                                  allowed: set[str] | None = None) -> str:
+                                  allowed: set[str] | None = None,
+                                  engine: str | None = None) -> str:
         """Route a server-side tool call to the right skill."""
         for skill in self._skills.values():
-            if not self._visible(skill.name, allowed):
+            if not self._visible(skill.name, allowed, engine):
                 continue
             for t in skill.get_tool_definitions():
                 if t["function"]["name"] == tool_name:

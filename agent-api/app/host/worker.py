@@ -255,20 +255,15 @@ class Worker:
     # ------------------------------------------------------------ hello
     def tool_entries(self) -> list[dict]:
         """hello.config.tools: host/device tools, then the gateway's mcp
-        entries verbatim (M4-CONTRACTS §4, fetched by load_gateway_entries).
-        Guest built-ins are implicit."""
-        return self.host_tool_entries() + list(self.gateway_entries or [])
-
-    def _host_skill_allowlist(self) -> set[str] | None:
-        """The tenant's allowed skills minus legacy MCP skills (`mcp_*`): MCP
-        goes through the gateway, never as a host tool."""
-        allowed = self.tenant.allowed_skill_names()
-        if allowed is None:
-            names = getattr(self.registry, "skill_names", None)
-            if names is None:
-                return None
-            allowed = set(names())
-        return {n for n in allowed if not n.startswith("mcp_")}
+        entries verbatim (M4-CONTRACTS §4, fetched by load_gateway_entries)
+        except one named like a host tool. Guest built-ins are implicit."""
+        host = self.host_tool_entries()
+        names = {e["name"] for e in host}
+        gateway = [e for e in self.gateway_entries or [] if e.get("name") not in names]
+        if len(gateway) != len(self.gateway_entries or []):
+            logger.warning("session %s: gateway tools named like host tools dropped",
+                           self.session_key)
+        return host + gateway
 
     async def load_gateway_entries(self) -> list[dict]:
         """GET /internal/tools for this session (async httpx, short timeout).
@@ -285,22 +280,19 @@ class Worker:
         except GatewayError as e:
             logger.warning("session %s: starting without MCP tools (%s)", self.session_key, e)
             return []
-        host = {e["name"] for e in self.host_tool_entries()}
-        self.gateway_entries = [e for e in entries if e.get("name") not in host]
-        if len(self.gateway_entries) != len(entries):
-            logger.warning("session %s: gateway tools named like host tools dropped",
-                           self.session_key)
-        return self.gateway_entries
+        self.gateway_entries = entries
+        return entries
 
     def host_tool_entries(self) -> list[dict]:
-        """Host/device tools: the allowlist applied to the registry, each
-        host skill with its OpenAI schema (keyword prefilter retired, D16)."""
-        allowed = self._host_skill_allowlist()
-        server = self.registry.get_server_tool_names(allowed)
-        device = self.registry.get_device_tool_names(allowed)
+        """Host/device tools: the allowlist applied to the registry's
+        harness-engine skills, each with its OpenAI schema (keyword prefilter
+        retired, D16)."""
+        allowed = self.tenant.allowed_skill_names()
+        server = self.registry.get_server_tool_names(allowed, engine="harness")
+        device = self.registry.get_device_tool_names(allowed, engine="harness")
         entries: list[dict] = []
         seen: set[str] = set()
-        for d in self.registry.get_active_tool_definitions(allowed):
+        for d in self.registry.get_active_tool_definitions(allowed, engine="harness"):
             name = d["function"]["name"]
             if name in seen:
                 continue
@@ -368,9 +360,7 @@ class Worker:
             "async_tools": False,
             "question_timeout_s": HARNESS_QUESTION_TIMEOUT_S,
             "ui_attached": True,
-            # the gateway port is the guest's default (5011, M4-CONTRACTS §4):
-            # not sent, so a pre-M4 guest does not reject the hello
-            "ports": {k: v for k, v in self.ports.items() if k != "gateway"},
+            "ports": dict(self.ports),
             "harness_version": HARNESS_VERSION,
         }
         effective_tools(config)  # raises ValueError on a bad tool list, before anything runs
@@ -424,15 +414,18 @@ class Worker:
             self._loop = loop
             self._inbound = asyncio.Queue()
         if self.endpoints is None:
-            self.endpoints = Endpoints(self.session.root, self.ports)
-            self.proxy = LLMProxy(self.endpoints.listener(self.ports["llm"]), self.llm_url,
-                                  self.sync.host_event, token_budget=HARNESS_TOKEN_BUDGET)
-            self.proxy.start()
-            if "gateway" in self.ports:
+            if self.gateway_url and "gateway" in self.ports:
                 self.gateway_relay = GatewayRelay(self.gateway_url, user=self.user,
                                                   tenant=self.tenant.name,
                                                   session=self.session_id,
                                                   host_event=self.sync.host_event)
+            # no gateway: no :5011 listener at all (the guest has no mcp tools)
+            listen = (self.ports if self.gateway_relay is not None
+                      else {k: v for k, v in self.ports.items() if k != "gateway"})
+            self.endpoints = Endpoints(self.session.root, listen)
+            self.proxy = LLMProxy(self.endpoints.listener(self.ports["llm"]), self.llm_url,
+                                  self.sync.host_event, token_budget=HARNESS_TOKEN_BUDGET)
+            self.proxy.start()
             if self.vm_state == "parked":
                 self._close_guest_ports()       # a restarted worker: listen at the wake
             else:
@@ -486,7 +479,7 @@ class Worker:
         if self.endpoints is None:
             return
         self.endpoints.close_port(self.ports["control"])
-        if "gateway" in self.ports:
+        if self.gateway_relay is not None:
             if self.gateway is not None:
                 self.gateway.stop(join=False)
                 self.gateway = None
@@ -506,7 +499,7 @@ class Worker:
             self.bulk = BulkServer(self.endpoints.reopen(self.ports["bulk"]), self.session.root,
                                    self.session_id, self.sync.read,
                                    on_put=self._on_bulk_put).start()
-        if "gateway" in self.ports and self.gateway is None and self.gateway_relay is not None:
+        if self.gateway_relay is not None and self.gateway is None:
             self.gateway = GatewayForwarder(self.endpoints.reopen(self.ports["gateway"]),
                                             self.gateway_relay).start()
 

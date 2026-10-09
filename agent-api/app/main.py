@@ -96,3 +96,5 @@ async def _stop_harness_workers():
     # Harness engine (AGENT_ENGINE=harness or a tenant's `engine`): stop every
     # session's sandbox, LLM proxy and Unix-socket listeners.
     await chat.workers.shutdown()
+    from app.gateway.client import aclose_clients
+    await aclose_clients()

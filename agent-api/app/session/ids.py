@@ -1,15 +1,11 @@
 """Session/ticket identifier generation and path-safe key validation."""
 from __future__ import annotations
 
-import re
 import uuid
 from datetime import datetime, timezone
 
-_SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_\-]{1,64}$")
-
-
-def is_safe_id(value: str) -> bool:
-    return bool(_SAFE_ID_RE.match(value))
+# one rule for user/session ids on both sides of the gateway (protocol.mcp)
+from protocol.mcp import is_safe_id
 
 
 def make_session_id() -> str:
@@ -29,8 +25,8 @@ def safe_key(user_id: str, session_id: str) -> str:
     Both components must match ``^[A-Za-z0-9_\\-]{1,64}$``. The filesystem key
     is the literal ``f"{user_id}_{session_id}"``.
     """
-    if not _SAFE_ID_RE.match(user_id):
+    if not is_safe_id(user_id):
         raise ValueError(f"user_id fails safe-path validation: {user_id!r}")
-    if not _SAFE_ID_RE.match(session_id):
+    if not is_safe_id(session_id):
         raise ValueError(f"session_id fails safe-path validation: {session_id!r}")
     return f"{user_id}_{session_id}"

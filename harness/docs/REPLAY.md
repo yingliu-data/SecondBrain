@@ -103,7 +103,9 @@ does not care which side ran the operation); the gateway pins are in `session_st
 - `tool_call`: turn must exist, `call_id` unique, `(name, side)` offered
   (`allowlist.is_allowed`); opens the call, `limits_consumed.ops += 1`.
 - `guard_decision`: counted; `deny` with `reason == events.UNANSWERED` → `denied_questions += 1`.
-- `op_state`: updates `state` (and `duration_ms`); unknown call → error.
+- `op_state`: updates `state` (and `duration_ms`, `attempt`); `input_required` (mcp
+  calls only, else error) keeps `input_request` on the call, any other state drops it;
+  unknown call → error.
 - `tool_result`: unknown call → error. One late rule: the result is late iff the call
   already has a result or its placeholder was committed, and `body.late` must say so
   (either way round is a `FoldError`). A second result is recorded in

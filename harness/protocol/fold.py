@@ -49,7 +49,7 @@ from dataclasses import asdict, dataclass, field
 from protocol.allowlist import is_allowed
 from protocol.canonical import hash_value, is_int
 from protocol.events import (
-    TERMINAL_OP_STATES, UNANSWERED, log_problems, validate_event,
+    OP_INPUT_REQUIRED, TERMINAL_OP_STATES, UNANSWERED, log_problems, validate_event,
 )
 
 PLACEHOLDER = "[pending]"
@@ -81,7 +81,8 @@ class State:
     # staged_suffix sorted by (origin, seq)
     committed: list = field(default_factory=list)
     staged_suffix: list = field(default_factory=list)
-    open_calls: dict = field(default_factory=dict)         # call_id -> {name, side, turn_id, state, seq, result?}
+    open_calls: dict = field(default_factory=dict)         # call_id -> {name, side, turn_id, state, seq, result?,
+                                                           #   attempt?, input_request? (M4 mcp ops)}
     placeholders: set = field(default_factory=set)         # call_ids shown as placeholders
     queues: dict = field(default_factory=lambda: {"follow_up": [], "steer": []})  # kind -> [seq]
     open_questions: dict = field(default_factory=dict)     # question_id -> {deadline, call_id, answered, seq}
@@ -305,9 +306,20 @@ def _guard_decision(state: State, event: dict) -> None:
 def _op_state(state: State, event: dict) -> None:
     seq, body = event["seq"], event["body"]
     call = _call(state, seq, body["call_id"], "op_state")
+    suspended = body["state"] == OP_INPUT_REQUIRED
+    if suspended and call["side"] != "mcp":
+        raise FoldError(seq, f"op_state {OP_INPUT_REQUIRED} for {call['side']}-side call "
+                             f"{body['call_id']!r} (mcp calls only)")
     call["state"] = body["state"]
     if "duration_ms" in body:
         call["duration_ms"] = body["duration_ms"]
+    if "attempt" in body:
+        call["attempt"] = body["attempt"]
+    # M4: a suspended mcp op carries what its re-send needs; any other state clears it
+    if suspended:
+        call["input_request"] = body["input_request"]
+    else:
+        call.pop("input_request", None)
 
 
 def _tool_result(state: State, event: dict) -> None:

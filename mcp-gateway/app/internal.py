@@ -7,13 +7,13 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from app.gateway import Gateway, result_text
-from app.identity import identity_from_headers
+from app.identity import request_identity
 from app.upstreams import unwrap
 
 
 def routes(gateway: Gateway) -> list[Route]:
     async def tools(request: Request) -> JSONResponse:
-        ident, _ = identity_from_headers(request.headers)
+        ident = request_identity(request)
         return JSONResponse({"tools": await gateway.hello_entries(ident)})
 
     async def upstream_tools(request: Request) -> JSONResponse:
@@ -29,7 +29,7 @@ def routes(gateway: Gateway) -> list[Route]:
         return JSONResponse({"tools": defs})
 
     async def call(request: Request) -> JSONResponse:
-        ident, _ = identity_from_headers(request.headers)
+        ident = request_identity(request)
         try:
             body = await request.json()
         except ValueError:

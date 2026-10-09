@@ -19,39 +19,22 @@ EVENT = {"user": "u", "tenant": "t", "session_id": "s1", "op": "call",
          "tool": "wcc-events__draft_event", "upstream": "wcc-events", "ok": True, "ms": 12}
 
 
-class LiveWorker:
-    closed = False
-
-    def __init__(self, sync):
-        self.sync = sync
-
-
-class Workers:
-    def __init__(self):
-        self.by_key = {}
-
-    def get(self, key):
-        return self.by_key.get(key)
-
-
 @pytest.fixture
 def api(tmp_path, monkeypatch):
     from app.routes import chat
     store = DirStore(tmp_path / "sessions")
-    workers = Workers()
     monkeypatch.setattr(chat, "sessions", store)
-    monkeypatch.setattr(chat, "workers", workers)
     monkeypatch.setattr(events, "INTERNAL_TOKEN", "tok")
     app = FastAPI()
     app.include_router(events.router)
-    return TestClient(app), store, workers
+    return TestClient(app), store
 
 
 AUTH = {"Authorization": "Bearer tok"}
 
 
 def test_gateway_event_auth_and_validation(api):
-    client, store, _ = api
+    client, store = api
     assert client.post("/internal/gateway-events", json=EVENT).status_code == 401
     assert client.post("/internal/gateway-events", json=EVENT,
                        headers={"Authorization": "Bearer nope"}).status_code == 401
@@ -62,14 +45,14 @@ def test_gateway_event_auth_and_validation(api):
 
 
 def test_unknown_session_is_dropped_with_404(api):
-    client, store, _ = api
+    client, store = api
     r = client.post("/internal/gateway-events", json=EVENT, headers=AUTH)
     assert r.status_code == 404 and r.json() == {"stored": False}
     assert not (store.root / "u").exists()
 
 
 def test_without_a_worker_the_event_continues_the_host_log(api):
-    client, store, _ = api
+    client, store = api
     session = store.get_or_create("u", "t", "s1")
     sync = StateSync(session)
     sync.host_event("workflow", {"kind": "task_signal"})       # an earlier worker's
@@ -84,12 +67,11 @@ def test_without_a_worker_the_event_continues_the_host_log(api):
                                "upstream": "wcc-events", "ok": True, "ms": 12}
 
 
-def test_with_a_live_worker_the_event_goes_through_its_state_sync(api):
-    client, store, workers = api
+def test_with_a_live_state_sync_the_event_shares_its_counter(api):
+    client, store = api
     session = store.get_or_create("u", "t", "s1")
     sync = StateSync(session)
     sync.host_event("workflow", {"kind": "task_signal"})
-    workers.by_key["u/t_s1"] = LiveWorker(sync)
     assert client.post("/internal/gateway-events", json=EVENT, headers=AUTH).status_code == 202
     sync.host_event("workflow", {"kind": "completed"})          # one counter, no duplicate hseq
     assert [h["hseq"] for h in sync.read_host()] == [1, 2, 3]
@@ -97,7 +79,7 @@ def test_with_a_live_worker_the_event_goes_through_its_state_sync(api):
 
 
 def test_empty_token_means_no_check(api, monkeypatch):
-    client, store, _ = api
+    client, store = api
     monkeypatch.setattr(events, "INTERNAL_TOKEN", "")
     store.get_or_create("u", "t", "s1")
     assert client.post("/internal/gateway-events", json=EVENT).status_code == 202
@@ -118,7 +100,7 @@ def gateway():
 
 @pytest.mark.asyncio
 async def test_upstream_skill_definitions_from_the_gateway(gateway):
-    gateway.upstream_tools["wcc-events"] = [fn("wcc-events__draft_event"), fn("other__x")]
+    gateway.upstream_tools["wcc-events"] = [fn("wcc-events__draft_event")]
     skill = GatewayUpstreamSkill("wcc-events", base_url=gateway.url, token="tok")
     assert skill.name == "mcp_wcc-events" and skill.get_tool_definitions() == []
     assert await skill.refresh() is True
@@ -141,7 +123,7 @@ async def test_upstream_skill_execute_posts_internal_call_with_identity(gateway)
     assert (h["x-sb-user"], h["x-sb-tenant"], h["x-sb-session"]) == ("u", "t", "sess_legacy")
     assert h["authorization"] == "Bearer tok"
     gateway.call_result = {"content": "denied by policy", "is_error": True}
-    assert await skill.execute("wcc-events__draft_event", {}) == "Error from 'draft_event': denied by policy"
+    assert await skill.execute("wcc-events__draft_event", {}) == "Error: denied by policy"
     assert (await skill.execute("other__x", {})).startswith("Error: tool 'other__x' does not belong")
     gateway.status = 500
     assert (await skill.execute("wcc-events__draft_event", {})).startswith("Error: MCP gateway")

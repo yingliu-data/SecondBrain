@@ -41,7 +41,7 @@ async def test_text_answer_streams_legacy_tokens_and_stores_the_log(session):
     assert names == {"web_search": "host", "set_pose": "host", "get_calendar_events": "device"}
     assert hello["config"]["tools"][0]["schema"]["type"] == "function"
     assert hello["system_block"]["base_prompt"] == "BASE"
-    assert hello["config"]["ports"] == {"control": 5000, "bulk": 5001, "llm": 5010}
+    assert hello["config"]["ports"] == {"control": 5000, "bulk": 5001, "llm": 5010, "gateway": 5011}
     assert hello["principal"] == {"user": "u", "tenant": "t"} and hello["resume"] is False
     # the guest's task message carried attachments and got acked
     guest = sandbox.guests[0]

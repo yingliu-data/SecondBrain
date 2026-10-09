@@ -24,7 +24,7 @@ package = false
 [tool.uv.sources]
 # Non-editable so the Docker image (which copies harness/ next to this dir)
 # installs it the same way. Only `protocol.canonical` is used (pins, §5).
-secondbrain-harness = { path = "../harness" }
+secondbrain-harness = { path = "../harness", editable = true }
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

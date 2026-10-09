@@ -415,3 +415,18 @@ def test_validate_log_is_pure():
     before = copy.deepcopy(log.events)
     assert validate_log(log.events) == validate_log(log.events)
     assert log.events == before
+
+
+def test_op_state_input_required_carries_its_request():
+    request = {"request_state": "rs-1", "schema": {"type": "object"}}
+    ok = {"call_id": "c1", "state": "input_required", "attempt": 0, "input_request": request}
+    assert validate_event(ev(1, "op_state", ok)) == []
+    assert validate_event(ev(1, "op_state", {"call_id": "c1", "state": "running", "attempt": 1})) == []
+    assert validate_event(ev(1, "op_state", {"call_id": "c1", "state": "input_required"})) == [
+        "body.input_request: missing (state 'input_required')"]
+    assert validate_event(ev(1, "op_state", {**ok, "state": "running"})) == [
+        "body.input_request: only with state 'input_required'"]
+    bad = {**ok, "input_request": {"request_state": "", "schema": None}}
+    assert validate_event(ev(1, "op_state", bad)) == [
+        "body.input_request.request_state: expected non-empty str",
+        "body.input_request.schema: expected dict"]

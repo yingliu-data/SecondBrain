@@ -4,7 +4,7 @@ import json
 import pytest
 from conftest import IDENT, make_config
 
-from app.gateway import META_TOOLS
+from app.gateway import META_DEFNS
 from app.pins import pin_of
 
 
@@ -37,6 +37,8 @@ async def test_no_token_configured_is_dev_mode(upstream, harness):
     {**IDENT, "X-SB-Session": "a/b"},
     {**IDENT, "X-SB-Session": "x" * 129},
     {**IDENT, "X-SB-User": "al ice"},
+    {**IDENT, "X-SB-User": "alice@example.com"},                               # agent-api's rule: no '@' or '.'
+    {**IDENT, "X-SB-Session": "x" * 65},
 ])
 async def test_identity_headers_400(upstream, harness, bad):
     async with harness(make_config(upstream.url)) as gw:
@@ -59,7 +61,7 @@ async def test_internal_tools_hello_shape(upstream, harness):
         assert echo["schema"]["type"] == "function" and fn["name"] == "fake__echo"
         assert set(fn["parameters"]["properties"]) == {"text"}
         meta = {t["name"]: t for t in tools[1:]}
-        for name, defn in META_TOOLS.items():
+        for name, defn in META_DEFNS.items():
             assert meta[name]["pin"] == pin_of(defn) and meta[name]["timeout_s"] == 30
         # Later calls return the same pins.
         assert (await gw.internal("GET", "/internal/tools")).json()["tools"] == tools
@@ -69,7 +71,7 @@ async def test_tenant_without_policy_gets_meta_only(upstream, harness):
     async with harness(make_config(upstream.url)) as gw:
         stranger = {**IDENT, "X-SB-Tenant": "nobody"}
         tools = (await gw.internal("GET", "/internal/tools", ident=stranger)).json()["tools"]
-        assert [t["name"] for t in tools] == list(META_TOOLS)
+        assert [t["name"] for t in tools] == list(META_DEFNS)
         r = await gw.internal("POST", "/internal/call", ident=stranger, json={"name": "fake__add", "arguments": {"a": 1, "b": 1}})
         assert r.json()["is_error"] is True
 

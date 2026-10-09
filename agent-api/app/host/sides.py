@@ -183,7 +183,7 @@ class Sides:
                             getattr(self.tenant, "name", ""))
         try:
             raw = await asyncio.wait_for(
-                self.registry.execute_server_tool(name, args, allowed),
+                self.registry.execute_server_tool(name, args, allowed, engine="harness"),
                 timeout=self.host_timeout_s)
         except asyncio.TimeoutError:
             raw = f"Error: {name} timed out after {int(self.host_timeout_s)}s."

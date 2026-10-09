@@ -2,27 +2,32 @@
 from __future__ import annotations
 
 import hmac
-import re
 from collections.abc import Mapping
+
+from protocol.mcp import IDENTITY_HEADERS, is_safe_id
+from starlette.requests import Request
 
 from app.pins import Identity
 
-H_USER, H_TENANT, H_SESSION = "x-sb-user", "x-sb-tenant", "x-sb-session"
-_SAFE = re.compile(r"^[A-Za-z0-9._@-]{1,128}$")
-
 
 def identity_from_headers(headers: Mapping[str, str]) -> tuple[Identity | None, str]:
-    """(Identity, "") or (None, reason). Values become pin-file path
-    segments, so anything outside [A-Za-z0-9._@-]{1,128}, '.' or '..' is refused."""
+    """(Identity, "") or (None, reason). `headers` keys are lower-case. The
+    values become pin-file path segments, so each must pass `is_safe_id`
+    (the rule agent-api uses for the same ids)."""
     values = []
-    for h in (H_USER, H_TENANT, H_SESSION):
-        v = headers.get(h)
+    for h in IDENTITY_HEADERS:
+        v = headers.get(h.lower())
         if not v:
             return None, f"missing {h} header"
-        if not _SAFE.match(v) or v in (".", ".."):
+        if not is_safe_id(v):
             return None, f"invalid {h} header"
         values.append(v)
     return Identity(*values), ""
+
+
+def request_identity(request: Request) -> Identity:
+    """The Identity `main.AuthMiddleware` validated and stored for this request."""
+    return request.state.identity
 
 
 def bearer_ok(authorization: str | None, token: str) -> bool:

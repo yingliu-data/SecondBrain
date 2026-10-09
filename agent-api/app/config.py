@@ -29,6 +29,10 @@ INTERNAL_TOKEN = os.environ.get("INTERNAL_TOKEN", "")
 # Worker -> GET /internal/tools at session start: short, a down gateway must
 # not hold the hello up (the session starts without MCP tools).
 MCP_GATEWAY_TOOLS_TIMEOUT_S = float(os.environ.get("MCP_GATEWAY_TOOLS_TIMEOUT_S", 5))
+# Legacy skill -> GET /internal/upstreams/{name}/tools (background refresh;
+# the gateway lists the upstream live, so slower than the pinned list above).
+MCP_GATEWAY_UPSTREAM_TOOLS_TIMEOUT_S = float(
+    os.environ.get("MCP_GATEWAY_UPSTREAM_TOOLS_TIMEOUT_S", 30))
 # Forwarder / legacy call read timeout: above the longest upstream timeout_s
 # (calls run up to 45 min).
 MCP_GATEWAY_CALL_TIMEOUT_S = float(os.environ.get("MCP_GATEWAY_CALL_TIMEOUT_S", 3600))

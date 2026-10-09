@@ -39,7 +39,7 @@ strings. Times (`at`, `deadline`) are int milliseconds since the epoch.
 | `llm_response` | `turn_id` str, `message` dict (the assistant message verbatim), `finish_reason` str, `usage` dict, `response_id`? str or null | provider |
 | `tool_call` | `turn_id` str, `call_id` str (vLLM's, verbatim), `name` str, `side` in `guest`/`host`/`device`/`mcp`, `args` dict, `state` == `"RUNNING"` | submit |
 | `guard_decision` | `ref` str (a call_id or question_id), `decision` in `allow`/`deny`/`ask`, `reason` str (free text, not an enum: `allowlist`, `unanswered`, `limit`, `placeholder_pass`, `mode`; the fold counts `events.UNANSWERED` = `"unanswered"`), `policy_id` str | guard / coordinator |
-| `op_state` | `call_id` str, `state` in `queued`/`running`/`done`/`failed`/`timeout`/`lost`/`killed`, `duration_ms`? int `>= 0`, `pid`? int, `side_ref`? str | ops / resume |
+| `op_state` | `call_id` str, `state` in `queued`/`running`/`input_required`/`done`/`failed`/`timeout`/`lost`/`killed`, `duration_ms`? int `>= 0`, `pid`? int, `side_ref`? str, `attempt`? int `>= 0`, `input_request`? `{request_state: non-empty str, schema: dict}` (present exactly when `state` is `input_required`) | ops / resume |
 | `tool_result` | `call_id` str, `content` str (verbatim, truncated at `spill_threshold`), `spill_ref`? str or null, `rewrite`? str or null (after_tool output), `late`? bool | ops / hooks |
 | `wake` | `reason` in `input`/`tool_result`/`grace`/`idle`/`question`, `result_ids` list of str, `input_ids` list of str | coordinator |
 | `question` | `question_id` str, `call_id` str, `text` str, `options` list of str, `deadline` int ms `>= 0` | tools |
@@ -77,10 +77,17 @@ strings. Times (`at`, `deadline`) are int milliseconds since the epoch.
   "gateway:<upstream>"}` (or `"gateway"`), then the terminal `op_state`
   (`done`, `failed`, `timeout`, `killed`, `lost`) and its `tool_result`. No
   `side_result` is involved.
-- `question.input_request` (optional dict, `{request_state, schema}`): the
-  question relays a gateway input request for `call_id`; one call may have
-  several such questions (one per round). The re-send after the answer is not
-  an event; the call stays one operation.
+- Input required (M4-CONTRACTS 3.2) is an op state, not a property of the
+  question: `op_state{input_required, attempt, input_request: {request_state,
+  schema}}` suspends the call (not terminal: `TERMINAL_OP_STATES` excludes it),
+  then a plain `question` for the same `call_id` asks the user. The re-send
+  (after the answer, or with action `cancel` after the deadline) is
+  `op_state{running, attempt}`; `attempt` is the gateway POST (`<call_id>#<attempt>`,
+  0 = the first, absent on the first `running`). One call may go through
+  several rounds; it stays one operation with one terminal state. The fold
+  keeps `attempt` and `input_request` on `open_calls[call_id]` (the request
+  is dropped on the next state), which is what a resumed guest rebuilds a
+  suspended call from.
 
 ## Log rules (`validate_log`)
 
@@ -112,7 +119,7 @@ reports them next to the `validate_log` ones (docs/REPLAY.md).
 - `tool_call.(name, side)` appears in `session_start.tools` (the allowlist; a side mismatch
   is an error); `call_id` is unique.
 - `op_state.call_id`, `tool_result.call_id` and `question.call_id` name an earlier
-  `tool_call`; `question_id` is unique.
+  `tool_call`; `question_id` is unique; `op_state{input_required}` names an mcp-side call.
 - `tool_result.late` is exactly `(the call already has a result) or (its placeholder was
   committed by a turn)`. A second result is counted and ignored; a first result after a
   committed placeholder is a new item; a `late: true` that is neither is an error.

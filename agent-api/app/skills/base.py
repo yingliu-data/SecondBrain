@@ -45,6 +45,11 @@ def get_current_session_id() -> str:
 class BaseSkill(ABC):
     """Base class for all skills. Each skill is a self-contained capability."""
 
+    # The agent engines that may offer this skill's tools ("legacy" loop,
+    # "harness" host tools); the registry getters filter on it when given
+    # an engine.
+    engines: frozenset[str] = frozenset({"legacy", "harness"})
+
     @property
     @abstractmethod
     def name(self) -> str:

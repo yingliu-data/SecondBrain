@@ -15,9 +15,11 @@ import asyncio
 import logging
 import time
 
+from protocol.mcp import split_namespaced
+
 from app.config import INTERNAL_TOKEN, MCP_GATEWAY_CALL_TIMEOUT_S, MCP_GATEWAY_URL
 from app.gateway import client
-from app.gateway.client import GatewayError, split_namespaced
+from app.gateway.client import GatewayError
 from app.skills.base import (BaseSkill, get_current_session_id, get_current_tenant,
                              get_current_user_id)
 
@@ -27,6 +29,8 @@ _RETRY_DELAYS = [10, 30]  # then every 60s
 
 
 class GatewayUpstreamSkill(BaseSkill):
+    # the harness guest calls the gateway itself over :5011, never as a host tool
+    engines = frozenset({"legacy"})
 
     def __init__(self, upstream: str, *, base_url: str = MCP_GATEWAY_URL,
                  token: str = INTERNAL_TOKEN, tool_defs_ttl_s: float = 300,
@@ -93,7 +97,7 @@ class GatewayUpstreamSkill(BaseSkill):
         try:
             defs = await client.fetch_upstream_tools(self.upstream, base_url=self.base_url,
                                                      token=self.token)
-            self._cached_defs = [d for d in defs if _owned(d, self.upstream)]
+            self._cached_defs = defs          # the route lists this upstream's only
             self._fetched_at = time.monotonic()
             logger.info("gateway upstream '%s': %d tools cached", self.upstream,
                         len(self._cached_defs))
@@ -131,12 +135,5 @@ class GatewayUpstreamSkill(BaseSkill):
             logger.error("gateway call failed [%s]: %s", tool_name, e)
             return f"Error: MCP gateway unreachable or failed: {e}"
         text = str(result.get("content") or "(no text content returned)")
-        if result.get("is_error"):
-            return f"Error from '{remote_tool}': {text}"
-        return text
-
-
-def _owned(defn: dict, upstream: str) -> bool:
-    fn = defn.get("function") if isinstance(defn, dict) else None
-    name = fn.get("name") if isinstance(fn, dict) else None
-    return isinstance(name, str) and split_namespaced(name)[0] == upstream
+        # "Error" prefix: the legacy loop and sides.py read it as a failure
+        return f"Error: {text}" if result.get("is_error") else text

@@ -5,11 +5,14 @@ import asyncio
 
 import pytest
 
+from app.gateway.upstream_skill import GatewayUpstreamSkill
 from app.host.endpoints import socket_path
 from app.host.sides import DeviceCalls
 from app.host.worker import Worker
+from app.skills.base import BaseSkill
+from app.skills.registry import SkillRegistry as RealRegistry
 from gateway_fakes import FakeGateway
-from host_fakes import (FakeRegistry, FakeSandbox, FakeTenant, session, users_root,  # noqa: F401
+from host_fakes import (FakeSandbox, FakeTenant, session, users_root,  # noqa: F401
                         worker_kwargs)
 
 ENTRY = {"name": "wcc-events__draft_event", "side": "mcp", "pin": "a" * 64, "timeout_s": 2700,
@@ -27,26 +30,28 @@ def fn(name):
                                              "parameters": {"type": "object", "properties": {}}}}
 
 
-class SkillRegistry(FakeRegistry):
-    """Skills by name, with a legacy MCP skill registered like main.py does."""
+class WebSearch(BaseSkill):
+    name = "web_search"
+    display_name = description = version = "web_search"
+    execution_side = "server"
 
-    skills = {"web_search": ["web_search"], "mcp_wcc-events": ["wcc-events__draft_event"]}
+    def get_tool_definitions(self):
+        return [fn("web_search")]
 
-    def skill_names(self):
-        return list(self.skills)
+    async def execute(self, tool_name, arguments):
+        return "found"
 
-    def _names(self, allowed):
-        return [t for s, tools in self.skills.items()
-                if allowed is None or s in allowed for t in tools]
 
-    def get_active_tool_definitions(self, allowed=None):
-        return [fn(n) for n in self._names(allowed)]
-
-    def get_server_tool_names(self, allowed=None):
-        return set(self._names(allowed))
-
-    def get_device_tool_names(self, allowed=None):
-        return set()
+def SkillRegistry():
+    """The real registry (no disk discovery) with a host skill and a legacy
+    MCP skill registered like main.py does."""
+    reg = RealRegistry.__new__(RealRegistry)
+    reg._skills, reg._enabled = {}, {}
+    reg.register(WebSearch())
+    legacy = GatewayUpstreamSkill("wcc-events", base_url="http://127.0.0.1:9")
+    legacy._cached_defs = [fn("wcc-events__draft_event")]
+    reg.register(legacy)
+    return reg
 
 
 @pytest.fixture
@@ -71,7 +76,7 @@ async def test_hello_appends_gateway_entries_and_drops_legacy_mcp_skills(session
     req = next(r for r in gateway.requests if r["path"] == "/internal/tools")
     h = req["headers"]
     assert (h["x-sb-user"], h["x-sb-tenant"], h["x-sb-session"]) == ("u", "t", "s1")
-    assert "gateway" not in w.last_hello["config"]["ports"]
+    assert w.last_hello["config"]["ports"]["gateway"] == 5011
     assert socket_path(session.root, 5011).exists() and w.gateway is not None
     await w.close()
     assert not socket_path(session.root, 5011).exists()
@@ -115,9 +120,9 @@ async def test_lost_mcp_call_discards_its_held_entry(session, gateway):
     w._ensure_plumbing()
     entry = w.gateway_relay.held("call_9", False, b'{"id": 1}', {})
     assert entry.done.wait(5)
-    assert w.gateway_relay.pending() == {"call_9": "done"}
+    assert w.gateway_relay.held("call_9", True, b"", {}) is entry     # stored
     w._on_lost("call_9")
-    assert w.gateway_relay.pending() == {}
+    assert w.gateway_relay.held("call_9", True, b"", {}) is None      # gone
     # park closes :5011 but keeps the relay; the wake opens a new forwarder
     w._close_guest_ports()
     assert w.gateway is None and not socket_path(session.root, 5011).exists()
@@ -125,4 +130,15 @@ async def test_lost_mcp_call_discards_its_held_entry(session, gateway):
     w._open_guest_ports()
     assert w.gateway is not None and w.gateway_relay is relay
     await asyncio.sleep(0)
+    await w.close()
+
+
+@pytest.mark.asyncio
+async def test_no_gateway_url_means_no_relay_and_no_5011(session):
+    w = Worker(session, FakeTenant(), SkillRegistry(), FakeSandbox([]),
+               **worker_kwargs(gateway_url=""))
+    w._ensure_plumbing()
+    assert w.gateway_relay is None and w.gateway is None
+    assert not socket_path(session.root, 5011).exists()
+    assert await w.load_gateway_entries() == []
     await w.close()

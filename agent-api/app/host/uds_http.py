@@ -1,6 +1,7 @@
 """uds_http — the threaded HTTP/1.1 server both guest-facing relays share
 (llm_proxy.py on :5010, gateway_forwarder.py on :5011).
 
+  error_body(message, kind)   the JSON error body both relays answer with
   UDSHandler       BaseHTTPRequestHandler with the shared bits: keep-alive
                    HTTP/1.1, `_reply`, `_error`, `_read_body` (Content-Length
                    or chunked; always drained so keep-alive works) and
@@ -21,7 +22,13 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Callable
 
+import httpx
+
 logger = logging.getLogger("host.uds_http")
+
+
+def error_body(message: str, kind: str) -> bytes:
+    return json.dumps({"error": {"message": message, "type": kind}}).encode()
 
 
 class UDSHandler(BaseHTTPRequestHandler):
@@ -49,8 +56,7 @@ class UDSHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _error(self, status: int, message: str, kind: str) -> None:
-        body = json.dumps({"error": {"message": message, "type": kind}}).encode()
-        self._reply(status, body, "application/json")
+        self._reply(status, error_body(message, kind), "application/json")
 
     def _read_body(self) -> bytes:
         """The request body (Content-Length or chunked transfer coding)."""
@@ -68,10 +74,11 @@ class UDSHandler(BaseHTTPRequestHandler):
         return self.rfile.read(length) if length else b""
 
     def _relay_sse(self, resp, content_type: str, headers: dict | None = None,
-                   on_data: Callable[[bytes], None] | None = None) -> None:
+                   on_data: Callable[[bytes], None] | None = None) -> str | None:
         """Relay an httpx streaming response's raw bytes as they arrive.
-        An upstream cut (httpx.HTTPError) or a guest that left (OSError)
-        propagates to the caller after the headers went out."""
+        None when the stream ran to its end; else why it ended early (an
+        upstream cut, httpx.HTTPError, or a guest that left, OSError) - the
+        headers went out already, so there is nothing left to answer."""
         self.send_response(resp.status_code)
         self.send_header("Content-Type", content_type)
         self.send_header("Cache-Control", "no-cache")
@@ -81,11 +88,16 @@ class UDSHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.flush()
         self.close_connection = True
-        for data in resp.iter_raw():
-            self.wfile.write(data)
-            self.wfile.flush()
-            if on_data is not None:
-                on_data(data)
+        try:
+            for data in resp.iter_raw():
+                self.wfile.write(data)
+                self.wfile.flush()
+                if on_data is not None:
+                    on_data(data)
+        except (httpx.HTTPError, OSError) as e:
+            self.log.warning("stream ended: %s", e)
+            return str(e) or type(e).__name__
+        return None
 
 
 class _Server(socketserver.ThreadingMixIn, HTTPServer):

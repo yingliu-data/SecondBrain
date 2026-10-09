@@ -8,30 +8,31 @@ from __future__ import annotations
 
 from fnmatch import fnmatchcase
 
+from protocol.mcp import split_namespaced
+
 from app.config import DEFAULT_MAX_CONCURRENT, GatewayConfig, TenantPolicy
-from app.schema import split_namespaced
 
 
 class Policy:
     def __init__(self, config: GatewayConfig):
         self._config = config
+        # The tenant's upstreams that are actually configured, in order.
+        self._upstreams = {t: [u for u in dict.fromkeys(tp.upstreams) if u in config.upstreams]
+                           for t, tp in config.tenants.items()}
+        self._upstream_sets = {t: frozenset(ups) for t, ups in self._upstreams.items()}
 
     def tenant(self, tenant: str) -> TenantPolicy | None:
         return self._config.tenants.get(tenant)
 
     def upstreams_for(self, tenant: str) -> list[str]:
-        """The tenant's upstreams that are actually configured, in order."""
-        tp = self.tenant(tenant)
-        if tp is None:
-            return []
-        return [u for u in dict.fromkeys(tp.upstreams) if u in self._config.upstreams]
+        return self._upstreams.get(tenant, [])
 
     def allowed(self, tenant: str, name: str) -> bool:
         tp = self.tenant(tenant)
         if tp is None:
             return False
         upstream, tool = split_namespaced(name)
-        if not tool or upstream not in self.upstreams_for(tenant):
+        if not tool or upstream not in self._upstream_sets[tenant]:
             return False
         if any(fnmatchcase(name, g) for g in tp.deny):
             return False

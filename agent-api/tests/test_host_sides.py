@@ -58,7 +58,7 @@ async def test_host_skill_errors_and_avatar_compaction():
 @pytest.mark.asyncio
 async def test_host_skill_timeout():
     class Slow(FakeRegistry):
-        async def execute_server_tool(self, name, arguments, allowed=None):
+        async def execute_server_tool(self, name, arguments, allowed=None, engine=None):
             await asyncio.sleep(5)
 
     sides, sent, _, _ = make_sides(Slow(), host_timeout_s=0.05)
@@ -101,7 +101,7 @@ async def test_device_timeout_and_mcp_is_not_a_side_call():
 class RememberRegistry(FakeRegistry):
     """The real remember skill behind the registry interface."""
 
-    async def execute_server_tool(self, name, arguments, allowed=None):
+    async def execute_server_tool(self, name, arguments, allowed=None, engine=None):
         from app.skills.remember.skill import RememberSkill
         self.calls.append((name, arguments))
         return await RememberSkill().execute(name, arguments)

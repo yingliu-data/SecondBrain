@@ -144,7 +144,10 @@ def test_input_required_question_answer_final_result(rig):
     assert q1["body"]["call_id"] == "call_ok"
     assert q1["body"]["text"] == "Approve the draft? (round 1)"
     assert q1["body"]["options"] == ["approve", "reject"]
-    assert q1["body"]["input_request"]["schema"] == APPROVAL_SCHEMA
+    assert "input_request" not in q1["body"]
+    suspended = r.of("op_state")[1]
+    assert suspended["state"] == "input_required" and suspended["attempt"] == 0
+    assert suspended["input_request"]["schema"] == APPROVAL_SCHEMA
     r.host.send("ui_response", {"input_id": "ui-1", "question_id": q1["body"]["question_id"],
                                 "answer": "approve"})
     q2 = r.host.wait_for("question", timeout=10, after_seq=q1["seq"])
@@ -153,14 +156,16 @@ def test_input_required_question_answer_final_result(rig):
     settle = settle_of(r, proc)
     assert settle["answer"] == "Approved."
     assert r.of("tool_result")[0]["content"] == "approved: approve"
-    # one operation: running ... done, never a second running
-    assert [b["state"] for b in r.of("op_state")] == ["running", "done"]
+    # one operation: each round suspends it and re-sends it with the next attempt
+    assert [(b["state"], b.get("attempt")) for b in r.of("op_state")] == [
+        ("running", None), ("input_required", 0), ("running", 1), ("input_required", 1),
+        ("running", 2), ("done", None)]
     reqs = r.host.gateway.requests
     assert [q["body"]["id"] for q in reqs] == ["call_ok#0", "call_ok#1", "call_ok#2"]
     second = reqs[1]["body"]["params"]
     assert second["name"] == "wcc-events__approve" and second["arguments"] == {"rounds": 2}
     assert second["_meta"]["sb/input_response"] == {
-        "request_state": q1["body"]["input_request"]["request_state"], "action": "accept",
+        "request_state": suspended["input_request"]["request_state"], "action": "accept",
         "content": {"decision": "approve"}}
     assert all(q["headers"]["x-sb-call"] == "call_ok" and "x-sb-reattach" not in q["headers"]
                for q in reqs)
@@ -177,7 +182,7 @@ def test_question_deadline_sends_cancel(rig):
     reqs = r.host.gateway.requests
     assert reqs[-1]["body"]["params"]["_meta"]["sb/input_response"]["action"] == "cancel"
     assert r.of("tool_result")[0]["content"] == "error: input request canceled by the user"
-    assert [b["state"] for b in r.of("op_state")] == ["running", "failed"]
+    assert [b["state"] for b in r.of("op_state")] == ["running", "input_required", "running", "failed"]
     check_replay(r.host.events)
 
 
@@ -285,8 +290,8 @@ def test_fresh_process_after_park_loses_the_in_flight_mcp_call(rig):
 
 def test_fresh_process_after_park_keeps_a_suspended_input_request(rig):
     """The returned log ends with parked and the mcp op is suspended on its
-    question: the new process rebuilds it from question.input_request and
-    re-sends on the answer (same call, attempt 1)."""
+    question: the new process rebuilds it from the folded
+    op_state{input_required} and re-sends on the answer (same call, attempt 1)."""
     r, proc = run(rig, [tool_calls([("call_s", "wcc-events__approve", {})]), text("Kept.")],
                   m4_hello(question_timeout_s=60))
     q = r.host.wait_for("question", timeout=10)
@@ -305,6 +310,8 @@ def test_fresh_process_after_park_keeps_a_suspended_input_request(rig):
     assert settle["answer"] == "Kept."
     assert r.of("tool_result")[0]["content"] == "approved: approve"
     assert r.host.gateway.requests[-1]["body"]["id"] == "call_s#1"
+    assert [(b["state"], b.get("attempt")) for b in r.of("op_state")] == [
+        ("running", None), ("input_required", 0), ("running", 1), ("done", None)]
     check_parked_log(r.host.events)
 
 
@@ -382,3 +389,10 @@ def test_result_text_and_elicitation_mapping():
     assert mcpmod.input_response("rs", "decline", boolean) == {"request_state": "rs", "action": "decline"}
     assert mcpmod.input_response("rs", "no", boolean) == {
         "request_state": "rs", "action": "accept", "content": {"ok": False}}
+
+
+def test_error_content_prefixes_once():
+    from guest.ops import error_content
+    assert error_content("upstream said no") == "error: upstream said no"
+    assert error_content("Error: already said") == "Error: already said"
+    assert error_content("Errors found: 3") == "error: Errors found: 3"

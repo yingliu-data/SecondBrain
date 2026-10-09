@@ -15,17 +15,18 @@ $INTERNAL_TOKEN` (when the token is set). `X-SB-Reattach` is never forwarded.
 Answer. The gateway's status and body go back verbatim (with its
 Content-Type and Mcp-* headers). The read timeout is
 MCP_GATEWAY_CALL_TIMEOUT_S, above the longest upstream timeout_s (a call can
-run 45 minutes). A gateway that cannot be reached is a 502 JSON body and a
+run 45 minutes). A gateway that cannot be reached is a 502 JSON body (uds_http.error_body) and a
 `gateway{op: error, source: forwarder}` host event (the gateway cannot log
 its own outage, PLAN.md 14).
 
-Plain requests (no `X-SB-Call`: tools/list, ...) are relayed on the guest's
-connection; a `text/event-stream` answer is relayed as it arrives.
-
-Held calls (§3.3: long calls survive a park). A request with `X-SB-Call:
-<call_id>` runs in its own thread, independent of the guest's connection; the
-answer (buffered) is kept in the worker-lived GatewayRelay table
-`{call_id: running | done(status, body)}`:
+One relay path. Every request runs in its own thread, independent of the
+guest's connection, and its answer (buffered, JSON or text/event-stream
+alike) is kept in the worker-lived GatewayRelay table `{key: running |
+done(status, body)}`. The key is the request's `X-SB-Call` (§3.3: long calls
+survive a park); a request without one (tools/list, ...) gets an internal
+key that no guest can name, so it is never re-attachable and its entry goes
+when the guest leaves. The handler blocks on the guest's connection and the
+entry's wake pipe together (no polling). For an `X-SB-Call` entry:
   - the guest's connection drops (park, snapshot, link loss): the gateway
     request keeps running, its answer is stored
   - the same call_id again (with or without `X-SB-Reattach: 1`): joins the
@@ -41,36 +42,39 @@ accepting, never a held call.
 
   GatewayRelay(gateway_url, user=, tenant=, session=, host_event=None,
                token=INTERNAL_TOKEN, timeout_s=MCP_GATEWAY_CALL_TIMEOUT_S)
-    .discard(call_id) .pending() .close()
+    .held(key, reattach, body, headers) .discard(call_id) .close()
+    (gateway_url must be set: no relay is made without a gateway)
   GatewayForwarder(listener, relay)   .start() / .stop(join=True)
 """
 from __future__ import annotations
 
 import logging
+import os
 import select
 import socket
 import threading
 import time
+import weakref
 from typing import Callable
 
 import httpx
 
+from protocol.mcp import CALL_HEADER, REATTACH_HEADER
+
 from app.config import INTERNAL_TOKEN, MCP_GATEWAY_CALL_TIMEOUT_S
 from app.gateway.client import auth_headers, identity_headers
-from app.host.uds_http import UDSHandler, UDSService
+from app.host.uds_http import UDSHandler, UDSService, error_body
 
 logger = logging.getLogger("host.gateway_forwarder")
 
 MCP_PATH = "/mcp"
-CALL_HEADER = "X-SB-Call"
-REATTACH_HEADER = "X-SB-Reattach"
+_CALL = CALL_HEADER.lower()
 # never forwarded from the guest (hop-by-hop, recomputed, or the host's to set)
 _DROP = {"host", "content-length", "connection", "keep-alive", "proxy-connection",
          "proxy-authorization", "proxy-authenticate", "te", "trailer", "trailers",
          "transfer-encoding", "upgrade", "authorization"}
 # gateway response headers passed back besides Content-Type
 _PASS_BACK = ("mcp-session-id", "mcp-protocol-version")
-GONE_BODY = b'{"error": {"message": "unknown call_id", "type": "call_gone"}}'
 
 
 def guest_headers(headers) -> dict:
@@ -79,14 +83,24 @@ def guest_headers(headers) -> dict:
     out: dict[str, str] = {}
     for k, v in headers.items():
         lk = k.lower()
-        if lk in _DROP or (lk.startswith("x-sb-") and lk != "x-sb-call"):
+        if lk in _DROP or (lk.startswith("x-sb-") and lk != _CALL):
             continue
         out[k] = v
     return out
 
 
+def _close_fds(*fds: int) -> None:
+    for fd in fds:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
 class HeldCall:
-    """One X-SB-Call request: running until `done` is set, then the answer."""
+    """One gateway request: running until `done` is set, then the answer.
+    finish() also writes to a wake pipe that is never drained, so every
+    waiter's select() sees it (level-triggered)."""
 
     def __init__(self) -> None:
         self.done = threading.Event()
@@ -94,10 +108,30 @@ class HeldCall:
         self.body = b""
         self.content_type = "application/json"
         self.headers: dict[str, str] = {}
+        self._wake_r, self._wake_w = os.pipe()
+        weakref.finalize(self, _close_fds, self._wake_r, self._wake_w)
 
-    def finish(self, status: int, body: bytes, content_type: str, headers: dict) -> None:
-        self.status, self.body, self.content_type, self.headers = status, body, content_type, headers
+    def finish(self, status: int, body: bytes, content_type: str = "application/json",
+               headers: dict | None = None) -> None:
+        self.status, self.body, self.content_type = status, body, content_type
+        self.headers = headers or {}
         self.done.set()
+        os.write(self._wake_w, b"x")
+
+    def wait(self, conn: socket.socket) -> bool:
+        """Block until the answer is in (True) or the guest closed `conn`
+        (False: the call runs on, a re-attach gets it)."""
+        watch = [conn, self._wake_r]
+        while not self.done.is_set():
+            try:
+                readable, _, _ = select.select(watch, [], [])
+            except (OSError, ValueError):
+                return False
+            if conn in readable:
+                if _peer_gone(conn):
+                    return False
+                watch = [self._wake_r]       # pipelined bytes: only the answer now
+        return True
 
 
 class GatewayRelay:
@@ -108,76 +142,64 @@ class GatewayRelay:
                  host_event: Callable[[str, dict], object] | None = None,
                  token: str = INTERNAL_TOKEN,
                  timeout_s: float = MCP_GATEWAY_CALL_TIMEOUT_S) -> None:
-        self.upstream_url = (gateway_url or "").rstrip("/")
+        if not gateway_url:
+            raise ValueError("GatewayRelay needs a gateway URL")
+        self.upstream_url = gateway_url.rstrip("/")
         self.host_event = host_event
         self.stamp = {**identity_headers(user, tenant, session), **auth_headers(token)}
-        self.client = httpx.Client(base_url=self.upstream_url or "http://unset.invalid",
+        self.client = httpx.Client(base_url=self.upstream_url,
                                    timeout=httpx.Timeout(timeout_s, connect=10.0))
         self._lock = threading.Lock()
-        self._calls: dict[str, HeldCall] = {}
-        self.requests = 0               # gateway requests sent (tests)
+        self._calls: dict[object, HeldCall] = {}
 
     # -- the table
-    def held(self, call_id: str, reattach: bool, body: bytes, headers: dict) -> HeldCall | None:
+    def held(self, key, reattach: bool, body: bytes, headers: dict) -> HeldCall | None:
         """The entry to wait on: an existing one (joined or stored), a new
-        one started now, or None for an unknown call_id on a re-attach."""
+        one started now, or None for an unknown key on a re-attach."""
         with self._lock:
-            entry = self._calls.get(call_id)
+            entry = self._calls.get(key)
             if entry is not None:
                 return entry
             if reattach:
                 return None
-            entry = self._calls[call_id] = HeldCall()
+            entry = self._calls[key] = HeldCall()
         threading.Thread(target=self._run, args=(entry, body, headers), daemon=True,
-                         name=f"gateway-call:{call_id}").start()
+                         name=f"gateway-call:{key if isinstance(key, str) else '-'}").start()
         return entry
 
-    def delivered(self, call_id: str, entry: HeldCall) -> None:
+    def delivered(self, key, entry: HeldCall) -> None:
         with self._lock:
-            if self._calls.get(call_id) is entry:
-                del self._calls[call_id]
+            if self._calls.get(key) is entry:
+                del self._calls[key]
 
-    def discard(self, call_id: str) -> None:
-        """The guest declared the call lost (death resume): forget it. A
-        gateway request still running finishes into nothing."""
+    def discard(self, call_id) -> None:
+        """The guest declared the call lost (death resume), or left a request
+        that cannot be re-attached: forget it. A gateway request still
+        running finishes into nothing."""
         with self._lock:
             self._calls.pop(call_id, None)
 
-    def pending(self) -> dict[str, str]:
-        with self._lock:
-            return {cid: "done" if e.done.is_set() else "running" for cid, e in self._calls.items()}
-
-    def _run(self, entry: HeldCall, body: bytes, headers: dict) -> None:
-        try:
-            resp = self.post(body, headers)
-            if resp is None:
-                entry.finish(502, b'{"error": {"message": "gateway unreachable", '
-                                  b'"type": "gateway_unreachable"}}', "application/json", {})
-                return
-            entry.finish(resp.status_code, resp.content,
-                         resp.headers.get("Content-Type", "application/json"), _pass_back(resp))
-        except Exception as e:           # never leave a joiner waiting
-            logger.exception("held gateway call failed")
-            entry.finish(502, f'{{"error": {{"message": "forwarder: {type(e).__name__}"}}}}'.encode(),
-                         "application/json", {})
-
     # -- the gateway
-    def post(self, body: bytes, headers: dict) -> httpx.Response | None:
-        """One buffered POST /mcp; None (and a gateway error event) when the
-        gateway cannot be reached."""
+    def _run(self, entry: HeldCall, body: bytes, headers: dict) -> None:
+        """One buffered POST /mcp into `entry`; a gateway that cannot be
+        reached is a 502 and a gateway error event."""
         started = time.monotonic()
-        self.requests += 1
         try:
-            return self.client.post(MCP_PATH, content=body, headers=headers)
+            resp = self.client.post(MCP_PATH, content=body, headers=headers)
         except httpx.HTTPError as e:
-            self.unreachable(e, started)
-            return None
-
-    def unreachable(self, e: Exception, started: float) -> None:
-        logger.warning("gateway %s unreachable: %s", self.upstream_url, e)
-        self.record({"op": "error", "source": "forwarder", "ok": False,
-                     "ms": int((time.monotonic() - started) * 1000),
-                     "error": f"gateway unreachable: {e}"[:300]})
+            logger.warning("gateway %s unreachable: %s", self.upstream_url, e)
+            self.record({"op": "error", "source": "forwarder", "ok": False,
+                         "ms": int((time.monotonic() - started) * 1000),
+                         "error": f"gateway unreachable: {e}"[:300]})
+            entry.finish(502, error_body(f"gateway unreachable: {e}", "gateway_unreachable"))
+            return
+        except Exception as e:           # never leave a joiner waiting
+            logger.exception("gateway call failed")
+            entry.finish(502, error_body(f"forwarder: {type(e).__name__}", "forwarder_error"))
+            return
+        entry.finish(resp.status_code, resp.content,
+                     resp.headers.get("Content-Type", "application/json"),
+                     {k: resp.headers[k] for k in _PASS_BACK if k in resp.headers})
 
     def record(self, body: dict) -> None:
         if self.host_event is not None:
@@ -190,23 +212,16 @@ class GatewayRelay:
         self.client.close()
 
 
-def _pass_back(resp: httpx.Response) -> dict:
-    return {k: resp.headers[k] for k in _PASS_BACK if k in resp.headers}
-
-
 def _peer_gone(conn: socket.socket) -> bool:
-    """The guest closed its end (EOF readable) while we wait for a call."""
+    """`conn` is readable: has the guest closed its end (EOF)?"""
     try:
-        readable, _, _ = select.select([conn], [], [], 0)
-        if not readable:
-            return False
         return conn.recv(1, socket.MSG_PEEK) == b""
     except (OSError, ValueError):
         return True
 
 
 class _Handler(UDSHandler):
-    server_version = "sb-gateway-forwarder/0.2"
+    server_version = "sb-gateway-forwarder/0.3"
     log = logger
 
     def _not_found(self) -> None:
@@ -222,50 +237,29 @@ class _Handler(UDSHandler):
             self._error(404, f"no route for POST {self.path}", "not_found")
             return
         relay: GatewayRelay = self.owner.relay
-        if not relay.upstream_url:
-            self._error(502, "no MCP gateway configured", "gateway_unavailable")
-            return
         headers = {**guest_headers(self.headers), **relay.stamp}
         call_id = self.headers.get(CALL_HEADER)
-        if call_id:
-            self._held(relay, call_id, body, headers)
-        else:
-            self._plain(relay, body, headers)
-
-    def _held(self, relay: GatewayRelay, call_id: str, body: bytes, headers: dict) -> None:
-        reattach = (self.headers.get(REATTACH_HEADER) or "").strip() == "1"
-        entry = relay.held(call_id, reattach, body, headers)
+        # no X-SB-Call: a key no guest can send, so never re-attachable
+        key = call_id or object()
+        reattach = bool(call_id) and (self.headers.get(REATTACH_HEADER) or "").strip() == "1"
+        entry = relay.held(key, reattach, body, headers)
         if entry is None:
-            self._reply(410, GONE_BODY, "application/json")
+            self._error(410, "unknown call_id", "call_gone")
             return
-        while not entry.done.wait(0.5):
-            if _peer_gone(self.connection):
-                self.close_connection = True       # the call runs on; a re-attach gets it
-                return
+        if not entry.wait(self.connection):
+            self.close_connection = True
+            if not call_id:
+                relay.discard(key)                 # nobody can come back for it
+            return
         try:
             self._reply(entry.status, entry.body, entry.content_type, entry.headers)
             self.wfile.flush()
         except OSError:
             self.close_connection = True
+            if not call_id:
+                relay.discard(key)
             return                                 # kept for the re-attach
-        relay.delivered(call_id, entry)
-
-    def _plain(self, relay: GatewayRelay, body: bytes, headers: dict) -> None:
-        started = time.monotonic()
-        relay.requests += 1
-        try:
-            with relay.client.stream("POST", MCP_PATH, content=body, headers=headers) as resp:
-                content_type = resp.headers.get("Content-Type", "application/json")
-                if "text/event-stream" in content_type.lower():
-                    try:
-                        self._relay_sse(resp, content_type, _pass_back(resp))
-                    except (httpx.HTTPError, OSError) as e:   # gateway cut, or the guest left
-                        logger.warning("gateway stream ended: %s", e)
-                    return
-                self._reply(resp.status_code, resp.read(), content_type, _pass_back(resp))
-        except httpx.HTTPError as e:
-            relay.unreachable(e, started)
-            self._error(502, f"gateway unreachable: {e}", "gateway_unreachable")
+        relay.delivered(key, entry)
 
 
 class GatewayForwarder(UDSService):

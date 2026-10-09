@@ -37,6 +37,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import socket
 import threading
 import time
 from typing import Callable
@@ -108,15 +109,10 @@ class _Handler(UDSHandler):
                     self._reply_buffered(proxy, resp, resp.read(), started)
                     return
                 scanner = _SSEUsageScanner()
-                try:
-                    self._relay_sse(resp, content_type, on_data=scanner.feed)
-                except (httpx.HTTPError, OSError) as e:   # upstream cut, or the guest left
-                    logger.warning("stream ended: %s", e)
-                    scanner.finish()
-                    proxy.record(scanner.usage_body(started, error=f"stream ended: {e}"[:300]))
-                    return
+                ended = self._relay_sse(resp, content_type, on_data=scanner.feed)
                 scanner.finish()
-                proxy.record(scanner.usage_body(started))
+                proxy.record(scanner.usage_body(
+                    started, error=f"stream ended: {ended}"[:300] if ended else None))
         except httpx.HTTPError as e:
             self._unreachable(proxy, e, started)
 

@@ -2,40 +2,67 @@
 
   identity_headers(user, tenant, session)   X-SB-User / X-SB-Tenant / X-SB-Session
   auth_headers(token)                       Authorization: Bearer (none when empty)
+  bearer_ok(header, token)                  an incoming Authorization matches (empty token = ok)
   fetch_session_tools(...)   GET  /internal/tools                -> hello entries
   fetch_upstream_tools(...)  GET  /internal/upstreams/{n}/tools  -> OpenAI defs (session-less)
   call_tool(...)             POST /internal/call                 -> {content, is_error}
+  aclose_clients()           close the shared clients (app shutdown)
 
-Every call raises GatewayError on a transport failure, a non-2xx status or a
-malformed body; callers decide what an outage means.
+One httpx.AsyncClient per base URL is shared by every call (per-request
+timeouts). Every call raises GatewayError on a transport failure, a non-2xx
+status or a malformed body; callers decide what an outage means.
 """
 from __future__ import annotations
 
+import asyncio
+import hmac
+
 import httpx
 
-from app.config import (INTERNAL_TOKEN, MCP_GATEWAY_CALL_TIMEOUT_S, MCP_GATEWAY_TOOLS_TIMEOUT_S,
-                        MCP_GATEWAY_URL)
+from protocol.mcp import SESSION_HEADER, TENANT_HEADER, USER_HEADER
 
-NAMESPACE_SEP = "__"
+from app.config import (INTERNAL_TOKEN, MCP_GATEWAY_CALL_TIMEOUT_S, MCP_GATEWAY_TOOLS_TIMEOUT_S,
+                        MCP_GATEWAY_UPSTREAM_TOOLS_TIMEOUT_S, MCP_GATEWAY_URL)
 
 
 class GatewayError(RuntimeError):
     pass
 
 
-def split_namespaced(tool_name: str) -> tuple[str, str]:
-    """'wcc__draft_event' -> ('wcc', 'draft_event'); split on the FIRST
-    separator (upstream names never contain '__')."""
-    server, _, tool = tool_name.partition(NAMESPACE_SEP)
-    return server, tool
-
-
 def identity_headers(user: str, tenant: str, session: str) -> dict:
-    return {"X-SB-User": user, "X-SB-Tenant": tenant, "X-SB-Session": session}
+    return {USER_HEADER: user, TENANT_HEADER: tenant, SESSION_HEADER: session}
 
 
 def auth_headers(token: str = INTERNAL_TOKEN) -> dict:
     return {"Authorization": f"Bearer {token}"} if token else {}
+
+
+def bearer_ok(header: str | None, token: str = INTERNAL_TOKEN) -> bool:
+    """An incoming Authorization header carries `token` (constant time);
+    an empty token means no check (dev only)."""
+    if not token:
+        return True
+    return hmac.compare_digest((header or "").encode(), f"Bearer {token}".encode())
+
+
+# base_url -> (the loop it was made on, client): a client is bound to its loop
+_clients: dict[str, tuple[asyncio.AbstractEventLoop, httpx.AsyncClient]] = {}
+
+
+def _client(base_url: str) -> httpx.AsyncClient:
+    loop = asyncio.get_running_loop()
+    held = _clients.get(base_url)
+    if held is None or held[0] is not loop or held[1].is_closed:
+        held = _clients[base_url] = (loop, httpx.AsyncClient(base_url=base_url))
+    return held[1]
+
+
+async def aclose_clients() -> None:
+    loop = asyncio.get_running_loop()
+    for base_url, (owner, client) in list(_clients.items()):
+        del _clients[base_url]
+        if owner is loop:
+            await client.aclose()
 
 
 async def _request(method: str, path: str, *, base_url: str, headers: dict, timeout_s: float,
@@ -44,8 +71,8 @@ async def _request(method: str, path: str, *, base_url: str, headers: dict, time
         raise GatewayError("MCP_GATEWAY_URL is not set")
     timeout = httpx.Timeout(timeout_s, connect=min(timeout_s, 10.0))
     try:
-        async with httpx.AsyncClient(base_url=base_url, timeout=timeout) as client:
-            resp = await client.request(method, path, headers=headers, json=json_body)
+        resp = await _client(base_url).request(method, path, headers=headers, json=json_body,
+                                               timeout=timeout)
     except httpx.HTTPError as e:
         raise GatewayError(f"gateway unreachable: {type(e).__name__}: {e}") from e
     if resp.status_code // 100 != 2:
@@ -75,7 +102,7 @@ async def fetch_session_tools(user: str, tenant: str, session: str, *,
 
 async def fetch_upstream_tools(name: str, *, base_url: str = MCP_GATEWAY_URL,
                                token: str = INTERNAL_TOKEN,
-                               timeout_s: float = 30.0) -> list[dict]:
+                               timeout_s: float = MCP_GATEWAY_UPSTREAM_TOOLS_TIMEOUT_S) -> list[dict]:
     """One upstream's tools as OpenAI function defs (session-less: no identity)."""
     path = f"/internal/upstreams/{name}/tools"
     data = await _request("GET", path, base_url=base_url, timeout_s=timeout_s,

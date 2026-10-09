@@ -1,9 +1,14 @@
 """Upstream MCP clients (moved from agent-api app/mcp/client.py).
 
-One short-lived streamable-HTTP session per operation: holding a
-ClientSession across requests fights the SDK's anyio cancel-scope semantics,
-and call volume is chat-paced. Tool definitions are cached per upstream for
-`tool_defs_ttl_s`.
+One streamable-HTTP client session per operation: holding a ClientSession
+across requests fights the SDK's anyio cancel-scope semantics, and call volume
+is chat-paced. The httpx clients under them are long-lived (one per upstream
+for tools/list, one for tools/call), so connections are pooled.
+
+Tool definitions are cached per upstream as {tool: (defn, pin)}, computed once
+per fetch. An expired cache is served while one background refresh runs; a
+failed first fetch is remembered for FAILURE_BACKOFF_S, during which callers
+fail at once instead of reconnecting.
 
 `UpstreamCall` runs one tools/call in its own asyncio task so it can outlive
 the guest's HTTP request: when the upstream elicits, the callback parks on a
@@ -15,7 +20,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Awaitable, Callable
 
 import httpx
 from mcp import ClientSession, types
@@ -23,11 +27,20 @@ from mcp.client.streamable_http import streamable_http_client
 
 from app import ssrf
 from app.config import UpstreamConfig
+from app.pins import pin_of
+from app.schema import tool_defn
 
 logger = logging.getLogger("gateway.upstreams")
 
 CONNECT_TIMEOUT_S = 30
 ABANDON_GRACE_S = 30          # after an expired/abandoned hold, how long the upstream may wind down
+FAILURE_BACKOFF_S = 30        # a failed tools/list is not retried for this long
+
+ToolIndex = dict[str, tuple[dict, str]]   # un-namespaced tool name -> (defn, pin)
+
+
+class UpstreamUnavailable(Exception):
+    pass
 
 
 def unwrap(e: BaseException) -> str:
@@ -47,16 +60,19 @@ def _http_client(cfg: UpstreamConfig, read_timeout_s: float) -> httpx.AsyncClien
     )
 
 
-ElicitFn = Callable[[types.ElicitRequestParams], Awaitable[types.ElicitResult]]
-
-
 class Upstream:
-    def __init__(self, cfg: UpstreamConfig, allowed_private_hosts: list[str]):
+    def __init__(self, cfg: UpstreamConfig, allowed_private_hosts: list[str], hold_s: float):
         self.cfg = cfg
         self._allowed_private_hosts = allowed_private_hosts
-        self._tools: list[types.Tool] | None = None
+        self.list_http = _http_client(cfg, CONNECT_TIMEOUT_S)
+        # A call's SSE stream stays open while it waits for the guest's answer.
+        self.call_http = _http_client(cfg, cfg.timeout_s + hold_s)
+        self._tools: ToolIndex | None = None
         self._fetched_at = 0.0
+        self._failed_at: float | None = None
+        self._last_error = ""
         self._lock = asyncio.Lock()
+        self._refresh_task: asyncio.Task | None = None
 
     @property
     def name(self) -> str:
@@ -65,49 +81,66 @@ class Upstream:
     def check_url(self) -> None:
         ssrf.validate_mcp_url(self.cfg, self._allowed_private_hosts)
 
-    def _fresh(self) -> bool:
-        return self._tools is not None and time.monotonic() - self._fetched_at < self.cfg.tool_defs_ttl_s
+    def _backing_off(self) -> bool:
+        return self._failed_at is not None and time.monotonic() - self._failed_at < FAILURE_BACKOFF_S
 
-    async def list_tools(self) -> list[types.Tool]:
-        """Cached tools/list. A failed refresh serves the stale list when there
-        is one, else raises."""
-        if self._fresh():
-            return self._tools  # type: ignore[return-value]
+    async def tools(self) -> ToolIndex:
+        """Cached tools/list. Expired → the cached index, plus one background
+        refresh. Never fetched → fetched now (or the recent failure raised)."""
+        if self._tools is not None:
+            expired = time.monotonic() - self._fetched_at >= self.cfg.tool_defs_ttl_s
+            idle = self._refresh_task is None or self._refresh_task.done()
+            if expired and idle and not self._backing_off():
+                self._refresh_task = asyncio.create_task(self._refresh_quietly())
+            return self._tools
         async with self._lock:
-            if self._fresh():
-                return self._tools  # type: ignore[return-value]
-            try:
-                tools = await self._fetch_tools()
-            except Exception as e:
-                if self._tools is not None:
-                    logger.warning("upstream %s: tools/list failed, serving stale cache: %s", self.name, unwrap(e))
-                    return self._tools
-                raise
-            self._tools, self._fetched_at = tools, time.monotonic()
-            logger.info("upstream %s: %d tools cached", self.name, len(tools))
-            return tools
+            if self._tools is None:
+                await self.refresh()
+            return self._tools  # type: ignore[return-value]
 
-    def invalidate(self) -> None:
-        self._fetched_at = 0.0
+    async def _refresh_quietly(self) -> None:
+        try:
+            await self.refresh()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("upstream %s: tools/list failed, serving stale cache: %s", self.name, unwrap(e))
+
+    async def refresh(self) -> ToolIndex:
+        """Fetch tools/list now and replace the cache."""
+        if self._backing_off():
+            raise UpstreamUnavailable(f"{self._last_error} (not retried for {FAILURE_BACKOFF_S}s)")
+        try:
+            listed = await self._fetch_tools()
+        except Exception as e:
+            self._failed_at, self._last_error = time.monotonic(), unwrap(e)
+            raise
+        index: ToolIndex = {}
+        for t in listed:
+            defn = tool_defn(t)
+            index[t.name] = (defn, pin_of(defn))
+        self._tools, self._fetched_at, self._failed_at = index, time.monotonic(), None
+        logger.info("upstream %s: %d tools cached", self.name, len(index))
+        return index
 
     async def _fetch_tools(self) -> list[types.Tool]:
         self.check_url()
         tools: list[types.Tool] = []
-        async with _http_client(self.cfg, CONNECT_TIMEOUT_S) as http:
-            async with streamable_http_client(self.cfg.url, http_client=http) as (read, write, _):
-                async with ClientSession(read, write) as session:
-                    await session.initialize()
-                    cursor = None
-                    while True:
-                        page = await session.list_tools(
-                            params=types.PaginatedRequestParams(cursor=cursor) if cursor else None)
-                        tools.extend(page.tools)
-                        cursor = page.nextCursor
-                        if not cursor:
-                            return tools
+        async with streamable_http_client(self.cfg.url, http_client=self.list_http) as (read, write, _):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                cursor = None
+                while True:
+                    page = await session.list_tools(
+                        params=types.PaginatedRequestParams(cursor=cursor) if cursor else None)
+                    tools.extend(page.tools)
+                    cursor = page.nextCursor
+                    if not cursor:
+                        return tools
 
-    def start_call(self, tool: str, arguments: dict, *, relay: bool, hold_s: float) -> "UpstreamCall":
-        return UpstreamCall(self, tool, arguments, relay=relay, hold_s=hold_s)
+    async def aclose(self) -> None:
+        if self._refresh_task is not None:
+            self._refresh_task.cancel()
+        await self.list_http.aclose()
+        await self.call_http.aclose()
 
 
 class UpstreamCall:
@@ -117,13 +150,12 @@ class UpstreamCall:
     ElicitRequestParams) or ("error", str). With relay=False an elicitation
     is answered `decline` at once (the legacy route, §3)."""
 
-    def __init__(self, upstream: Upstream, tool: str, arguments: dict, *, relay: bool, hold_s: float):
+    def __init__(self, upstream: Upstream, tool: str, arguments: dict, *, relay: bool):
         self.upstream = upstream
         self.tool = tool
         self.started = time.monotonic()
         self.deadline = self.started + upstream.cfg.timeout_s
         self._relay = relay
-        self._hold_s = hold_s
         self._outcomes: asyncio.Queue = asyncio.Queue()
         self._answer: asyncio.Future | None = None
         self._abandoned = False
@@ -133,8 +165,10 @@ class UpstreamCall:
         return max(0.0, self.deadline - time.monotonic())
 
     async def _elicit(self, _ctx, params: types.ElicitRequestParams) -> types.ElicitResult:
-        if not self._relay or self._abandoned:
-            return types.ElicitResult(action="decline" if not self._relay else "cancel")
+        if not self._relay:
+            return types.ElicitResult(action="decline")
+        if self._abandoned:
+            return types.ElicitResult(action="cancel")
         self._answer = asyncio.get_running_loop().create_future()
         self._outcomes.put_nowait(("input", params))
         try:
@@ -145,11 +179,10 @@ class UpstreamCall:
     async def _run(self, arguments: dict) -> None:
         cfg = self.upstream.cfg
         try:
-            async with _http_client(cfg, cfg.timeout_s + self._hold_s) as http:
-                async with streamable_http_client(cfg.url, http_client=http) as (read, write, _):
-                    async with ClientSession(read, write, elicitation_callback=self._elicit) as session:
-                        await session.initialize()
-                        result = await session.call_tool(self.tool, arguments)
+            async with streamable_http_client(cfg.url, http_client=self.upstream.call_http) as (read, write, _):
+                async with ClientSession(read, write, elicitation_callback=self._elicit) as session:
+                    await session.initialize()
+                    result = await session.call_tool(self.tool, arguments)
             self._outcomes.put_nowait(("result", result))
         except asyncio.CancelledError:
             self._outcomes.put_nowait(("error", "upstream call cancelled"))

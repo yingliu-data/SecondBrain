@@ -7,6 +7,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from protocol.mcp import NAMESPACE_SEP, valid_upstream_name
 from pydantic import BaseModel, field_validator
 
 logger = logging.getLogger("gateway")
@@ -28,8 +29,8 @@ class UpstreamConfig(BaseModel):
     @field_validator("name")
     @classmethod
     def _no_namespace_separator(cls, v: str) -> str:
-        if not v or "__" in v or ":" in v:
-            raise ValueError("upstream name must be non-empty and must not contain '__' or ':'")
+        if not valid_upstream_name(v):
+            raise ValueError(f"upstream name must be non-empty and must not contain '{NAMESPACE_SEP}' or ':'")
         return v
 
 
@@ -62,6 +63,16 @@ class GatewayConfig(BaseModel):
         return cls.from_dict(json.loads(p.read_text()))
 
 
+# Settings field -> environment variable.
+_ENV = {
+    "config_path": "GATEWAY_CONFIG",
+    "state_dir": "GATEWAY_STATE_DIR",
+    "agent_api_url": "AGENT_API_URL",
+    "internal_token": "INTERNAL_TOKEN",
+    "allowed_private_hosts": "MCP_ALLOWED_PRIVATE_HOSTS",   # comma-separated
+}
+
+
 @dataclass
 class Settings:
     config_path: str = "/data/gateway.json"
@@ -72,12 +83,7 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> "Settings":
-        return cls(
-            config_path=os.environ.get("GATEWAY_CONFIG", "/data/gateway.json"),
-            state_dir=os.environ.get("GATEWAY_STATE_DIR", "/data/gateway-state"),
-            agent_api_url=os.environ.get("AGENT_API_URL", "http://agent-api:8000"),
-            internal_token=os.environ.get("INTERNAL_TOKEN", ""),
-            allowed_private_hosts=[
-                h for h in os.environ.get("MCP_ALLOWED_PRIVATE_HOSTS", "host.docker.internal").split(",") if h
-            ],
-        )
+        kwargs: dict = {f: os.environ[e] for f, e in _ENV.items() if e in os.environ}
+        if "allowed_private_hosts" in kwargs:
+            kwargs["allowed_private_hosts"] = [h for h in kwargs["allowed_private_hosts"].split(",") if h]
+        return cls(**kwargs)

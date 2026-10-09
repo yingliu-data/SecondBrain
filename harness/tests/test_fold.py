@@ -13,7 +13,7 @@ from protocol.fold import (
     verify_checkpoints,
 )
 from tests.golden import make_goldens
-from tests.logbuilder import Log
+from tests.logbuilder import TOOLS, Log
 
 GOLDEN_DIR = Path(__file__).resolve().parent / "golden"
 GOLDENS = list(make_goldens.GOLDENS)
@@ -829,3 +829,32 @@ def test_state_views_and_last_turn():
     assert State().last_turn() is None
     assert len(state.committed) == len(state.committed_prefix) == len(state.prefix_origins)
     assert all(set(it) == {"seq", "origin", "message"} for it in state.committed)
+
+
+def _mcp_log() -> Log:
+    tools = [*TOOLS, {"name": "wcc__approve", "side": "mcp", "pin": "ab" * 32}]
+    log = Log(tools=tools)
+    log.start()
+    log.input("i1", "approve it")
+    log.turn("t1")
+    log.response("t1", calls=[("cM", "wcc__approve", {}), ("cB", "bash", {})])
+    log.call("t1", "cM", "wcc__approve", "mcp")
+    log.call("t1", "cB", "bash", "guest")
+    return log
+
+
+def test_op_state_input_required_suspends_an_mcp_call_until_the_resend():
+    request = {"request_state": "rs-1", "schema": {"type": "object"}}
+    log = _mcp_log()
+    log.add("op_state", {"call_id": "cM", "state": "running", "side_ref": "gateway:wcc"})
+    log.add("op_state", {"call_id": "cM", "state": "input_required", "attempt": 0,
+                         "input_request": request})
+    call = fold(log.events).open_calls["cM"]
+    assert (call["state"], call["attempt"], call["input_request"]) == ("input_required", 0, request)
+    log.add("op_state", {"call_id": "cM", "state": "running", "attempt": 1})
+    call = fold(log.events).open_calls["cM"]
+    assert (call["state"], call["attempt"]) == ("running", 1) and "input_request" not in call
+    log.add("op_state", {"call_id": "cB", "state": "input_required", "attempt": 0,
+                         "input_request": request})
+    with pytest.raises(FoldError, match="input_required for guest-side call 'cB'"):
+        fold(log.events)

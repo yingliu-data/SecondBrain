@@ -10,7 +10,8 @@
 and `config` carries `model`, `params`, `tools` (host/device/mcp entries,
 turned into the effective list by protocol.allowlist.effective_tools),
 `limits` (merged over the Limits defaults), `hooks`, `async_tools`,
-`question_timeout_s`, `ui_attached`, `ports` (M4: `gateway`, default 5011).
+`question_timeout_s`, `ui_attached`, `ports` (M4: `gateway`, default 5011;
+a port name this guest does not know is logged and ignored).
 M4: each tools entry may also carry `schema` (OpenAI function def; a bare
 `description` stands in when there is none), kept as `tool_schemas`, and
 `timeout_s`, kept as `tool_timeouts` (the op timeout of that tool's calls;
@@ -25,15 +26,19 @@ guest operations may finish after a `park` before they are killed. The token bud
 alone (it answers 402); it is not guest config, so an ops change to it does
 not change config_hash.
 
-Every problem is a ValueError whose message names the field. Pure: no I/O.
+Every problem is a ValueError whose message names the field. Pure: no I/O
+(beyond a log line for an ignored port name).
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field, fields, replace
 
 from protocol import SCHEMA_VERSION
 from protocol.allowlist import SIDES, effective_tools
 from protocol.canonical import hash_value, is_int
+
+log = logging.getLogger("guest.config")
 
 DEFAULT_PORTS = {"control": 5000, "bulk": 5001, "llm": 5010, "gateway": 5011}
 DEFAULT_QUESTION_TIMEOUT_S = 300
@@ -197,8 +202,10 @@ def _ports(raw) -> dict:
     ports = dict(DEFAULT_PORTS)
     for name, port in raw.items():
         if name not in DEFAULT_PORTS:
-            raise ValueError(f"hello.config.ports: unknown port {name!r} "
-                             f"(known: {sorted(DEFAULT_PORTS)})")
+            # a newer host may name ports this guest does not use: not a reason to fail the hello
+            log.warning("hello.config.ports: unknown port %r ignored (known: %s)",
+                        name, sorted(DEFAULT_PORTS))
+            continue
         ports[name] = _int(port, f"config.ports.{name}", minimum=1)
     return ports
 
