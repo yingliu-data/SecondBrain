@@ -68,6 +68,7 @@ pump task drains. The pump is the single writer of state_sync.
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import re
@@ -98,7 +99,8 @@ from app.host.endpoints import ControlChannel, Endpoints
 from app.host.gateway_forwarder import GatewayForwarder, GatewayRelay
 from app.host.llm_proxy import LLMProxy
 from app.host.sandbox import Sandbox, SandboxError
-from app.host.sides import DEVICE_CALLS, DeviceCalls, Sides
+from app.host.sides import (DEVICE_CALLS, DeviceCalls, Sides, device_content,
+                            device_timeout)
 from app.host.state_sync import StateSync, StateSyncError
 from app.host.stream import DONE, Projector, fatal_items, sse, tokens
 from app.session.ids import session_key
@@ -262,7 +264,10 @@ class Worker:
         self._bg: set[asyncio.Task] = set()         # fire-and-forget tasks (strong refs)
         self._acts: dict[str, asyncio.Task] = {}    # input_id -> its task (start_task)
         self._beats: dict[str, set[Callable[[], None]]] = {}   # input_id -> on_heartbeat
+        # call_id -> its deliver, for the device calls this Worker adopted
+        self._adopted: dict[str, Callable[[str], None]] = {}
         self._load_parked()
+        self._adopt_open_device_calls()
 
     def _spawn(self, coro) -> asyncio.Task:
         """A background task the loop would otherwise only hold weakly."""
@@ -1101,6 +1106,61 @@ class Worker:
         self._outbox = Outbox(self.session_id, "cseq")
         self._outbox.resume_from(int(info.get("cseq", 0)))
 
+    # ------------------------------------------------------------ restart
+    def _adopt_open_device_calls(self) -> None:
+        """A new Worker on a parked session (an agent-api restart): the
+        device calls the log still has open (tool_call side device, no
+        result) are rebuilt from the fold into device_calls, so a POST
+        /tool-result after the restart is accepted (_deliver_adopted) and a
+        re-attaching stream re-emits them. Only for a parked run: the guest
+        then resumes from that park (session snapshot, or base restore + a
+        log return ending with `parked`) and its side calls wait again; a
+        guest that died mid-run marks them lost on its resume (409)."""
+        state = self.sync.state
+        if self.vm_state != "parked" or not state.parked:
+            return
+        open_calls = {cid: c for cid, c in state.open_calls.items()
+                      if c["side"] == "device" and "result" not in c}
+        if not open_calls:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        first = min(c["seq"] for c in open_calls.values())
+        for ev in self.sync.read(first - 1):
+            body = ev["body"]
+            if ev["type"] == "tool_call" and body["call_id"] in open_calls:
+                cid, name = body["call_id"], body["name"]
+                deliver = functools.partial(self._deliver_adopted, cid, name)
+                self._adopted[cid] = deliver
+                self.device_calls.adopt(cid, name, body.get("args", {}), self.session_key,
+                                        loop=loop, deliver=deliver)
+                if loop is not None:
+                    # no Sides timer waits on it: the same limit as a live
+                    # call, from the adoption (the parked guest's timers do
+                    # not run until something wakes it)
+                    loop.call_later(TOOL_TIMEOUT, self._adopted_timeout, cid, name)
+                self.sync.host_event("side_call", {"side": "device", "call_id": cid,
+                                                   "name": name, "state": "adopted"})
+
+    def _adopted_timeout(self, call_id: str, name: str) -> None:
+        if call_id in self._adopted and not self.closed:
+            self.device_calls.resolve(call_id, device_timeout(name, TOOL_TIMEOUT))
+
+    def _deliver_adopted(self, call_id: str, name: str, result: str) -> None:
+        """The result of an adopted device call: side_result to the guest
+        (held while parked: the guest wakes for it, as for any control)."""
+        self._adopted.pop(call_id, None)
+        if self.closed:
+            return
+        self._ensure_plumbing()
+        content, ok = device_content(result)
+        status = self.send_control("side_result", {"call_id": call_id, "side": "device",
+                                                   "content": content, "ok": ok})
+        self.sync.host_event("side_call", {"side": "device", "call_id": call_id, "name": name,
+                                           "ok": ok, "adopted": True, "sent": status})
+
     # ------------------------------------------------------------ act
     async def act(self, task_input: dict) -> dict:
         """The direct path: an in-process driver over the task API (the
@@ -1391,6 +1451,15 @@ class Worker:
                 task.add_done_callback(lambda _t, cid=cid: self._side_tasks.pop(cid, None))
         elif etype == "op_state" and body["state"] == "lost":
             self._on_lost(body["call_id"])
+        elif etype == "tool_result":
+            # terminal (also when the guest timed it out): a late POST
+            # /tool-result is a 409, and a device call still waiting stops
+            cid = body["call_id"]
+            if self.device_calls.is_open(cid):
+                task = self._side_tasks.pop(cid, None)
+                if task is not None and not task.done():
+                    task.cancel()
+            self.device_calls.discard(cid)
         elif etype == "parked":
             self._parked_evt.set()
             if self.vm_state == "running":      # not asked for: the guest parked itself
@@ -1444,6 +1513,9 @@ class Worker:
             self._wake_task.cancel()
         if self.sides is not None:
             await self.sides.cancel_all()
+        for cid, deliver in self._adopted.items():
+            self.device_calls.release(cid, deliver)     # a later POST is a 409
+        self._adopted.clear()
         try:
             await self._destroy("close")
         except Exception:
@@ -1538,6 +1610,22 @@ class Workers:
 
     def get(self, key: str) -> Worker | None:
         return self._workers.get(key)
+
+    def load_parked(self, tenant, registry) -> list[Worker]:
+        """A Worker for each of `tenant`'s parked sessions (vm/parked.json)
+        that has none in this process yet, as after an agent-api restart:
+        each rebuilds its open device calls from its log
+        (Worker._adopt_open_device_calls). The tool-result route calls it
+        for a call_id it does not know."""
+        loaded = []
+        for meta in self.sessions.list_for_tenant(tenant.user, tenant.name):
+            sid = meta.get("session_id")
+            if not sid or not (meta["root"] / "vm" / "parked.json").exists():
+                continue
+            w = self._workers.get(session_key(tenant.user, tenant.name, sid))
+            if w is None or w.closed:
+                loaded.append(self.get_or_create(tenant, sid, registry))
+        return loaded
 
     async def close(self, key: str) -> None:
         w = self._workers.pop(key, None)

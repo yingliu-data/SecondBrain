@@ -109,6 +109,7 @@ class Harness:
         app = FastAPI()
         app.include_router(chat.router)
         app.include_router(sessions.router)
+        self.app = app
         self.http = httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
                                       base_url="http://test", timeout=120)
         self.queue = "test-" + uuid.uuid4().hex[:8]
@@ -136,6 +137,43 @@ class Harness:
         r = await self.http.post("/api/v1/chat", content=raw, headers=h)
         assert r.status_code == 200
         return r.text
+
+    async def chat_then_disconnect(self, until: str, **body) -> str:
+        """POST /chat on the ASGI app itself (httpx's ASGITransport buffers
+        the whole body): read the SSE body until it contains `until`, then
+        the client goes away (http.disconnect; Starlette cancels the
+        response). The text received so far."""
+        raw, h = self._headers({"session_id": self.session_id, **body})
+        gone = asyncio.Event()
+        got: list[str] = []
+        sent = False
+
+        async def receive():
+            nonlocal sent
+            if not sent:
+                sent = True
+                return {"type": "http.request", "body": raw.encode(), "more_body": False}
+            await gone.wait()
+            return {"type": "http.disconnect"}
+
+        async def send(msg):
+            if msg["type"] == "http.response.body":
+                got.append(msg.get("body", b"").decode())
+                if until in "".join(got):
+                    gone.set()
+
+        scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
+                 "method": "POST", "scheme": "http", "path": "/api/v1/chat",
+                 "raw_path": b"/api/v1/chat", "query_string": b"", "root_path": "",
+                 "headers": [(k.lower().encode(), v.encode()) for k, v in h.items()],
+                 "server": ("test", 80), "client": ("127.0.0.1", 1)}
+        await asyncio.wait_for(self.app(scope, receive, send), 60)
+        assert gone.is_set(), "the stream ended before the disconnect"
+        return "".join(got)
+
+    @property
+    def device_calls(self) -> DeviceCalls:
+        return self.workers.worker_kwargs["device_calls"]
 
     async def get(self, path: str):
         raw, h = self._headers(None)
@@ -356,6 +394,43 @@ async def test_abort_signal_aborts_the_running_task(h):
     assert len(h.upstream.requests) == 1
 
 
+async def _disconnect_mid_task_then_catch_up(d, input_id: str) -> None:
+    """The client drops its SSE stream while the task waits for a device
+    result: the task continues (the device answers, the task settles) and
+    GET /events?after_seq=N returns the rest of the log."""
+    d.upstream.responses = [tool_call("call_dc", "get_calendar_events", {}),
+                            {"content": "Standup at 9"}]
+    body = await d.chat_then_disconnect("event: tool_call", message="calendar?",
+                                        input_id=input_id)
+    assert "event: done" not in body
+    w = d.worker
+    assert not any(w._sink_input.get(id(q)) == input_id for q in w.sinks)   # detached
+    n = w.sync.last_seq
+    assert input_id not in w.sync.settled and w.current_input_id == input_id
+    await wait_until(lambda: d.device_calls.is_open("call_dc"), 30, "device call open")
+    assert d.device_calls.resolve("call_dc", "[]") is True
+    await wait_until(lambda: input_id in w.sync.settled, 60, "settle after the disconnect")
+    assert w.sync.settled[input_id]["answer"] == "Standup at 9"
+    r = await d.get(f"/events?after_seq={n}")
+    assert r.status_code == 200
+    rest = r.json()
+    assert [e["seq"] for e in rest] == list(range(n + 1, w.sync.last_seq + 1))
+    assert [e["body"]["call_id"] for e in rest if e["type"] == "tool_result"] == ["call_dc"]
+    assert rest[-1]["type"] == "settle" and rest[-1]["body"]["input_id"] == input_id
+    # the same input_id again: the stored answer, no second turn
+    again = await d.chat(message="calendar?", input_id=input_id)
+    assert "Standup at 9" in token_text(again) and sse_events(again)[-1] == ("done", {})
+    assert len(d.upstream.requests) == 2
+
+
+async def test_client_disconnect_mid_task_workflow_path(h):
+    await h.start()
+    await _disconnect_mid_task_then_catch_up(h, "in_dc_wf")
+    await h.wait_state("idle")
+    [ticket] = h.tickets()
+    assert ticket["outcome"] == "done" and ticket["answer"] == "Standup at 9"
+
+
 async def test_deliver_is_idempotent(h):
     h.upstream.responses = [{"content": "once"}]
     await h.start()
@@ -499,6 +574,11 @@ async def test_direct_path_answer_wait_escalates(direct, monkeypatch):
     assert [b["question_id"] for b in direct.host_events("answer_timeout")]
     assert [b["reason"] for b in direct.host_events("abort")] == ["escalated"]
     assert len(direct.upstream.requests) == 1
+
+
+async def test_client_disconnect_mid_task_direct_path(direct):
+    assert not temporal.enabled()
+    await _disconnect_mid_task_then_catch_up(direct, "in_dc_direct")
 
 
 async def test_worker_made_under_temporal_keeps_working_on_the_direct_path(direct, monkeypatch):

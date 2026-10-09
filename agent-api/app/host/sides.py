@@ -21,7 +21,11 @@ memory?}`.
   DeviceCalls              call_id -> open call; `resolve(call_id, result)`
                            is False for an unknown or terminal id (409 at
                            the route); `open_for(session_key)` lists what a
-                           re-attaching stream must re-emit
+                           re-attaching stream must re-emit. `adopt(...)`:
+                           an open call rebuilt from a parked session's log
+                           by a new Worker (an agent-api restart): no waiter
+                           in this process, its `deliver(result)` carries the
+                           result to the guest (Worker._deliver_adopted)
   DEVICE_CALLS             the process-wide registry the route uses
   Sides(...)               `handle_tool_call(event)` schedules the work and
                            returns the asyncio.Task (None for side guest)
@@ -45,6 +49,10 @@ MEMORY_TOOLS = {"remember": "write", "forget": "remove"}
 
 
 class DeviceCalls:
+    """Open device calls by call_id. An entry has a `future` (a live
+    Sides._run_device waits on it) or, adopted after a restart, a `deliver`
+    callback instead (future None)."""
+
     def __init__(self) -> None:
         self._open: dict[str, dict] = {}
 
@@ -56,6 +64,20 @@ class DeviceCalls:
                                "session_key": session_key, "loop": loop}
         return fut
 
+    def adopt(self, call_id: str, name: str, arguments: dict, session_key: str,
+              deliver: Callable[[str], None],
+              loop: asyncio.AbstractEventLoop | None = None) -> None:
+        """An open call no Sides waits on: the session's log has it open
+        (a new Worker rebuilt it from the fold). resolve() hands the result
+        to `deliver` (on `loop`, when given) and the call is terminal."""
+        self._open[call_id] = {"future": None, "deliver": deliver, "name": name,
+                               "arguments": arguments, "session_key": session_key,
+                               "loop": loop}
+
+    @staticmethod
+    def _pending(entry: dict) -> bool:
+        return entry["future"] is None or not entry["future"].done()
+
     def resolve(self, call_id: str, result: str, owner_prefix: str | None = None) -> bool:
         """Deliver the device's result. False when the call is unknown or
         already terminal (timed out, resolved, or never opened), or, with
@@ -66,8 +88,7 @@ class DeviceCalls:
             return False
         if owner_prefix is not None and not entry["session_key"].startswith(owner_prefix):
             return False
-        fut: asyncio.Future = entry["future"]
-        if fut.done():
+        if not self._pending(entry):
             self._open.pop(call_id, None)
             return False
         loop = entry["loop"]
@@ -75,7 +96,14 @@ class DeviceCalls:
             running = asyncio.get_running_loop()
         except RuntimeError:
             running = None
-        if running is loop:
+        fut: asyncio.Future | None = entry["future"]
+        if fut is None:                     # adopted: one result, then terminal
+            self._open.pop(call_id, None)
+            if loop is None or running is loop:
+                entry["deliver"](result)
+            else:
+                loop.call_soon_threadsafe(entry["deliver"], result)
+        elif running is loop:
             fut.set_result(result)
         else:
             loop.call_soon_threadsafe(_set_if_pending, fut, result)
@@ -84,20 +112,27 @@ class DeviceCalls:
     def discard(self, call_id: str) -> None:
         self._open.pop(call_id, None)
 
+    def release(self, call_id: str, deliver: Callable[[str], None]) -> None:
+        """Drop an adopted call if `deliver` still owns it (a closing Worker:
+        a newer Worker may have adopted the same call meanwhile)."""
+        entry = self._open.get(call_id)
+        if entry is not None and entry.get("deliver") is deliver:
+            self._open.pop(call_id, None)
+
     def is_open(self, call_id: str) -> bool:
         entry = self._open.get(call_id)
-        return entry is not None and not entry["future"].done()
+        return entry is not None and self._pending(entry)
 
     def open_for(self, session_key: str) -> list[dict]:
         return [
             {"id": cid, "name": e["name"], "arguments": e["arguments"]}
             for cid, e in self._open.items()
-            if e["session_key"] == session_key and not e["future"].done()
+            if e["session_key"] == session_key and self._pending(e)
         ]
 
     def count(self) -> int:
         """Open calls. (No __len__: an empty registry must stay truthy.)"""
-        return sum(1 for e in self._open.values() if not e["future"].done())
+        return sum(1 for e in self._open.values() if self._pending(e))
 
 
 def _memory_change(name: str, args: dict, result: str) -> dict | None:
@@ -115,6 +150,17 @@ def _memory_change(name: str, args: dict, result: str) -> dict | None:
             "op": MEMORY_TOOLS[name],
             "slug": parsed.get("slug") or args.get("slug", ""),
             "sha256": parsed.get("sha256", "")}
+
+
+def device_content(raw) -> tuple[str, bool]:
+    """A device's raw result as the side_result `(content, ok)`."""
+    content = sanitize(str(raw) if raw is not None else "No result")
+    return content, not content.startswith("Error")
+
+
+def device_timeout(name: str, timeout_s: float) -> str:
+    return (f"Error: {name} timed out after {int(timeout_s)}s. "
+            "The iPhone may be unreachable.")
 
 
 def _set_if_pending(fut: asyncio.Future, result) -> None:
@@ -218,14 +264,11 @@ class Sides:
         fut = self.device_calls.open(call_id, name, body["args"], self.session_key)
         try:
             raw = await asyncio.wait_for(fut, timeout=self.device_timeout_s)
-            result = str(raw) if raw is not None else "No result"
         except asyncio.TimeoutError:
-            result = (f"Error: {name} timed out after {int(self.device_timeout_s)}s. "
-                      "The iPhone may be unreachable.")
+            raw = device_timeout(name, self.device_timeout_s)
         finally:
             self.device_calls.discard(call_id)
-        result = sanitize(result)
-        return self._answer(body, result, not result.startswith("Error"), started)
+        return self._answer(body, *device_content(raw), started)
 
     async def cancel_all(self) -> None:
         for t in list(self.tasks):

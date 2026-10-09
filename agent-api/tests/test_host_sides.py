@@ -86,6 +86,27 @@ async def test_device_call_resolves_through_registry_and_409_semantics():
 
 
 @pytest.mark.asyncio
+async def test_adopted_device_call_delivers_once_and_keeps_the_409_semantics():
+    """An open call rebuilt from a parked session's log (a new Worker after
+    an agent-api restart) has no waiter: resolve() hands the result to its
+    `deliver` once, on the given loop, then the call is terminal."""
+    delivered = []
+    dc = DeviceCalls()
+    dc.adopt("call_a", "get_calendar_events", {"day": "today"}, "u/t_s1",
+             deliver=delivered.append, loop=asyncio.get_running_loop())
+    assert dc.is_open("call_a") and dc.count() == 1
+    assert dc.open_for("u/t_s1") == [{"id": "call_a", "name": "get_calendar_events",
+                                       "arguments": {"day": "today"}}]
+    assert dc.resolve("call_a", "x", owner_prefix="other/") is False   # another tenant's
+    assert dc.resolve("nope", "x") is False
+    # from another thread: delivered on the adopting loop
+    assert await asyncio.to_thread(dc.resolve, "call_a", "[]", "u/") is True
+    await asyncio.sleep(0)
+    assert delivered == ["[]"]
+    assert dc.resolve("call_a", "again") is False and dc.count() == 0  # terminal -> 409
+
+
+@pytest.mark.asyncio
 async def test_device_timeout_and_mcp_is_not_a_side_call():
     sides, sent, _, dc = make_sides(device_timeout_s=0.05)
     await sides.handle_tool_call(call_event("c1", "get_calendar_events", "device"))

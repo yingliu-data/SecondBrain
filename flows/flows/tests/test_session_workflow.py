@@ -8,7 +8,11 @@ from datetime import timedelta
 
 import pytest
 
-from flows.activities import SessionConfig, SessionRef, TaskSignal
+from temporalio import activity
+from temporalio.exceptions import ApplicationError
+
+from flows import activities as acts
+from flows.activities import RunResult, RunTask, SessionConfig, SessionRef, TaskSignal
 from flows.client import session_handle, signal_abort, signal_answer
 from flows.session_workflow import (
     AnswerSignal,
@@ -325,3 +329,34 @@ async def test_e2_continue_as_new_on_history_length(make_session):
     assert st.seen == 4
     assert len(s.calls("run_task")) == 4
 
+
+
+async def test_d2_run_task_failing_twice_fails_the_task_and_the_workflow_stays_signalable(
+        make_session):
+    """``run_task`` fails on both attempts (max_attempts=2): the task is
+    delivered ``failed``, the workflow goes back to idle and the next task
+    signal still runs."""
+    @activity.defn(name="run_task")
+    async def run_task(inp: RunTask) -> RunResult:
+        if inp.input_id == "in-dead":
+            acts._record("run_task", inp)
+            activity.heartbeat(activity.info().attempt)
+            raise ApplicationError(f"worker died (attempt {activity.info().attempt})")
+        return await acts.run_task(inp)
+
+    s = await make_session(activities=[acts.prepare_vm, run_task, acts.park_vm, acts.deliver])
+    await s.send(TaskSignal(input_id="in-dead", text="crash twice"))
+    delivered = await s.wait_delivered(1)
+    assert delivered[0]["input"].input_id == "in-dead"
+    assert delivered[0]["input"].outcome == "failed"
+    assert [r["attempt"] for r in s.calls("run_task")] == [1, 2]
+    assert s.calls("run_task")[1]["heartbeat_details"] == [1]   # the retry saw attempt 1's beat
+    st = await s.wait_state("idle")
+    assert st.tasks_run == 1 and st.current_input_id is None
+
+    await s.send(TaskSignal(input_id="in-next", text="still there?"))
+    delivered = await s.wait_delivered(2)
+    assert delivered[1]["input"].input_id == "in-next"
+    assert delivered[1]["input"].outcome == "done"
+    st = await s.wait_state("idle")
+    assert st.tasks_run == 2 and st.seen == 2
