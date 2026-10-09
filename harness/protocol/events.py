@@ -121,6 +121,9 @@ OPTIONAL_BODY: dict[str, dict[str, tuple]] = {
     "op_state": {"duration_ms": INT, "pid": INT, "side_ref": STR},
     "tool_result": {"spill_ref": OPT_STR, "rewrite": OPT_STR, "late": BOOL},
     "error": {"ref": STR},
+    # M4: a question relayed from a gateway input request (MCP elicitation)
+    # carries what the re-send needs: {request_state, schema}
+    "question": {"input_request": DICT},
 }
 
 ENUMS: dict[str, dict[str, frozenset]] = {

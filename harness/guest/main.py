@@ -193,6 +193,7 @@ def run_session(cfg: GuestConfig, inbound: queue.Queue, transport: Transport,
     from protocol.fold import FoldError, State
     from guest import coordinator as coordinator_mod
     from guest.bulk import BulkClient
+    from guest.mcp import McpClient
     from guest.ops import OperationManager
     from guest.provider import Provider
 
@@ -212,7 +213,8 @@ def run_session(cfg: GuestConfig, inbound: queue.Queue, transport: Transport,
     log_writer = LogWriter(eventlog, transport)
     log_writer.start()
     provider = Provider(transport.connector, port=cfg.ports["llm"], model=cfg.model)
-    ops = OperationManager(workspace, cfg.limits, inbound, bulk=bulk)
+    mcp = McpClient(transport.connector, port=cfg.ports["gateway"])
+    ops = OperationManager(workspace, cfg.limits, inbound, bulk=bulk, mcp=mcp)
     coordinator = coordinator_mod.Coordinator(
         cfg, State(), inbound, log_writer, transport, provider, ops,
         coordinator_mod.SystemClock(), image_version=image_version,

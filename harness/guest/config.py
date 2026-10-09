@@ -10,7 +10,11 @@
 and `config` carries `model`, `params`, `tools` (host/device/mcp entries,
 turned into the effective list by protocol.allowlist.effective_tools),
 `limits` (merged over the Limits defaults), `hooks`, `async_tools`,
-`question_timeout_s`, `ui_attached`, `ports`. A `schema` key on the body or
+`question_timeout_s`, `ui_attached`, `ports` (M4: `gateway`, default 5011).
+M4: each tools entry may also carry `schema` (OpenAI function def; a bare
+`description` stands in when there is none), kept as `tool_schemas`, and
+`timeout_s`, kept as `tool_timeouts` (the op timeout of that tool's calls;
+part of config_hash). session_start.tools stays {name, side, pin}. A `schema` key on the body or
 the config must equal protocol.SCHEMA_VERSION.
 
 M2 (docs/GUEST.md "M2 contracts"): `params.stream` (bool, default True; the
@@ -31,7 +35,7 @@ from protocol import SCHEMA_VERSION
 from protocol.allowlist import SIDES, effective_tools
 from protocol.canonical import hash_value, is_int
 
-DEFAULT_PORTS = {"control": 5000, "bulk": 5001, "llm": 5010}
+DEFAULT_PORTS = {"control": 5000, "bulk": 5001, "llm": 5010, "gateway": 5011}
 DEFAULT_QUESTION_TIMEOUT_S = 300
 
 
@@ -70,9 +74,21 @@ class GuestConfig:
     async_tools: bool
     question_timeout_s: int
     ui_attached: bool
-    ports: dict            # {"control": 5000, "bulk": 5001, "llm": 5010}
+    ports: dict            # {"control": 5000, "bulk": 5001, "llm": 5010, "gateway": 5011}
     resume: bool
     at: int                # host clock at hello, ms
+    # M4: what hello.config.tools entries carry beyond {name, side, pin}
+    tool_schemas: dict = field(default_factory=dict)    # name -> OpenAI function def
+    tool_timeouts: dict = field(default_factory=dict)   # name -> timeout_s (mcp op timeout)
+
+    def op_timeout_for(self, name: str, side: str):
+        """The op timeout of one call: the entry's timeout_s (M4-CONTRACTS
+        section 4), else limits.op_timeout_s[side]."""
+        t = self.tool_timeouts.get(name)
+        if t:
+            return float(t)
+        v = (self.limits.op_timeout_s or {}).get(side)
+        return float(v) if v else None
 
     def config_hash(self) -> str:
         """sha256 of the canonical form of everything the model and the loop
@@ -86,6 +102,7 @@ class GuestConfig:
             "async_tools": self.async_tools,
             "question_timeout_s": self.question_timeout_s,
             "ui_attached": self.ui_attached,
+            "tool_timeouts": self.tool_timeouts,
         })
 
 
@@ -186,6 +203,26 @@ def _ports(raw) -> dict:
     return ports
 
 
+def _tool_extras(raw) -> tuple[dict, dict]:
+    """({name: schema}, {name: timeout_s}) from hello.config.tools entries
+    (effective_tools keeps only name/side/pin). A `description` without a
+    `schema` becomes a schema with that description and no parameters."""
+    schemas: dict = {}
+    timeouts: dict = {}
+    for i, entry in enumerate(raw if isinstance(raw, list) else []):
+        if not isinstance(entry, dict) or not isinstance(entry.get("name"), str):
+            continue
+        name = entry["name"]
+        schema = entry.get("schema")
+        if schema is not None:
+            schemas[name] = _dict(schema, f"config.tools[{i}].schema")
+        elif isinstance(entry.get("description"), str) and entry["description"]:
+            schemas[name] = {"name": name, "description": entry["description"]}
+        if entry.get("timeout_s") is not None:
+            timeouts[name] = _number(entry["timeout_s"], f"config.tools[{i}].timeout_s")
+    return schemas, timeouts
+
+
 def _principal(raw) -> Principal:
     raw = _dict(raw, "principal")
     return Principal(user=_str(raw.get("user"), "principal.user"),
@@ -209,6 +246,7 @@ def from_hello(body) -> GuestConfig:
         tools = effective_tools(config)
     except ValueError as exc:
         raise ValueError(f"hello.{exc}") from None
+    schemas, timeouts = _tool_extras(config.get("tools"))
 
     return GuestConfig(
         session_id=session_id,
@@ -226,4 +264,6 @@ def from_hello(body) -> GuestConfig:
         ports=_ports(config.get("ports")),
         resume=_bool(body.get("resume"), "resume", False),
         at=_int(body.get("at"), "at", 0),
+        tool_schemas=schemas,
+        tool_timeouts=timeouts,
     )

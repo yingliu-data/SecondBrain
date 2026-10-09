@@ -92,10 +92,46 @@ def test_ports_merge_over_defaults():
     body = hello()
     body["config"]["ports"] = {"llm": 6010}
     cfg = from_hello(body)
-    assert cfg.ports == {"control": 5000, "bulk": 5001, "llm": 6010}
-    body["config"]["ports"] = {"gateway": 5011}
-    with pytest.raises(ValueError, match="ports: unknown port 'gateway'"):
+    assert cfg.ports == {"control": 5000, "bulk": 5001, "llm": 6010, "gateway": 5011}
+    body["config"]["ports"] = {"gateway": 6011}
+    assert from_hello(body).ports["gateway"] == 6011
+    body["config"]["ports"] = {"proxy": 5012}
+    with pytest.raises(ValueError, match="ports: unknown port 'proxy'"):
         from_hello(body)
+
+
+def test_tool_entries_keep_schema_description_and_timeout():
+    """M4-CONTRACTS section 4: schema/description/timeout_s of hello tool
+    entries reach the model and the op timeout; session_start.tools does not
+    carry them."""
+    from guest.context import tool_schemas
+    fn = {"type": "function", "function": {"name": "wcc-events__draft_event", "description": "Draft",
+                                           "parameters": {"type": "object",
+                                                          "properties": {"title": {"type": "string"}}}}}
+    body = hello()
+    body["config"]["tools"] = [
+        {"name": "wcc-events__draft_event", "side": "mcp", "pin": "ab" * 32, "timeout_s": 2700,
+         "description": "Draft", "schema": fn},
+        {"name": "search_tools", "side": "mcp", "pin": "cd" * 32, "description": "Search tools"},
+        {"name": "calendar", "side": "device", "pin": None},
+    ]
+    cfg = from_hello(body)
+    assert {"name": "wcc-events__draft_event", "side": "mcp", "pin": "ab" * 32} in cfg.tools
+    assert cfg.tool_schemas["wcc-events__draft_event"] == fn
+    assert cfg.tool_timeouts == {"wcc-events__draft_event": 2700}
+    assert cfg.op_timeout_for("wcc-events__draft_event", "mcp") == 2700.0
+    assert cfg.op_timeout_for("search_tools", "mcp") == cfg.limits.op_timeout_s["mcp"]
+    by_name = {s["function"]["name"]: s for s in tool_schemas(cfg)}
+    assert by_name["wcc-events__draft_event"] == fn
+    assert by_name["search_tools"]["function"]["description"] == "Search tools"
+    assert by_name["calendar"]["function"]["parameters"] == {"type": "object", "properties": {}}
+    other = hello()
+    other["config"]["tools"] = [dict(body["config"]["tools"][0], timeout_s=60), *body["config"]["tools"][1:]]
+    assert from_hello(other).config_hash() != cfg.config_hash()
+    bad = hello()
+    bad["config"]["tools"] = [{"name": "x", "side": "mcp", "pin": None, "timeout_s": "soon"}]
+    with pytest.raises(ValueError, match=r"tools\[0\].timeout_s"):
+        from_hello(bad)
 
 
 def test_config_hash_is_stable_and_sensitive():

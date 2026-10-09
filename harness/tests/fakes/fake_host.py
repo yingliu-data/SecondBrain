@@ -35,6 +35,8 @@ M3:
     snapshot); `listen()` opens the listener again (the restore).
   - a side result of HOLD (or a callable returning HOLD) is not answered:
     the test sends the side_result itself later.
+  - gateway (M4): `gateway=True` (or a FakeGateway) also serves :5011, the
+    forwarder + MCP gateway double; mcp tool calls never get a side_result.
   - a guest killed and replaced: wait_connected(count=n) for the new one,
     then send("hello", {..., "resume": True}) with the next cseq.
 """
@@ -56,7 +58,7 @@ HOLD = object()          # a side result the test will send itself
 class FakeHost:
     def __init__(self, dir, hello_body: dict, side_results=None, auto_ack: bool = True,
                  port: int = CONTROL_PORT, auto_hello: bool = True, bulk: bool = True,
-                 close_on_parked: bool = True):
+                 close_on_parked: bool = True, gateway=None):
         self.dir = str(dir)
         self.port = port
         self.path = os.path.join(self.dir, f"v.sock_{port}")
@@ -97,10 +99,18 @@ class FakeHost:
         self._bulk_listener: socket.socket | None = None
         self._bulk_thread: threading.Thread | None = None
 
+        # M4: the forwarder + gateway double on :5011 (tests/fakes/fake_gateway.py)
+        if gateway is True:
+            from tests.fakes.fake_gateway import FakeGateway
+            gateway = FakeGateway(self.dir)
+        self.gateway = gateway or None
+
     # ------------------------------------------------------------ lifecycle
 
     def start(self) -> "FakeHost":
         self.listen()
+        if self.gateway is not None:
+            self.gateway.start()
         if self.bulk:
             try:
                 os.unlink(self.bulk_path)
@@ -146,6 +156,8 @@ class FakeHost:
 
     def stop(self) -> None:
         self._stop.set()
+        if self.gateway is not None:
+            self.gateway.stop()
         self.drop_link()
         thread = self._thread
         self.close_listener()
@@ -386,7 +398,7 @@ class FakeHost:
             self._cv.notify_all()
         if verdict == "new" and ev["type"] == "parked" and self.close_on_parked:
             self.close_listener()        # before the ack: no reconnect until the "restore"
-        if verdict == "new" and ev["type"] == "tool_call" and ev["body"].get("side") != "guest":
+        if verdict == "new" and ev["type"] == "tool_call" and ev["body"].get("side") not in ("guest", "mcp"):
             self._answer_tool_call(ev["body"])
         if self.auto_ack and verdict != "gap":
             self._send_ack()
