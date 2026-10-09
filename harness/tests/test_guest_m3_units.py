@@ -502,6 +502,7 @@ def test_mount_workspace_paths(tmp_path):
     assert mount_workspace(str(dev), "/", runner=ok) == "already"
 
 
+@pytest.mark.no_log_verify("synthetic clock-only buffers")
 def test_rebuild_eventlog_moves_the_old_buffer_aside(tmp_path):
     from guest.eventlog import EventLog
     old = EventLog(tmp_path)

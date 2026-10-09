@@ -1,0 +1,91 @@
+{
+  "about": "Fixed task set for python -m bench.async_tools (docs/ASYNC-TOOLS.md). Every task needs two or more independent tool calls (bash/read/grep) over the seeded workspace; `check` is applied to the settle answer; `fake` scripts the LLM for --fake (first response: the parallel calls, second: the answer).",
+  "workspace": {
+    "README.md": "# Demo service\n\nVersion 2.3.9. See docs/notes.md for ownership.\n",
+    "src/config.py": "VERSION = \"2.4.1\"\nPORT = 8443\n# TODO: move secrets to the environment\nDB_URL = \"sqlite:///data/app.db\"\n",
+    "src/app.py": "from config import PORT\n\n\ndef start_server():\n    # TODO: graceful shutdown\n    return PORT\n\n\ndef handle_request(req):\n    return {\"ok\": True}\n\n\ndef health():\n    return \"green\"\n",
+    "src/util.py": "def slugify(text):\n    return text.lower().replace(\" \", \"-\")\n\n\ndef chunk(items, n):\n    # TODO: validate n\n    return [items[i:i + n] for i in range(0, len(items), n)]\n",
+    "docs/notes.md": "# Notes\n\nOwner: Priya Raman\nOn-call rotation: weekly.\n\nTODO: write the runbook.\n",
+    "data/users.csv": "id,name,email\n1,Ana Lima,ana.lima@example.com\n2,Ben Okafor,ben.okafor@example.com\n3,Chen Wei,chen.wei@example.com\n4,Dara Byrne,dara.byrne@example.com\n5,Priya Raman,priya.raman@example.com\n6,Tomas Novak,tomas.novak@example.com\n7,Yuki Sato,yuki.sato@example.com\n",
+    "data/orders.csv": "order_id,user_id,total\n1001,1,12.50\n1002,3,8.00\n1003,5,41.20\n1004,2,3.99\n1005,5,15.00\n1006,7,22.10\n1007,4,9.90\n1008,6,30.00\n1009,1,5.25\n1010,2,61.00\n1011,3,7.75\n1012,5,18.40\n",
+    "logs/server.log": "2026-10-01T09:00:00Z INFO boot\n2026-10-01T09:00:01Z INFO listening on port 8080\n2026-10-01T09:05:12Z WARN slow request /api/orders 1450ms\n2026-10-01T09:07:40Z ERROR db timeout\n2026-10-01T09:07:41Z INFO retry ok\n2026-10-01T09:12:03Z ERROR upstream 502\n2026-10-01T09:15:00Z WARN cache miss storm\n2026-10-01T09:20:31Z ERROR db timeout\n2026-10-01T09:22:10Z INFO healthy\n2026-10-01T09:30:00Z WARN disk 85%\n2026-10-01T09:41:09Z ERROR worker crashed\n2026-10-01T09:41:10Z INFO worker restarted\n"
+  },
+  "tasks": [
+    {
+      "id": "csv_rows",
+      "prompt": "How many data rows (not counting the header line) are in data/users.csv and in data/orders.csv? Answer with both numbers.",
+      "check": {"contains_all": ["7", "12"]},
+      "fake": {
+        "calls": [["read", {"path": "data/users.csv"}], ["read", {"path": "data/orders.csv"}]],
+        "answer": "data/users.csv has 7 data rows and data/orders.csv has 12."
+      }
+    },
+    {
+      "id": "log_levels",
+      "prompt": "Count the ERROR lines and the WARN lines in logs/server.log. Answer with both counts.",
+      "check": {"contains_all": ["4", "3"]},
+      "fake": {
+        "calls": [["grep", {"pattern": " ERROR ", "path": "logs/server.log"}],
+                  ["grep", {"pattern": " WARN ", "path": "logs/server.log"}]],
+        "answer": "There are 4 ERROR lines and 3 WARN lines."
+      }
+    },
+    {
+      "id": "version_mismatch",
+      "prompt": "Which version does src/config.py declare, and which version does README.md mention? Answer with both version strings.",
+      "check": {"contains_all": ["2.4.1", "2.3.9"]},
+      "fake": {
+        "calls": [["read", {"path": "src/config.py"}], ["read", {"path": "README.md"}]],
+        "answer": "src/config.py declares 2.4.1 but README.md says 2.3.9."
+      }
+    },
+    {
+      "id": "todos",
+      "prompt": "Find every TODO in the src/ directory and in docs/. Name each file that contains one.",
+      "check": {"contains_all": ["config.py", "app.py", "util.py", "notes.md"]},
+      "fake": {
+        "calls": [["grep", {"pattern": "TODO", "path": "src"}], ["grep", {"pattern": "TODO", "path": "docs"}]],
+        "answer": "TODOs are in src/config.py, src/app.py, src/util.py and docs/notes.md."
+      }
+    },
+    {
+      "id": "functions",
+      "prompt": "List the names of all functions defined in src/app.py and in src/util.py.",
+      "check": {"contains_all": ["start_server", "handle_request", "health", "slugify", "chunk"]},
+      "fake": {
+        "calls": [["read", {"path": "src/app.py"}], ["read", {"path": "src/util.py"}]],
+        "answer": "src/app.py: start_server, handle_request, health. src/util.py: slugify, chunk."
+      }
+    },
+    {
+      "id": "port_mismatch",
+      "prompt": "Which port does src/config.py configure, and which port does logs/server.log say the server is listening on? Answer with both port numbers.",
+      "check": {"contains_all": ["8443", "8080"]},
+      "fake": {
+        "calls": [["grep", {"pattern": "PORT", "path": "src/config.py"}],
+                  ["grep", {"pattern": "listening", "path": "logs/server.log"}]],
+        "answer": "config.py sets 8443; the log says it listened on 8080."
+      }
+    },
+    {
+      "id": "owner_and_user5",
+      "prompt": "Who is named as the owner in docs/notes.md, and what is the email of the user with id 5 in data/users.csv?",
+      "check": {"contains_all": ["Priya Raman", "priya.raman@example.com"]},
+      "fake": {
+        "calls": [["read", {"path": "docs/notes.md"}], ["grep", {"pattern": "^5,", "path": "data/users.csv"}]],
+        "answer": "The owner is Priya Raman; user 5's email is priya.raman@example.com."
+      }
+    },
+    {
+      "id": "line_counts",
+      "prompt": "Using bash, report the number of lines in src/app.py, src/util.py and src/config.py (one command per file).",
+      "check": {"contains_all": ["14", "7", "4"]},
+      "fake": {
+        "calls": [["bash", {"command": "wc -l < src/app.py"}],
+                  ["bash", {"command": "wc -l < src/util.py"}],
+                  ["bash", {"command": "wc -l < src/config.py"}]],
+        "answer": "src/app.py has 14 lines, src/util.py has 7 and src/config.py has 4."
+      }
+    }
+  ]
+}

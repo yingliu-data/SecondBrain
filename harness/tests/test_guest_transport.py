@@ -12,6 +12,9 @@ from protocol.messages import ProtocolError
 from tests.fakes.fake_host import FakeHost
 
 SID = "sess-t"
+
+# the wire is tested with bare clock / tool_call events, not session logs
+pytestmark = pytest.mark.no_log_verify("synthetic events without session_start")
 HELLO = {"session_id": SID, "principal": {"user": "u", "tenant": "t"},
          "config": {"model": "m"}, "system_block": {}, "resume": False, "at": 1}
 
