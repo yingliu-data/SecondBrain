@@ -1,0 +1,16 @@
+# BuildKit reads <Dockerfile>.dockerignore for a root-context build: send
+# only what the agent-api image needs.
+*
+!harness/pyproject.toml
+!harness/protocol
+!harness/guest
+!flows/pyproject.toml
+!flows/flows
+!agent-api/pyproject.toml
+!agent-api/uv.lock
+!agent-api/app
+flows/flows/tests
+**/__pycache__
+**/*.pyc
+**/.venv
+**/.pytest_cache

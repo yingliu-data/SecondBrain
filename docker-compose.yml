@@ -50,6 +50,9 @@ services:
   # previous :<git-sha> image from GHCR.
   agent-api:
     image: ghcr.io/yingliu-data/secondbrain-agent-api:latest
+    build:
+      context: .                                # needs harness/ + flows/ (path deps)
+      dockerfile: agent-api/Dockerfile
     container_name: secondbrain-agent-api
     restart: unless-stopped
     environment:

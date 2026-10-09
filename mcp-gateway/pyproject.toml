@@ -22,8 +22,9 @@ dev = [
 package = false
 
 [tool.uv.sources]
-# Non-editable so the Docker image (which copies harness/ next to this dir)
-# installs it the same way. Only `protocol.canonical` is used (pins).
+# Editable, like agent-api, so harness/protocol changes need no reinstall; the
+# Docker image copies harness/ next to this dir. Uses protocol.canonical and
+# protocol.mcp.
 secondbrain-harness = { path = "../harness", editable = true }
 
 [tool.pytest.ini_options]

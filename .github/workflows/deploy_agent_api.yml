@@ -5,6 +5,10 @@ on:
   pull_request:
     paths:
       - 'agent-api/**'
+      - 'harness/protocol/**'                     # path deps baked into the image
+      - 'harness/guest/**'
+      - 'harness/pyproject.toml'
+      - 'flows/**'
       - 'docker-compose.yml'
       - '.github/workflows/deploy_agent_api.yml'
   push:
@@ -12,6 +16,10 @@ on:
       - main
     paths:
       - 'agent-api/**'
+      - 'harness/protocol/**'                     # path deps baked into the image
+      - 'harness/guest/**'
+      - 'harness/pyproject.toml'
+      - 'flows/**'
       - 'docker-compose.yml'
       - '.github/workflows/deploy_agent_api.yml'
 
@@ -60,15 +68,17 @@ jobs:
       - name: Build and push image
         uses: docker/build-push-action@v6
         with:
-          context: agent-api
+          # Repo root: harness/ and flows/ are path deps (agent-api/Dockerfile).
+          context: .
+          file: agent-api/Dockerfile
           platforms: linux/amd64
           # Only publish from main; PRs just prove the image builds.
           push: ${{ github.event_name != 'pull_request' }}
           tags: |
             ghcr.io/yingliu-data/secondbrain-agent-api:latest
             ghcr.io/yingliu-data/secondbrain-agent-api:${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=agent-api
+          cache-to: type=gha,mode=max,scope=agent-api
 
   deploy:
     needs: build
