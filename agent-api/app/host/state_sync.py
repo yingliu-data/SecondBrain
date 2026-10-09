@@ -88,6 +88,27 @@ def _append_line(path: Path, obj: dict) -> None:
         os.fsync(f.fileno())
 
 
+def count_host_events(events_dir: Path, segment_events: int = HARNESS_SEGMENT_EVENTS) -> int:
+    """The highest hseq in the session's host log (0 when there is none):
+    full segments before the last one, plus the last one's lines."""
+    host = sorted(p for p in Path(events_dir).glob("host-[0-9][0-9][0-9][0-9][0-9][0-9].jsonl"))
+    if not host:
+        return 0
+    with host[-1].open("rb") as f:
+        return (len(host) - 1) * segment_events + sum(1 for _ in f)
+
+
+def append_host_event(events_dir: Path, hseq: int, session_id: str | None, type: str,
+                      body: dict, segment_events: int = HARNESS_SEGMENT_EVENTS) -> dict:
+    """Write host event `hseq` to its segment. The caller is the session's
+    one host-log writer (it owns the hseq counter)."""
+    n = (hseq - 1) // segment_events + 1
+    rec = {"ts": utcnow_iso(), "hseq": hseq, "session_id": session_id, "type": type, "body": body}
+    Path(events_dir).mkdir(parents=True, exist_ok=True)
+    _append_line(Path(events_dir) / _segment_name(n, "host-"), rec)
+    return rec
+
+
 def _truncate(path: Path, size: int) -> None:
     try:
         with path.open("r+b") as f:
@@ -147,10 +168,7 @@ class StateSync:
                     self.settled[ev["body"]["input_id"]] = ev["body"]
             self.seen_inputs |= state.seen_input_ids
             self.run, self.state = run, state
-        host = self._segments("host-")
-        if host:
-            with host[-1].open("rb") as f:
-                self._host_count = (len(host) - 1) * self.segment_events + sum(1 for _ in f)
+        self._host_count = count_host_events(self.events_dir, self.segment_events)
 
     def begin_run(self) -> int:
         """Open the next run (a fresh guest with its own session_start at
@@ -250,11 +268,8 @@ class StateSync:
         """Append a host-session event (workflow, side_call, vm, usage, ...)."""
         with self._lock:
             self._host_count += 1
-            n = (self._host_count - 1) // self.segment_events + 1
-            rec = {"ts": utcnow_iso(), "hseq": self._host_count,
-                   "session_id": self.state.session_id, "type": type, "body": body}
-            _append_line(self.events_dir / _segment_name(n, "host-"), rec)
-            return rec
+            return append_host_event(self.events_dir, self._host_count, self.state.session_id,
+                                     type, body, self.segment_events)
 
     def read_host(self) -> list[dict]:
         out: list[dict] = []

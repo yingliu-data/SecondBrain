@@ -5,11 +5,17 @@ from contextvars import ContextVar
 # and user without racing on shared singleton state. Set by routes/chat.py.
 _current_session: ContextVar = ContextVar("current_session", default=None)
 _current_user_id: ContextVar = ContextVar("current_user_id", default="")
+# The tenant and the session id the request runs under: the gateway skill
+# stamps them as identity headers (M4-CONTRACTS §2, §8).
+_current_tenant: ContextVar = ContextVar("current_tenant", default="")
+_current_session_id: ContextVar = ContextVar("current_session_id", default="")
 
 
-def set_current_context(session, user_id: str):
+def set_current_context(session, user_id: str, tenant: str = "", session_id: str = ""):
     _current_session.set(session)
     _current_user_id.set(user_id)
+    _current_tenant.set(tenant)
+    _current_session_id.set(session_id)
 
 
 def get_current_session():
@@ -18,6 +24,22 @@ def get_current_session():
 
 def get_current_user_id() -> str:
     return _current_user_id.get()
+
+
+def get_current_tenant() -> str:
+    return _current_tenant.get()
+
+
+def get_current_session_id() -> str:
+    """The session id set with the context, else the session dir's own."""
+    sid = _current_session_id.get()
+    if not sid:
+        session = _current_session.get()
+        try:
+            sid = session.read_meta().get("session_id", "") if session is not None else ""
+        except (AttributeError, OSError, ValueError):
+            sid = ""
+    return sid
 
 
 class BaseSkill(ABC):

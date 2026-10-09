@@ -17,10 +17,21 @@ LLM_STREAM = os.environ.get("LLM_STREAM", "true").lower() in ("1", "true", "yes"
 # ── API ──
 API_SECRET_KEY = os.environ["API_SECRET_KEY"]
 TENANTS_FILE = os.environ.get("TENANTS_FILE", "data/tenants.json")
-# Hostnames allowed to resolve to private/loopback addresses for MCP servers
-MCP_ALLOWED_PRIVATE_HOSTS = [
-    h for h in os.environ.get("MCP_ALLOWED_PRIVATE_HOSTS", "host.docker.internal").split(",") if h
-]
+
+# ── MCP gateway (harness/docs/M4-CONTRACTS.md) ──
+# Remote MCP servers are reached only through the mcp-gateway service (their
+# URLs, tokens and SSRF checks live in its gateway.json). Empty = no gateway:
+# no MCP tools, the forwarder answers 502.
+MCP_GATEWAY_URL = os.environ.get("MCP_GATEWAY_URL", "http://mcp-gateway:8090").rstrip("/")
+# Shared bearer for the gateway's routes and POST /internal/gateway-events
+# (both directions). Empty = no check (dev only).
+INTERNAL_TOKEN = os.environ.get("INTERNAL_TOKEN", "")
+# Worker -> GET /internal/tools at session start: short, a down gateway must
+# not hold the hello up (the session starts without MCP tools).
+MCP_GATEWAY_TOOLS_TIMEOUT_S = float(os.environ.get("MCP_GATEWAY_TOOLS_TIMEOUT_S", 5))
+# Forwarder / legacy call read timeout: above the longest upstream timeout_s
+# (calls run up to 45 min).
+MCP_GATEWAY_CALL_TIMEOUT_S = float(os.environ.get("MCP_GATEWAY_CALL_TIMEOUT_S", 3600))
 MAX_INPUT = int(os.environ.get("MAX_INPUT_LENGTH", 4096))
 MAX_TOOLS = int(os.environ.get("MAX_TOOL_CALLS_PER_TURN", 10))
 TOOL_TIMEOUT = int(os.environ.get("TOOL_TIMEOUT", 60))        # seconds for device tool response
@@ -69,7 +80,8 @@ HARNESS_GUEST_ROOT = os.environ.get(
     os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "harness")),
 )
 HARNESS_SANDBOX = os.environ.get("HARNESS_SANDBOX", "local")       # "local" | "firecracker"
-HARNESS_PORTS = {"control": 5000, "bulk": 5001, "llm": 5010}      # fixed (PROTOCOL.md 1)
+HARNESS_PORTS = {"control": 5000, "bulk": 5001, "llm": 5010,      # fixed (PROTOCOL.md 1)
+                 "gateway": 5011}                                 # M4: MCP gateway forwarder
 HARNESS_HELLO_TIMEOUT_S = int(os.environ.get("HARNESS_HELLO_TIMEOUT_S", 30))   # guest connect
 HARNESS_HEARTBEAT_S = int(os.environ.get("HARNESS_HEARTBEAT_S", 60))            # host → guest
 HARNESS_KEEPALIVE_S = int(os.environ.get("HARNESS_KEEPALIVE_S", 15))            # SSE comment

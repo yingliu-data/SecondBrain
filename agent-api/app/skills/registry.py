@@ -74,6 +74,10 @@ class SkillRegistry:
         self._skills.pop(name, None)
         self._enabled.pop(name, None)
 
+    def skill_names(self) -> list[str]:
+        """Every registered skill's name (enabled or not)."""
+        return list(self._skills)
+
     def list_all(self) -> list[dict]:
         """List all skills with metadata. Used by /api/v1/skills GET."""
         return [

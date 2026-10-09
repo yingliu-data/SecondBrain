@@ -4,7 +4,9 @@ endpoints.py   per-session Unix-socket listeners for the vsock ports; Firecracke
                host-side vsock sockets ({uds}_{port}) and the test double are the same code
 worker.py      act(): start sandbox, accept :5000, hello + task, relay events, sides, settle
 llm_proxy.py   :5010 -> vLLM (LLM_URL); usage; budgets later
-sides.py       host skills via SkillRegistry; device relay via SSE + /tool-result; mcp later
+sides.py       host skills via SkillRegistry; device relay via SSE + /tool-result
+gateway_forwarder.py  :5011 -> mcp-gateway (POST /mcp only), identity headers, held calls
+uds_http.py    the threaded HTTP server llm_proxy and gateway_forwarder share
 state_sync.py  ack after append; events/ segments in the session dir; projections
 stream.py      events -> SSE (token, tool_call, avatar_command, question, done, seq, error)
 sandbox/       firecracker.py (boot, kill; snapshots in M3), local.py (guest subprocess, tests)
