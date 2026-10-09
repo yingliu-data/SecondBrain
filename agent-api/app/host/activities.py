@@ -35,7 +35,8 @@ from temporalio.exceptions import ApplicationError
 
 from flows.activities import (Deliver, ParkVM, PrepareVM, RunResult, RunTask,
                               SessionConfig, SessionRef)
-from protocol.canonical import hash_value
+from protocol.canonical import derive_key_id
+from protocol.events import ENUMS
 
 from app.config import HARNESS_ABORT_WAIT_S
 from app.host.worker import Worker, task_error, task_ok
@@ -44,7 +45,7 @@ from app.util.ipc import atomic_write_json
 logger = logging.getLogger("host.activities")
 
 # the guest's settle outcomes RunResult passes through (anything else: failed)
-SETTLE_OUTCOMES = ("done", "failed", "timeout", "escalated", "aborted")
+SETTLE_OUTCOMES = ENUMS["settle"]["outcome"]
 
 
 def answer_input_id(input_id: str, question_id: str) -> str:
@@ -57,8 +58,7 @@ def ticket_id_for(ref: SessionRef, input_id: str) -> str:
     """The ticket of one input: `ticket_` + 24 hex of the canonical hash of
     (user, tenant, session_id, input_id). Not the settle seq: seqs restart
     with every guest run."""
-    return "ticket_" + hash_value(["ticket", ref.user, ref.tenant, ref.session_id,
-                                   input_id])[:24]
+    return derive_key_id("ticket", ref.user, ref.tenant, ref.session_id, input_id)
 
 
 def bind_workflow(workers, tenant, session_id: str, registry, open_session

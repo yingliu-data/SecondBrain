@@ -100,7 +100,19 @@ def derive_id(user: str, tenant: str, session_id: str, seq: int, kind: str) -> s
     minted at event `seq` of a session. Shape: '<kind>_<24 hex>'."""
     if not is_int(seq, 1):
         raise ValueError(f"seq must be a positive int, got {seq!r}")
+    return _minted(kind, [user, tenant, session_id, seq, kind])
+
+
+def derive_key_id(kind: str, *parts: str) -> str:
+    """Deterministic id for `kind` keyed by stable strings instead of an event
+    seq (e.g. a ticket per input: seqs restart with every guest run).
+    Same shape as derive_id: '<kind>_<24 hex>'."""
+    if not parts or not all(isinstance(p, str) for p in parts):
+        raise ValueError("parts must be one or more str")
+    return _minted(kind, [kind, *parts])
+
+
+def _minted(kind: str, material: list) -> str:
     if not kind or "_" in kind:
         raise ValueError(f"kind must be a non-empty word without '_': {kind!r}")
-    digest = hash_value([user, tenant, session_id, seq, kind])
-    return f"{kind}_{digest[:_ID_HEX]}"
+    return f"{kind}_{hash_value(material)[:_ID_HEX]}"
