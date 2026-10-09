@@ -11,7 +11,7 @@ def test_loads_tenants_and_synthesizes_default(tenant_registry):
     default = tenant_registry.get_by_api_key("test-default-key")
     assert default.is_default
     assert default.allowed_skill_names() is None  # unrestricted
-    assert default.session_key("abc") == "abc"
+    assert default.store_key("abc") == "abc"
 
 
 def test_missing_file_gives_default_only(tmp_path):
@@ -24,7 +24,7 @@ def test_missing_file_gives_default_only(tmp_path):
 def test_named_tenant_scoping(tenant_registry):
     wcc = tenant_registry.get_by_api_key("wcc-key")
     assert wcc.name == "wcc-events"
-    assert wcc.session_key("abc") == "wcc-events:abc"
+    assert wcc.store_key("abc") == "wcc-events:abc"
     assert wcc.allowed_skill_names() == {"web_search", "mcp_wcc"}
     assert wcc.max_tools == 2
 

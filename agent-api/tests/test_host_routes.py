@@ -37,10 +37,11 @@ def client(tmp_path, users_root, monkeypatch):
     path = tmp_path / "tenants.json"
     path.write_text(json.dumps(doc))
     middleware.set_tenant_registry(TenantRegistry(path, "test-default-key"))
-    monkeypatch.setattr(chat, "sessions", DirStore(tmp_path / "sessions"))
     script = [{"call": {"id": "call_x", "name": "get_calendar_events", "args": {}}},
               {"text": "one event"}]
-    workers = Workers(sandbox_factory=lambda: FakeSandbox(script), hello_timeout_s=5,
+    store = DirStore(tmp_path / "sessions")
+    monkeypatch.setattr(chat, "sessions", store)
+    workers = Workers(sandbox_factory=lambda: FakeSandbox(script), sessions=store, hello_timeout_s=5,
                       wall_clock_s=15)
     monkeypatch.setattr(chat, "workers", workers)
     chat.set_dependencies(FakeRegistry(), None)
@@ -78,7 +79,7 @@ def test_example_default_tenant_runs_on_harness_over_the_env_default(tmp_path, m
     p.write_text(_json.dumps(doc))
     reg = TenantRegistry(p, "env-key")
     default = reg.get_by_api_key("env-key")
-    assert default.is_default and default.session_key("abc") == "abc"
+    assert default.is_default and default.store_key("abc") == "abc"
     assert sum(1 for t in reg.all_tenants() if t.name == "default") == 1
     assert chat_mod.engine_for(default) == "harness"
     wcc = next(t for t in reg.all_tenants() if t.name == "wcc-event")

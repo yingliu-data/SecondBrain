@@ -3,7 +3,7 @@ Temporal activities in M5).
 
   Worker(session, tenant, registry, sandbox, sinks=None)
     .act(task_input) -> settle body     task_input = {input_id, text, kind?,
-                                        attachments?, answer_to?, ticket_id?}
+                                        attachments?, ticket_id?}
     .attach() -> asyncio.Queue          an SSE sink: every projected SSE string
                                         is put on it; None ends the stream
     .detach(queue)
@@ -38,8 +38,8 @@ M3 (harness/docs/M3-CONTRACTS.md): one long-lived guest per session.
 
 M5 (harness/docs/M5-CONTRACTS.md): two drivers over one task API. The
 Temporal activities (activities.py) are one; act() is the other, in-process
-(the direct path). `answer_wait_s` (construction config) set = the workflow
-path: hello limits carry it, the guest parks itself on a question deadline
+(the direct path). `answer_wait_s` (construction config, Workers.config_for)
+set = the workflow path: hello limits carry it, the guest parks itself on a question deadline
 (parked{reason: question, question_id}), the worker adopts the park and
 records `question_park` on the parked state; the task's wall clock stops
 while it waits.
@@ -56,6 +56,7 @@ while it waits.
                                 (if any) + done + end of stream; act() calls it
                                 when its task returns, the workflow at deliver
   .replay(input_id, sink=None)  a settled input's answer again, then its end
+                                (its settle body; None when not settled)
 
 Threads touch sockets only (endpoints.py); everything reaches the asyncio
 loop through loop.call_soon_threadsafe and one inbound asyncio.Queue that a
@@ -71,7 +72,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Callable
+from typing import Callable, NamedTuple
 
 from protocol.allowlist import effective_tools
 from protocol.messages import Outbox, ProtocolError, ack, control_message
@@ -102,6 +103,32 @@ from app.util.ipc import atomic_write_json
 logger = logging.getLogger("host.worker")
 
 HARNESS_VERSION = "0.0.3"
+
+
+class ControlPolicy(NamedTuple):
+    """How one control type is handled outside a plain send."""
+    while_parked: str       # "hold": kept unnumbered, the guest wakes for it; "drop"
+    carried: bool           # unacked at a death resume: numbered again after the new hello
+    wake_order: int         # held controls are sent at the wake lowest first
+
+
+# M3-CONTRACTS §3.5: the wake sends held controls `ui_response` first
+CONTROL_POLICY: dict[str, ControlPolicy] = {
+    "hello": ControlPolicy("hold", False, 1),
+    "heartbeat": ControlPolicy("drop", False, 1),
+    "park": ControlPolicy("drop", False, 1),
+    "ui_response": ControlPolicy("hold", True, 0),
+    "task": ControlPolicy("hold", True, 1),
+    "follow_up": ControlPolicy("hold", True, 1),
+    "steer": ControlPolicy("hold", True, 1),
+    "side_result": ControlPolicy("hold", True, 1),
+    "abort": ControlPolicy("hold", True, 1),
+}
+_DEFAULT_POLICY = ControlPolicy("hold", True, 1)
+
+
+def control_policy(type: str) -> ControlPolicy:
+    return CONTROL_POLICY.get(type, _DEFAULT_POLICY)
 
 
 class GuestError(RuntimeError):
@@ -196,7 +223,9 @@ class Worker:
         self._stop_accept = threading.Event()
         self._accept_thread: threading.Thread | None = None
         self._task_lock = asyncio.Lock()
-        self._current: tuple[str, asyncio.Future, dict] | None = None  # input_id, settle, task_input
+        self._current: tuple[str, asyncio.Future] | None = None  # input_id, its settle
+        # the running task's wall clock (its input's, else wall_clock_s): hello limits
+        self.task_wall_clock_s: float = wall_clock_s
         self.last_hello: dict | None = None
         self.closed = False
         # M3: park, resume, idle, death
@@ -210,12 +239,12 @@ class Worker:
         self.gateway_entries: list[dict] | None = None
         # M5: the workflow path (None = direct path, M1-M4 behaviour unchanged)
         self.answer_wait_s = answer_wait_s
-        # {input_id, question_id}: a field of the parked state (vm_state clears it)
-        self.question_park: dict | None = None
         self._changed = asyncio.Event()             # replaced (and set) on every change
         # none | booting | running | parking | parked; the session snapshot
         # itself is the sandbox's business (has_snapshot / restore)
-        self.vm_state = "none"
+        self._vm_state = "none"
+        # {input_id, question_id}: a field of the parked state (vm_state clears it)
+        self._question_park: dict | None = None
         self.snapshot_dir = session.root / "vm" / "snapshot"
         self.parked_file = session.root / "vm" / "parked.json"
         self._parked_evt = asyncio.Event()
@@ -297,9 +326,24 @@ class Worker:
         """none | booting | running | parking | parked. `question_park` is a
         field of the parked state: any other state clears it. Every change
         wakes the waiters (_wait)."""
+        if value == self._vm_state:
+            return
         self._vm_state = value
         if value != "parked":
-            self.question_park = None
+            self._question_park = None
+        self._pulse()
+
+    @property
+    def question_park(self) -> dict | None:
+        return self._question_park
+
+    @question_park.setter
+    def question_park(self, value: dict | None) -> None:
+        """{input_id, question_id} while the guest is parked on that
+        question; a change wakes the waiters (_wait)."""
+        if value == self._question_park:
+            return
+        self._question_park = value
         self._pulse()
 
     def _pulse(self) -> None:
@@ -411,7 +455,6 @@ class Worker:
         self._ensure_plumbing()
         if self.question_park is not None and self.question_park["question_id"] == question_id:
             self.question_park = None
-            self._pulse()
         status = self.send_control("ui_response", {"input_id": input_id,
                                                    "question_id": question_id, "answer": text})
         self.sync.host_event("workflow", {"kind": "answer_signal", "input_id": input_id,
@@ -438,13 +481,13 @@ class Worker:
         self._end_stream(input_id)
         self._acts.pop(input_id, None)
 
-    def replay(self, input_id: str, sink: asyncio.Queue | None = None) -> bool:
+    def replay(self, input_id: str, sink: asyncio.Queue | None = None) -> dict | None:
         """A settled input's answer again (word-wise), then done + end of
         stream: onto one `sink`, or (none) the input's sinks via finish_input.
-        False when the input has not settled."""
+        Its settle body; None when the input has not settled."""
         body = self.sync.settled.get(input_id)
         if body is None:
-            return False
+            return None
         items = tokens(body["answer"].strip()) if body.get("answer") else []
         if sink is None:
             self._emit_many(items, input_id)
@@ -452,7 +495,7 @@ class Worker:
         else:
             for item in (*items, DONE, None):
                 sink.put_nowait(item)
-        return True
+        return body
 
     # ------------------------------------------------------------ hello
     def tool_entries(self) -> list[dict]:
@@ -532,7 +575,7 @@ class Worker:
 
     def limits(self) -> dict:
         return {
-            "wall_clock_s": int(self._wall_clock_s()),
+            "wall_clock_s": int(self.task_wall_clock_s),
             "max_tools": self.tenant.max_tools or MAX_TOOLS,
             "max_turns": HARNESS_MAX_TURNS,
             "max_tokens": self.tenant.max_tokens or LLM_MAX_TOKENS,
@@ -548,12 +591,6 @@ class Worker:
             # M5: > 0 = a question deadline parks the task (workflow path only)
             **({"answer_wait_s": int(self.answer_wait_s)} if self.answer_wait_s is not None else {}),
         }
-
-    def _wall_clock_s(self) -> float:
-        """The running task's wall clock: its input's wall_clock_s (the
-        workflow's RunTask), else the worker's default."""
-        task_input = self._current[2] if self._current_future() is not None else {}
-        return task_input.get("wall_clock_s") or self.wall_clock_s
 
     def build_hello(self, resume: bool = False) -> dict:
         params: dict = {"max_tokens": self.tenant.max_tokens or LLM_MAX_TOKENS,
@@ -585,27 +622,26 @@ class Worker:
 
     # ------------------------------------------------------------ control
     def send_control(self, type: str, body: dict) -> str:
-        """The one way a control reaches the guest. Returns
+        """The one way a control reaches the guest (CONTROL_POLICY). Returns
           "sent"      numbered (next cseq) and kept until acked; sent now if
                       the link is up, else with the resend on the next link
                       (a stream drop between restore and reconnect is not a
-                      lost guest)
-          "held"      the guest is parked: kept unnumbered, the guest wakes
-                      (restore) and the wake numbers held controls
-                      `ui_response` first
-          "no_guest"  no guest run can take it (never booted, or gone)
-          "dropped"   a heartbeat/park to a parked guest, or a `side_result`
-                      for a call the guest declared lost (logged
-                      `input{dedupe: late}`, PLAN.md 5)"""
+                      lost guest). Also a `side_result` for a call the guest
+                      declared lost: dropped, logged `input{dedupe: late}`
+                      (PLAN.md 5)
+          "held"      the guest is parked: a `hold` control is kept
+                      unnumbered, the guest wakes (restore) and the wake
+                      numbers the held controls by wake_order; a `drop` one
+                      (heartbeat, park) is dropped
+          "no_guest"  no guest run can take it (never booted, or gone)"""
         if type == "side_result" and body.get("call_id") in self._lost_calls:
             self.sync.host_event("input", {"kind": "side_result", "call_id": body.get("call_id"),
                                            "side": body.get("side"), "dedupe": "late"})
-            return "dropped"
+            return "sent"
         if self.vm_state == "parked":
-            if type in ("heartbeat", "park"):
-                return "dropped"
-            self._deferred.append((type, body))
-            self._request_wake()
+            if control_policy(type).while_parked == "hold":
+                self._deferred.append((type, body))
+                self._request_wake()
             return "held"
         if self._outbox is None or self.vm_state == "none":
             return "no_guest"
@@ -618,9 +654,10 @@ class Worker:
         if self._channel is not None and not self._channel.closed:
             self._channel.send(msg)
 
-    def _send_ui_first(self, items: list[tuple[str, dict]]) -> None:
-        """Number and send held controls, `ui_response` first (M3-CONTRACTS §3.5)."""
-        for t, b in sorted(items, key=lambda tb: tb[0] != "ui_response"):
+    def _send_held(self, items: list[tuple[str, dict]]) -> None:
+        """Number and send held controls by wake_order (`ui_response` first,
+        M3-CONTRACTS §3.5)."""
+        for t, b in sorted(items, key=lambda tb: control_policy(tb[0]).wake_order):
             self.send_control(t, b)
 
     # ------------------------------------------------------------ plumbing
@@ -769,7 +806,7 @@ class Worker:
         self.vm_state = "running"
         self._clear_parked_file()
         self._vm_event(op, source, t0, **extra)
-        self._send_ui_first(held)
+        self._send_held(held)
 
     async def _boot(self, *, resume: bool) -> None:
         """Start a guest run and send hello. Fresh (resume=False): a new log
@@ -783,7 +820,7 @@ class Worker:
             highest = 0
             if self._outbox is not None:
                 carried = [(m["type"], m["body"]) for m in self._outbox.pending
-                           if m["type"] not in ("hello", "heartbeat", "park")]
+                           if control_policy(m["type"]).carried]
                 highest = self._outbox.highest_sent
             self._outbox = Outbox(self.session_id, "cseq")
             self._outbox.resume_from(highest)
@@ -994,10 +1031,9 @@ class Worker:
                                                       or self._guest_ready()):
                 self.send_control(*self._task_message(task_input))
             return await asyncio.shield(task)
-        if input_id in self.sync.settled:
-            body = self._settled_again(input_id)
-            self.replay(input_id)
-            return body
+        body = self.replay(input_id)      # settled: its answer again, its streams end
+        if body is not None:
+            return self._settled_again(input_id, body)
         task = self.start_task(task_input)
         # before shield's own callback: the streams end before act() returns
         task.add_done_callback(lambda t: self.finish_input(input_id, task_error(t)))
@@ -1025,16 +1061,20 @@ class Worker:
             self._fail(input_id, "failed", message)
             raise GuestError(message) from e
         async with self._task_lock:
-            if input_id in self.sync.settled:
-                return self._settled_again(input_id)
+            body = self.sync.settled.get(input_id)
+            if body is not None:
+                return self._settled_again(input_id, body)
             fut = self._loop.create_future()
-            self._current = (input_id, fut, task_input)
+            self._current = (input_id, fut)
+            self.task_wall_clock_s = task_input.get("wall_clock_s") or self.wall_clock_s
             try:
                 result = await self._run(task_input, fut)
             except BaseException as e:
                 if not fut.done():
                     fut.set_exception(e)
                 raise
+            finally:
+                self.task_wall_clock_s = self.wall_clock_s
             if not fut.done():
                 fut.set_result(result)
             return result
@@ -1049,14 +1089,15 @@ class Worker:
         return kind, {"input_id": task_input["input_id"], "text": task_input.get("text", ""),
                       "attachments": attachments}
 
-    def _settled_again(self, input_id: str) -> dict:
+    def _settled_again(self, input_id: str, body: dict) -> dict:
+        """`body`, the stored settle of an input seen again (logged)."""
         self.sync.host_event("workflow", {"kind": "task_signal", "input_id": input_id,
                                           "dedupe": "settled"})
-        return self.sync.settled[input_id]
+        return body
 
     async def _run(self, task_input: dict, fut: asyncio.Future) -> dict:
         input_id = task_input["input_id"]
-        wall_clock_s = self._wall_clock_s()
+        wall_clock_s = self.task_wall_clock_s
         self.sync.ticket_id = task_input.get("ticket_id")
         self.sync.host_event("workflow", {"kind": "task_signal", "input_id": input_id})
         self._cancel_idle()
@@ -1354,23 +1395,31 @@ async def _first(fut: asyncio.Future, evt: asyncio.Event, timeout: float | None 
 
 
 class Workers:
-    """One Worker per running session, by session_key(user, tenant, session_id)."""
+    """One Worker per running session, by session_key(user, tenant, session_id).
 
-    def __init__(self, sandbox_factory=make_sandbox, **worker_kwargs) -> None:
+    `sessions` (the DirStore) opens a new Worker's session directory;
+    `config_for(tenant)` gives a new Worker's construction config on top of
+    `worker_kwargs` (main.py: the workflow path's answer_wait_s while
+    Temporal runs)."""
+
+    def __init__(self, sandbox_factory=make_sandbox, *, sessions=None,
+                 config_for: Callable[[object], dict] | None = None, **worker_kwargs) -> None:
         self._workers: dict[str, Worker] = {}
         self.sandbox_factory = sandbox_factory
+        self.sessions = sessions
+        self.config_for = config_for or (lambda tenant: {})
         self.worker_kwargs = worker_kwargs
 
-    def get_or_create(self, tenant, session_id: str, registry,
-                      open_session: Callable[[], object], **kwargs) -> Worker:
+    def get_or_create(self, tenant, session_id: str, registry) -> Worker:
         """The session's live Worker, looked up by key; only a new one opens
-        the session directory (open_session()). `kwargs` (e.g. the workflow
-        path's answer_wait_s) are construction config of a new Worker."""
+        the session directory and reads config_for(tenant). A live Worker
+        keeps its config until it is closed."""
         key = session_key(tenant.user, tenant.name, session_id)
         w = self._workers.get(key)
         if w is None or w.closed:
-            w = Worker(open_session(), tenant, registry, self.sandbox_factory(),
-                       **{**self.worker_kwargs, **kwargs})
+            session = self.sessions.get_or_create(tenant.user, tenant.name, session_id)
+            w = Worker(session, tenant, registry, self.sandbox_factory(),
+                       **{**self.worker_kwargs, **self.config_for(tenant)})
             self._workers[key] = w
         return w
 

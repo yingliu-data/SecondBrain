@@ -17,7 +17,10 @@ import pytest
 from temporalio.testing import WorkflowEnvironment
 
 from flows.activities import SessionConfig, SessionRef
-from flows.schedules import DEFAULT_SESSION, ensure_schedules, entries_from_tenants, schedule_id
+from flows.schedules import (
+    DEFAULT_SESSION, FINGERPRINT_MEMO, _schedule_for, ensure_schedules, entries_from_tenants,
+    schedule_id,
+)
 
 
 async def test_entries_from_tenants():
@@ -108,6 +111,17 @@ async def test_ensure_schedules_create_update_trigger_delete(tenv, make_session)
         assert desc.schedule.spec.time_zone_name == "Europe/London"
         assert desc.schedule.action.workflow == "ScheduleTickWorkflow"
         assert desc.schedule.policy.catchup_window == timedelta(seconds=10)
+        assert set(desc.schedule.action.memo) == {FINGERPRINT_MEMO}  # the only memo key
+
+        # a schedule written before fingerprints (no memo) is rewritten once
+        legacy = _schedule_for(entries_from_tenants(doc)[1], tq)
+        legacy.action.memo = None
+        await client.get_schedule_handle(sid1).delete()
+        await client.create_schedule(sid1, legacy)
+        res = await ensure_schedules(client, doc, task_queue=tq)
+        assert res == {sid0: "unchanged", sid1: "updated"}
+        res = await ensure_schedules(client, doc, task_queue=tq)
+        assert res == {sid0: "unchanged", sid1: "unchanged"}
 
         # second call (prepared entries this time) updates in place and
         # removes the entry no longer listed

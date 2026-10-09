@@ -124,9 +124,12 @@ OPTIONAL_BODY: dict[str, dict[str, tuple]] = {
                  "input_request": DICT},
     "tool_result": {"spill_ref": OPT_STR, "rewrite": OPT_STR, "late": BOOL},
     "error": {"ref": STR},
-    # M5: the question a `parked{reason: "question"}` waits on (D12), and the
-    # task's wall clock used up to the park (ms; absent when no task runs)
-    "parked": {"question_id": STR, "wall_used_ms": INT},
+    # M5: the question a `parked{reason: "question"}` waits on (D12), the
+    # task's wall clock used up to the park (ms; absent when no task runs),
+    # and the guest clock at the park (ms; restore derives question deadlines)
+    "parked": {"question_id": STR, "wall_used_ms": INT, "at": INT},
+    # M5: clock{question_deadline} names the question whose deadline passed
+    "clock": {"ref": STR},
 }
 
 ENUMS: dict[str, dict[str, frozenset]] = {
@@ -174,7 +177,7 @@ MIN_INT: dict[str, dict[str, int]] = {
     "op_state": {"duration_ms": 0, "attempt": 0},
     "bulk": {"bytes": 0},
     "checkpoint": {"through_seq": 1},
-    "parked": {"checkpoint_seq": 1, "wall_used_ms": 0},
+    "parked": {"checkpoint_seq": 1, "wall_used_ms": 0, "at": 0},
 }
 
 # list keys whose items must all be str. {type: (key, ...)}

@@ -32,7 +32,7 @@ from flows.client import session_handle
 
 from app.auth import middleware
 from app.host import temporal
-from app.host.activities import HostActivities, ticket_id_for
+from app.host.activities import HostActivities, ticket_id_for, worker_config
 from app.host.sandbox.local import LocalSandbox
 from app.host.sides import DeviceCalls
 from app.host.worker import Workers
@@ -95,6 +95,7 @@ class Harness:
         self.short = Path(tempfile.mkdtemp(prefix="m5", dir="/tmp"))
         self.store = DirStore(self.short)
         self.workers = Workers(sandbox_factory=lambda: LocalSandbox(GUEST_ROOT),
+                               sessions=self.store, config_for=worker_config,
                                device_calls=DeviceCalls(), llm_url=upstream.url,
                                hello_timeout_s=20, heartbeat_s=1, wall_clock_s=120,
                                park_grace_s=30)
@@ -104,7 +105,7 @@ class Harness:
         sessions.set_sessions(self.store)
         self.registry = FakeRegistry()
         chat.set_dependencies(self.registry, None)
-        self.acts = HostActivities(self.workers, self.store, self.tenants, self.registry,
+        self.acts = HostActivities(self.workers, self.tenants, self.registry,
                                    abort_wait_s=20)
         app = FastAPI()
         app.include_router(chat.router)
@@ -224,11 +225,10 @@ async def test_chat_task_completes_through_the_workflow(h):
     st = await h.wait_state("idle")
     assert st.tasks_run == 1 and st.seen == 1
     [ticket] = h.tickets()
-    seq = w.sync.settled_seq["in_t1"]
     assert ticket == {"ticket_id": ticket_id_for(h.ref, "in_t1"), "input_id": "in_t1",
                       "outcome": "done", "answer": "Hello through Temporal",
                       "question_id": None, "manifest": ticket["manifest"],
-                      "usage": ticket["usage"], "settled_seq": seq}
+                      "usage": ticket["usage"]}
     starts = [b["activity"] for b in h.host_events("activity_start")]
     assert starts == ["prepare_vm", "run_task", "deliver"]
     assert [b["outcome"] for b in h.host_events("delivered")] == ["done"]
@@ -301,7 +301,7 @@ async def test_answer_wait_timer_escalates(h, monkeypatch):
     # the guest wrote the settle itself after wake + abort{escalated}
     assert w.sync.settled["in_q2"]["outcome"] == "escalated"
     [ticket] = h.tickets()
-    assert ticket["outcome"] == "escalated" and ticket["settled_seq"] == w.sync.settled_seq["in_q2"]
+    assert ticket["outcome"] == "escalated" and ticket["input_id"] == "in_q2"
     assert len(h.upstream.requests) == 1
 
 

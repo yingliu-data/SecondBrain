@@ -77,7 +77,7 @@ class Tenant(BaseModel):
                 f"tenant name/user must be filesystem-safe [A-Za-z0-9_-]: "
                 f"name={self.name!r} user={self.user!r}")
 
-    def session_key(self, session_id: str) -> str:
+    def store_key(self, session_id: str) -> str:
         """Store key for this tenant. The default tenant keeps raw keys so
         existing conversation rows keep working."""
         if self.is_default:

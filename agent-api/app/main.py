@@ -62,6 +62,9 @@ for _name, _cfg in tenant_registry.mcp_server_configs().items():
 
 # Inject dependencies into routes
 chat.set_dependencies(registry, llm)
+# harness Workers: on the workflow path (answer_wait_s) while Temporal runs
+from app.host.activities import worker_config
+chat.workers.config_for = worker_config
 guest.set_dependencies(registry, llm)
 skills.set_registry(registry)
 health.set_llm(llm)
@@ -102,7 +105,7 @@ async def _start_temporal():
     from app.session.dir_store import DirStore
     if not isinstance(chat.sessions, DirStore):
         return
-    acts = HostActivities(chat.workers, chat.sessions, tenant_registry, registry)
+    acts = HostActivities(chat.workers, tenant_registry, registry)
     temporal.start_in_background(acts.activities(), tenant_registry.tenants_doc())
 
 

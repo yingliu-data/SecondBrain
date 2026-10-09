@@ -10,7 +10,7 @@ from app.auth.middleware import verify
 from app.agent.loop import run_agent_loop, SSE_HEADERS
 from app.config import AGENT_ENGINE, HARNESS_KEEPALIVE_S, MAX_INPUT
 from app.host import temporal
-from app.host.activities import bind_workflow
+from app.host.activities import session_config
 from app.host.stream import KEEPALIVE, fatal_items, tokens
 from app.host.worker import Workers, new_input_id
 from app.session.dir_store import DirStore
@@ -28,7 +28,7 @@ router = APIRouter()
 
 sessions = create_session_store()
 session_queue = SessionQueue()
-workers = Workers()          # harness engine: one Worker per running session
+workers = Workers(sessions=sessions)   # harness engine: one Worker per running session
 _registry = None
 _llm = None
 
@@ -136,7 +136,7 @@ async def _dir_turn(tenant: Tenant, session_id: str, message: str):
 
 async def _legacy_turn(tenant: Tenant, session_id: str, message: str):
     """sqlite/dict fallback — original behavior."""
-    store_key = tenant.session_key(session_id)
+    store_key = tenant.store_key(session_id)
     history = sessions.setdefault(store_key, [])
     set_current_context(None, tenant.user, tenant.name, session_id)
     async for event in run_agent_loop(
@@ -181,8 +181,21 @@ async def _drain(worker, sink, task: asyncio.Future | None = None):
         worker.detach(sink)
 
 
-def _open_session(tenant: Tenant, session_id: str):
-    return lambda: sessions.get_or_create(tenant.user, tenant.name, session_id)
+async def _answer_stream(worker, task_id: str | None, answer_to: str, message: str,
+                         input_id: str):
+    """An answer to question `answer_to` as ui_response to the worker's
+    live or parked guest (a parked one is restored first, M3), then the
+    stream of `task_id`, the task it belongs to; NO_QUESTION when there is
+    no such task or no guest takes it."""
+    sink = worker.attach(task_id) if task_id is not None else None
+    if sink is None or worker.answer(answer_to, message, input_id) == "no_guest":
+        if sink is not None:
+            worker.detach(sink)
+        async for item in _error_stream(NO_QUESTION):
+            yield item
+        return
+    async for item in _drain(worker, sink):
+        yield item
 
 
 async def _harness_turn(tenant: Tenant, session_id: str, message: str, input_id: str,
@@ -195,20 +208,12 @@ async def _harness_turn(tenant: Tenant, session_id: str, message: str, input_id:
     answer (`answer_to`) does not queue behind the session: it goes to the
     running task as ui_response (a parked guest is restored first, M3) and
     streams that task, as on the workflow path."""
-    worker = workers.get_or_create(tenant, session_id, _registry,
-                                   _open_session(tenant, session_id))
+    worker = workers.get_or_create(tenant, session_id, _registry)
     session = worker.session
     set_current_context(session, tenant.user, tenant.name, session_id)
     if answer_to:
-        task_id = worker.current_input_id
-        sink = worker.attach(task_id) if task_id is not None else None
-        if sink is None or worker.answer(answer_to, message, input_id) == "no_guest":
-            if sink is not None:
-                worker.detach(sink)
-            async for item in _error_stream(NO_QUESTION):
-                yield item
-            return
-        async for item in _drain(worker, sink):
+        async for item in _answer_stream(worker, worker.current_input_id, answer_to,
+                                         message, input_id):
             yield item
         return
 
@@ -253,16 +258,15 @@ async def _workflow_turn(tenant: Tenant, session_id: str, message: str, input_id
     worker). The response streams the Worker's events for the task's
     input_id until `deliver` ends them; it is a projection only, a client
     disconnect never touches the task."""
-    worker, config = bind_workflow(workers, tenant, session_id, _registry,
-                                   _open_session(tenant, session_id))
+    worker = workers.get_or_create(tenant, session_id, _registry)
     set_current_context(worker.session, tenant.user, tenant.name, session_id)
     ref = SessionRef(user=tenant.user, tenant=tenant.name, session_id=session_id)
 
     if not answer_to:
         sink = worker.attach(input_id)
-        if not worker.replay(input_id, sink):           # a settled input: its answer again
+        if worker.replay(input_id, sink) is None:       # a settled input: its answer again
             await signal_task(temporal.client, ref, TaskSignal(input_id=input_id, text=message),
-                              task_queue=temporal.task_queue, config=config)
+                              task_queue=temporal.task_queue, config=session_config(tenant))
         async for item in _drain(worker, sink):
             yield item
         return
@@ -281,14 +285,11 @@ async def _workflow_turn(tenant: Tenant, session_id: str, message: str, input_id
             async for item in _error_stream(NO_QUESTION):
                 yield item
             return
-    sink = worker.attach(task_id)
-    if parked:
-        await signal_answer(temporal.client, ref, AnswerSignal(question_id=answer_to,
-                                                               text=message))
-    elif worker.answer(answer_to, message, input_id) == "no_guest":
-        worker.detach(sink)
-        async for item in _error_stream(NO_QUESTION):
+    if not parked:
+        async for item in _answer_stream(worker, task_id, answer_to, message, input_id):
             yield item
         return
+    sink = worker.attach(task_id)
+    await signal_answer(temporal.client, ref, AnswerSignal(question_id=answer_to, text=message))
     async for item in _drain(worker, sink):
         yield item

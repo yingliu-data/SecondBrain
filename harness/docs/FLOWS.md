@@ -149,7 +149,12 @@ four host activities.
 `UTC`. agent-api calls `flows.schedules.ensure_schedules(client, tenants_doc)`
 at startup: one Temporal Schedule per entry, id `{tenant}/{session}/{index}`
 (index = position in the tenant's list), created, or updated in place when
-its action or policies changed (an unchanged one is not rewritten);
+it changed. "Changed" is one fingerprint: the action's only memo key,
+`fingerprint`, holds a sha256 over everything the schedule is built from
+(id, workflow type, task queue, user/tenant/session, cron, tz, prompt, the
+tenant's `SessionConfig`, the policy); a schedule whose stored fingerprint
+equals the new one is not rewritten, and one without a fingerprint is
+rewritten once;
 schedules of a listed tenant that are no longer in the file are deleted. A
 malformed entry, a tenant with a bad config, or a tenant on `engine: legacy`
 is logged and skipped. Returns

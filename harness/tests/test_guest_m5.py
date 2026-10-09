@@ -81,6 +81,11 @@ def test_parked_question_id_and_wall_used_ms_are_optional_body_keys():
     assert validate_event(dict(ok, body={**ok["body"], "wall_used_ms": 0})) == []
     assert validate_event(dict(ok, body={**ok["body"], "wall_used_ms": -1}))
     assert validate_event(dict(ok, body={**ok["body"], "wall_used_ms": "1"}))
+    assert validate_event(dict(ok, body={**ok["body"], "at": 5})) == []
+    assert validate_event(dict(ok, body={**ok["body"], "at": "5"}))
+    clock = dict(ok, type="clock", body={"kind": "question_deadline", "at": 5, "ref": "q-x"})
+    assert validate_event(clock) == []
+    assert validate_event(dict(clock, body={**clock["body"], "ref": 1}))
 
 
 # ---------------------------------------------------------------- coordinator
@@ -92,9 +97,11 @@ def test_deadline_parks_with_question_id_then_answer_after_resume_completes():
     types = scn.types()
     i = types.index("question")
     assert types[i:] == ["question", "clock", "checkpoint", "parked"]
-    assert scn.bodies("clock")[-1]["kind"] == "question_deadline"
+    deadline = scn.bodies("clock")[-1]
+    assert deadline == {"kind": "question_deadline", "at": deadline["at"], "ref": qid}
     assert parked["body"] == {"checkpoint_seq": parked["seq"] - 1, "reason": "question", "question_id": qid,
-                              "wall_used_ms": parked["body"]["wall_used_ms"]}
+                              "wall_used_ms": parked["body"]["wall_used_ms"], "at": parked["body"]["at"]}
+    assert parked["body"]["at"] > deadline["at"]                    # the guest clock at the park
     assert "guard_decision" not in types[i:] and scn.state.denied_questions == 0
     assert scn.state.open_questions[qid]["answered"] is False      # the question stays open
     assert scn.transport.parks == 1 and scn.coord.parked
@@ -149,10 +156,10 @@ def test_fresh_process_resume_then_answer_completes_and_wall_clock_skips_the_par
     b = Scenario(cfg=m5_cfg(resume=True), script=[text("Resumed with a.")])
     b.clock.ms = a.clock.ms + 3_600_000 * 20                   # parked for 20 hours
     b.coord.restore(log)
-    assert b.coord._waiting == {q["question_id"]}
     b.start()
     b.wait_for(lambda: b.events)
     assert [e["type"] for e in b.events] == ["clock"]          # host_hello only
+    assert b.coord._waiting == {q["question_id"]}
     assert b.clock.pending(QUESTION_S) == []                   # parked on it: no deadline timer
     wall = [h.delay_s for h in b.clock.pending()]
     assert len(wall) == 1 and WALL_S - 5 < wall[0] <= WALL_S   # the park did not use the wall clock
@@ -218,6 +225,143 @@ def test_two_questions_past_their_deadline_park_one_after_the_other():
     assert scn.run()["answer"] == "Both answered."
     assert [b["content"] for b in scn.bodies("tool_result")] == ["slept", "first", "second"]
     check(scn.events)
+
+
+def two_questions_round():
+    return tool_calls([("q1", "question", {"text": "one?"}), ("q2", "question", {"text": "two?"})])
+
+
+def test_restore_puts_every_expired_question_in_waiting_and_parks_on_each_in_turn():
+    """Both deadlines passed before the park (a bash op held it): a fresh
+    process restoring the log waits on both (neither gets a fresh timeout),
+    the log's park names the oldest, answering it parks on the next."""
+    a = Scenario(cfg=m5_cfg(), ops_manual=True, script=[
+        tool_calls([("c1", "bash", {"command": "sleep 1"}),
+                    ("q1", "question", {"text": "one?"}), ("q2", "question", {"text": "two?"})])])
+    a.task("ask twice")
+    a.start()
+    a.wait_event("question", 2)
+    q1, q2 = (b["question_id"] for b in a.bodies("question"))
+    assert a.clock.fire(QUESTION_S) == 2
+    a.wait_for(lambda: len([c for c in a.bodies("clock") if c["kind"] == "question_deadline"]) == 2)
+    a.ops.complete("c1", "slept")
+    assert a.wait_event("parked")["body"]["question_id"] == q1
+    log = list(a.events)
+    b = Scenario(cfg=m5_cfg(resume=True), script=[text("Both answered.")])
+    b.clock.ms = a.clock.ms + 3_600_000
+    b.coord.restore(log)
+    b.start()
+    b.wait_for(lambda: b.events)
+    assert b.types() == ["clock"]                                # host_hello only
+    assert b.coord._waiting == {q1, q2} and not b.coord._question_park_pending
+    assert b.clock.pending(QUESTION_S) == [] and len(b.clock.pending()) == 1   # the wall clock only
+    answer(b, q1, "first")
+    assert b.wait_event("parked")["body"]["question_id"] == q2   # still waiting on q2: park again
+    b.inbound.put(("link", "up"))
+    answer(b, q2, "second")
+    assert b.run()["answer"] == "Both answered."
+    assert [x["content"] for x in b.bodies("tool_result")] == ["first", "second"]
+    state = check(log + b.events)
+    assert state_hash(state) == state_hash(b.state)
+
+
+def test_restore_rearms_a_question_not_yet_due_with_the_time_it_had_left():
+    """A host park 20 s into a 45 s question: a fresh process re-arms its
+    deadline with the 25 s left (the parked hours do not count), and when
+    that fires it parks on it."""
+    a = Scenario(cfg=m5_cfg(), script=[q_call()])
+    a.task("ask")
+    a.start()
+    qid = a.wait_event("question")["body"]["question_id"]
+    a.clock.advance(20_000)
+    a.control("park", {"reason": "idle"})
+    a.wait_event("parked")
+    log = list(a.events)
+    b = Scenario(cfg=m5_cfg(resume=True), script=[text("a it is")])
+    b.clock.ms = a.clock.ms + 3_600_000 * 5
+    b.coord.restore(log)
+    b.start()
+    b.wait_for(lambda: b.events)
+    delays = [h.delay_s for h in b.clock.pending() if h.delay_s < QUESTION_S]
+    assert len(delays) == 1 and QUESTION_S - 21 < delays[0] < QUESTION_S - 19
+    assert b.coord._waiting == set()
+    assert b.clock.fire(delays[0]) == 1
+    parked = b.wait_event("parked")["body"]
+    assert parked["reason"] == "question" and parked["question_id"] == qid
+    assert b.bodies("clock")[-1]["ref"] == qid
+    b.inbound.put(("link", "up"))
+    answer(b, qid, "a")
+    assert b.run()["answer"] == "a it is"
+    check(log + b.events)
+
+
+def park_past_the_deadlines(answer_wait_s):
+    """Two questions, the clock past their deadlines before the timers fire,
+    then a host park: the log ends with a park and no logged expiry."""
+    a = Scenario(cfg=m5_cfg(answer_wait_s=answer_wait_s), script=[two_questions_round()])
+    a.task("ask twice")
+    a.start()
+    a.wait_event("question", 2)
+    a.clock.advance(int(QUESTION_S * 1000) + 5_000)
+    a.control("park", {"reason": "idle"})
+    a.wait_event("parked")
+    assert "question_deadline" not in [c["kind"] for c in a.bodies("clock")]
+    return a, [b["question_id"] for b in a.bodies("question")]
+
+
+def test_restore_expires_questions_due_before_the_park():
+    a, (q1, q2) = park_past_the_deadlines(WAIT_S)
+    log = list(a.events)
+    b = Scenario(cfg=m5_cfg(resume=True), script=[text("ok")])
+    b.clock.ms = a.clock.ms + 60_000
+    b.coord.restore(log)
+    b.start()
+    assert b.wait_event("parked")["body"]["question_id"] == q1  # the normal expiry path: park
+    assert [c.get("ref") for c in b.bodies("clock") if c["kind"] == "question_deadline"] == [q1, q2]
+    assert b.coord._waiting == {q1, q2} and b.clock.pending(QUESTION_S) == []
+    check(log + b.events)
+
+
+def test_restore_with_answer_wait_zero_denies_the_expired_questions():
+    a, (q1, q2) = park_past_the_deadlines(0)
+    log = list(a.events)
+    b = Scenario(cfg=m5_cfg(answer_wait_s=0, resume=True), script=[text("guessed")])
+    b.clock.ms = a.clock.ms + 60_000
+    b.coord.restore(log)
+    assert b.run()["answer"] == "guessed"
+    denied = [g["ref"] for g in b.bodies("guard_decision") if g["reason"] == UNANSWERED]
+    assert denied == [q1, q2] and "parked" not in b.types()
+    assert [r["call_id"] for r in b.bodies("tool_result")] == ["q1", "q2"]
+    state = check(log + b.events)
+    assert state.denied_questions == 2
+
+
+def test_restore_ignores_a_question_closed_by_an_earlier_tasks_timeout():
+    """A question abandoned by its task's wall clock (tool_result, no answer)
+    is closed: a fresh process restoring a later task's park neither expires
+    nor parks on it, long past its deadline."""
+    a = Scenario(cfg=m5_cfg(), script=[q_call(), q_call("q9", "later?")])
+    a.task("ask")
+    a.start()
+    stale = a.wait_event("question")["body"]["question_id"]
+    a.clock.advance(int(QUESTION_S * 1000) + 5_000)
+    assert a.clock.fire(WALL_S) == 1
+    assert a.wait_event("settle")["body"]["outcome"] == "timeout"
+    a.thread.join(2)
+    a.task("two", input_id="in-2")
+    a.start()
+    a.wait_event("question", 2)
+    a.control("park", {"reason": "idle"})
+    a.wait_event("parked")
+    log = list(a.events)
+    b = Scenario(cfg=m5_cfg(resume=True), script=[text("x")])
+    b.clock.ms = a.clock.ms + 3_600_000
+    b.coord.restore(log)
+    assert stale not in b.coord._questions
+    b.start()
+    b.wait_for(lambda: b.events)
+    assert b.types() == ["clock"]                                # host_hello only
+    assert b.coord._waiting == set() and not b.coord._question_park_pending
 
 
 def test_abort_escalated_after_resume_settles_escalated():

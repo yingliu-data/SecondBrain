@@ -215,12 +215,23 @@ async def test_no_guest_connection_is_a_clean_failure(session):
 
 @pytest.mark.asyncio
 async def test_workers_registry_and_prompt_stripping(session):
-    reg = Workers(sandbox_factory=lambda: FakeSandbox([{"text": "x"}]))
+    class Store:
+        def __init__(self, session):
+            self.session = session
+
+        def get_or_create(self, user, tenant, session_id):
+            return self.session if self.session is not None else 1 / 0
+
+    store = Store(session)
+    reg = Workers(sandbox_factory=lambda: FakeSandbox([{"text": "x"}]), sessions=store,
+                  config_for=lambda tenant: {"answer_wait_s": 7},
+                  device_calls=DeviceCalls(), **worker_kwargs())
     t = FakeTenant()
-    a = reg.get_or_create(t, "s1", FakeRegistry(), lambda: session, device_calls=DeviceCalls(),
-                          **worker_kwargs())
+    a = reg.get_or_create(t, "s1", FakeRegistry())
+    assert a.answer_wait_s == 7                 # config_for over worker_kwargs
     # found by key: the session directory is not opened again
-    assert reg.get_or_create(t, "s1", FakeRegistry(), lambda: 1 / 0) is a
+    store.session = None
+    assert reg.get_or_create(t, "s1", FakeRegistry()) is a
     await reg.shutdown()
     assert a.closed and reg.get("u/t_s1") is None
     assert strip_current_time("a\n- Current time: {current_time}\nb") == "a\nb"

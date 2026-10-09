@@ -188,7 +188,7 @@ def test_park_at_turn_boundary_then_resume_same_seq(rig):
     assert types[i - 4:i - 1] == ["op_state", "tool_result", "wake"]   # the round finished first
     assert types[i + 1:] == ["clock", "turn_start", "llm_response", "settle"]
     assert parked["body"] == {"checkpoint_seq": parked["seq"] - 1, "reason": "idle",
-                              "wall_used_ms": parked["body"]["wall_used_ms"]}
+                              "wall_used_ms": parked["body"]["wall_used_ms"], "at": parked["body"]["at"]}
     assert 0 <= parked["body"]["wall_used_ms"] < 60_000
     cp = r.of("checkpoint")[0]
     assert cp["through_seq"] == parked["seq"] - 2

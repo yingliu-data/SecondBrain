@@ -39,6 +39,7 @@ from protocol.canonical import derive_key_id
 from protocol.events import ENUMS
 
 from app.config import HARNESS_ABORT_WAIT_S
+from app.host import temporal
 from app.host.worker import Worker, task_error, task_ok
 from app.util.ipc import atomic_write_json
 
@@ -61,16 +62,17 @@ def ticket_id_for(ref: SessionRef, input_id: str) -> str:
     return derive_key_id("ticket", ref.user, ref.tenant, ref.session_id, input_id)
 
 
-def bind_workflow(workers, tenant, session_id: str, registry, open_session
-                  ) -> tuple[Worker, SessionConfig]:
-    """The tenant's SessionConfig and the session's Worker on the workflow
-    path: a new Worker is built with the config's answer_wait_s (hello
-    limit; deliver ends the streams). A Worker the direct path built
-    earlier keeps its own config until it is closed."""
-    config = SessionConfig.from_tenant(tenant.workflow_entry())
-    w = workers.get_or_create(tenant, session_id, registry, open_session,
-                              answer_wait_s=config.answer_wait_s)
-    return w, config
+def session_config(tenant) -> SessionConfig:
+    """The tenant's SessionConfig (the task signal's config)."""
+    return SessionConfig.from_tenant(tenant.workflow_entry())
+
+
+def worker_config(tenant) -> dict:
+    """Workers.config_for (main.py): while Temporal runs, a new Worker is on
+    the workflow path, built with the config's answer_wait_s (hello limit;
+    deliver ends the streams); else the direct path's defaults. A live
+    Worker keeps its config until it is closed."""
+    return {"answer_wait_s": session_config(tenant).answer_wait_s} if temporal.enabled() else {}
 
 
 def _floor_seq(details: Any) -> int:
@@ -84,10 +86,9 @@ def _floor_seq(details: Any) -> int:
 
 
 class HostActivities:
-    def __init__(self, workers, sessions, tenants, registry, *,
+    def __init__(self, workers, tenants, registry, *,
                  abort_wait_s: float = HARNESS_ABORT_WAIT_S) -> None:
-        self.workers = workers          # app.host.worker.Workers
-        self.sessions = sessions        # DirStore
+        self.workers = workers          # app.host.worker.Workers (over the DirStore)
         self.tenants = tenants          # TenantRegistry (get_by_name)
         self.registry = registry        # SkillRegistry
         self.abort_wait_s = abort_wait_s
@@ -100,10 +101,7 @@ class HostActivities:
         tenant = self.tenants.get_by_name(ref.tenant)
         if tenant is None or tenant.user != ref.user:
             raise ApplicationError(f"unknown tenant {ref.user}/{ref.tenant}", non_retryable=True)
-        w, _ = bind_workflow(self.workers, tenant, ref.session_id, self.registry,
-                             lambda: self.sessions.get_or_create(ref.user, ref.tenant,
-                                                                 ref.session_id))
-        return w
+        return self.workers.get_or_create(tenant, ref.session_id, self.registry)
 
     @staticmethod
     async def _started(w: Worker, name: str, input_id: str, **extra) -> None:
@@ -207,7 +205,6 @@ class HostActivities:
         act = w.task_for(iid)
         settle = w.sync.settled.get(iid) or (act.result() if act is not None and task_ok(act)
                                              else {})     # else: the host's own failure result
-        seq = w.sync.settled_seq.get(iid)
         ticket_id = ticket_id_for(inp.session, iid)
         path = w.session.tickets / f"{ticket_id}.json"
         first = not path.exists()
@@ -215,7 +212,6 @@ class HostActivities:
             "ticket_id": ticket_id, "input_id": iid, "outcome": inp.outcome,
             "answer": settle.get("answer", ""), "question_id": inp.question_id,
             "manifest": settle.get("manifest", {}), "usage": settle.get("usage", {}),
-            "settled_seq": seq,
         })
         error = None
         if inp.outcome != "done":

@@ -258,9 +258,10 @@ def test_compaction_summary_survives_reload(session):
     assert "up to seq 6" in path.read_text()
 
 
-def test_dirstore_delete_makes_the_host_log_recount(tmp_path):
-    """HostLog counts hseq from disk once; DirStore.delete invalidates it, so
-    a session re-created under the same id starts again at hseq 1."""
+def test_host_log_recounts_after_its_directory_is_deleted(tmp_path):
+    """HostLog counts hseq from disk; once the segment it wrote is gone
+    (DirStore.delete), a session re-created under the same id starts again
+    at hseq 1."""
     from app.session.dir_store import DirStore
     store = DirStore(tmp_path / "sessions")
     s = store.get_or_create("u", "t", "s1")

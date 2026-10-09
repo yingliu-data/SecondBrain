@@ -71,7 +71,7 @@ async def delete_session(session_id: str, tenant: Tenant = Depends(verify)):
         if deleted:
             return {"status": "ok", "deleted": session_id}
         raise HTTPException(404, f"Session '{session_id}' not found")
-    store_key = tenant.session_key(session_id)
+    store_key = tenant.store_key(session_id)
     if hasattr(_sessions, "delete"):
         if _sessions.delete(store_key):
             return {"status": "ok", "deleted": session_id}

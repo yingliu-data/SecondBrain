@@ -80,8 +80,26 @@ class StateSyncError(Exception):
     """An event the host refuses to store (schema or fold error)."""
 
 
+_SEGMENT_GLOB = "[0-9][0-9][0-9][0-9][0-9][0-9].jsonl"     # a run's segments
+_HOST_SEGMENT_GLOB = "host-" + _SEGMENT_GLOB                 # the host log's
+_RUN_GLOB = "r[0-9][0-9][0-9][0-9]"
+
+
 def _segment_name(n: int, prefix: str = "") -> str:
     return f"{prefix}{n:06d}.jsonl"
+
+
+def _host_segments(events_dir: Path) -> list[Path]:
+    return sorted(Path(events_dir).glob(_HOST_SEGMENT_GLOB))
+
+
+def _run_dir(events_dir: Path, run: int) -> Path:
+    return Path(events_dir) / f"r{run:04d}"
+
+
+def _runs(events_dir: Path) -> list[int]:
+    """The run numbers under `events_dir`, in order."""
+    return sorted(int(p.name[1:]) for p in Path(events_dir).glob(_RUN_GLOB) if p.is_dir())
 
 
 def _append_line(path: Path, obj: dict) -> None:
@@ -95,7 +113,7 @@ def _append_line(path: Path, obj: dict) -> None:
 def count_host_events(events_dir: Path, segment_events: int = HARNESS_SEGMENT_EVENTS) -> int:
     """The highest hseq in the session's host log (0 when there is none):
     full segments before the last one, plus the last one's lines."""
-    host = sorted(p for p in Path(events_dir).glob("host-[0-9][0-9][0-9][0-9][0-9][0-9].jsonl"))
+    host = _host_segments(events_dir)
     if not host:
         return 0
     with host[-1].open("rb") as f:
@@ -103,54 +121,58 @@ def count_host_events(events_dir: Path, segment_events: int = HARNESS_SEGMENT_EV
 
 
 def append_host_event(events_dir: Path, hseq: int, session_id: str | None, type: str,
-                      body: dict, segment_events: int = HARNESS_SEGMENT_EVENTS) -> dict:
-    """Write host event `hseq` to its segment. The caller is the session's
-    one host-log writer (it owns the hseq counter)."""
+                      body: dict, segment_events: int = HARNESS_SEGMENT_EVENTS
+                      ) -> tuple[Path, dict]:
+    """Write host event `hseq` to its segment: (the segment, the record).
+    The caller is the session's one host-log writer (it owns the hseq
+    counter)."""
     n = (hseq - 1) // segment_events + 1
     rec = {"ts": utcnow_iso(), "hseq": hseq, "session_id": session_id, "type": type, "body": body}
     Path(events_dir).mkdir(parents=True, exist_ok=True)
-    _append_line(Path(events_dir) / _segment_name(n, "host-"), rec)
-    return rec
+    path = Path(events_dir) / _segment_name(n, "host-")
+    _append_line(path, rec)
+    return path, rec
 
 
 class HostLog:
     """The one writer of a session's host log in this process: hseq counted
-    from disk once, then incremented in memory under one lock. Get it with
-    host_log(events_dir); StateSync and POST /internal/gateway-events share it."""
+    from disk, then incremented in memory under one lock. Get it with
+    host_log(events_dir); StateSync and POST /internal/gateway-events share it.
+    The count is taken from disk again whenever the segment it last wrote is
+    gone or replaced (the session directory was deleted, maybe re-created
+    under the same id)."""
 
     def __init__(self, events_dir: Path, segment_events: int = HARNESS_SEGMENT_EVENTS) -> None:
         self.events_dir = Path(events_dir)
         self.segment_events = max(1, int(segment_events))
         self._lock = threading.Lock()
         self._count: int | None = None
+        self._last: tuple[Path, int] | None = None     # the segment last written, its inode
+
+    def _stale(self) -> bool:
+        if self._count is None:
+            return True
+        if self._last is None:
+            return False
+        path, ino = self._last
+        try:
+            return path.stat().st_ino != ino
+        except OSError:
+            return True
 
     def append(self, session_id: str | None, type: str, body: dict) -> dict:
         with self._lock:
-            if self._count is None:
+            if self._stale():
                 self._count = count_host_events(self.events_dir, self.segment_events)
             self._count += 1
-            return append_host_event(self.events_dir, self._count, session_id, type, body,
-                                     self.segment_events)
-
-
-    def invalidate(self) -> None:
-        """Count from disk again on the next append (the directory was
-        deleted, maybe re-created under the same id)."""
-        with self._lock:
-            self._count = None
+            path, rec = append_host_event(self.events_dir, self._count, session_id, type, body,
+                                          self.segment_events)
+            self._last = (path, path.stat().st_ino)
+            return rec
 
 
 _host_logs: dict[Path, HostLog] = {}
 _host_logs_guard = threading.Lock()
-
-
-def invalidate_host_logs(root: Path) -> None:
-    """Every HostLog at or under `root` recounts (DirStore.delete)."""
-    root = Path(root).resolve()
-    with _host_logs_guard:
-        logs = [log for key, log in _host_logs.items() if key == root or root in key.parents]
-    for log in logs:
-        log.invalidate()
 
 
 def host_log(events_dir: Path, segment_events: int = HARNESS_SEGMENT_EVENTS) -> HostLog:
@@ -169,8 +191,7 @@ def _read_run(run_dir: Path, after_seq: int, segment_events: int,
     `through`), skipping the segments that end before after_seq."""
     out: list[dict] = []
     start_segment = after_seq // segment_events + 1
-    pat = "[0-9][0-9][0-9][0-9][0-9][0-9].jsonl"
-    for path in sorted(run_dir.glob(pat)) if run_dir.is_dir() else []:
+    for path in sorted(run_dir.glob(_SEGMENT_GLOB)) if run_dir.is_dir() else []:
         if int(path.stem) < start_segment:
             continue
         with path.open("r", encoding="utf-8") as f:
@@ -194,8 +215,9 @@ def read_current_run(events_dir: Path, after_seq: int = 0,
                      segment_events: int = HARNESS_SEGMENT_EVENTS) -> list[dict]:
     """The latest run's events with seq > after_seq, without loading the
     session (no StateSync, no fold): GET /sessions/{id}/events."""
-    runs = sorted(p for p in Path(events_dir).glob("r[0-9][0-9][0-9][0-9]") if p.is_dir())
-    return _read_run(runs[-1], after_seq, max(1, int(segment_events))) if runs else []
+    runs = _runs(events_dir)
+    return (_read_run(_run_dir(events_dir, runs[-1]), after_seq, max(1, int(segment_events)))
+            if runs else [])
 
 
 def _truncate(path: Path, size: int) -> None:
@@ -223,24 +245,16 @@ class StateSync:
         self._host_log = host_log(self.events_dir, self.segment_events)
         self.seen_inputs: set[str] = set()       # across runs
         self.settled: dict[str, dict] = {}       # input_id -> settle body, across runs
-        self.settled_seq: dict[str, int] = {}    # input_id -> the settle's seq (in its run)
         self.question_bodies: dict[str, dict] = {}  # question_id -> body, current run
         self._load()
 
     # ------------------------------------------------------------ disk
     @property
     def run_dir(self) -> Path:
-        return self.events_dir / f"r{self.run:04d}"
+        return _run_dir(self.events_dir, self.run)
 
     def runs(self) -> list[int]:
-        out = []
-        for p in self.events_dir.glob("r[0-9][0-9][0-9][0-9]"):
-            if p.is_dir():
-                out.append(int(p.name[1:]))
-        return sorted(out)
-
-    def _host_segments(self) -> list[Path]:
-        return sorted(self.events_dir.glob("host-[0-9][0-9][0-9][0-9][0-9][0-9].jsonl"))
+        return _runs(self.events_dir)
 
     def _load(self) -> None:
         for run in self.runs():
@@ -279,7 +293,7 @@ class StateSync:
                 run, through = self.run, self.state.last_seq
             if through <= after_seq:
                 return []
-        return _read_run(self.events_dir / f"r{run:04d}", after_seq, self.segment_events,
+        return _read_run(_run_dir(self.events_dir, run), after_seq, self.segment_events,
                          through)
 
     @property
@@ -332,7 +346,6 @@ class StateSync:
             self.question_bodies[b["question_id"]] = b
         elif etype == "settle":
             self.settled[b["input_id"]] = b
-            self.settled_seq[b["input_id"]] = event["seq"]
 
     # ------------------------------------------------------------ host log
     def host_event(self, type: str, body: dict) -> dict:
@@ -341,7 +354,7 @@ class StateSync:
 
     def read_host(self) -> list[dict]:
         out: list[dict] = []
-        for path in self._host_segments():
+        for path in _host_segments(self.events_dir):
             with path.open("r", encoding="utf-8") as f:
                 out.extend(json.loads(l) for l in f if l.strip())
         return out

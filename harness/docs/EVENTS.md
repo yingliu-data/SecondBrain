@@ -34,7 +34,7 @@ strings. Times (`at`, `deadline`) are int milliseconds since the epoch.
 |---|---|---|
 | `session_start` | `user` str, `tenant` str, `workflow_run_id` str, `config_hash` str, `system_hash` str, `tools` list of `{name: str, side: guest/host/device/mcp, pin: str or null}` (unique names, `pin` key required), `harness_version` str, `image_version` str, `resumed` bool | guest main |
 | `input` | `input_id` str, `kind` in `task`/`follow_up`/`steer`/`ui_response`, `text` str, `dedupe` in `new`/`duplicate`/`late`, `question_id`? str, `answer`? str | inbox |
-| `clock` | `kind` in `host_hello`/`host_heartbeat`/`turn_clock`/`idle_timer`/`question_deadline`/`wall_clock` or any `grace_*`, `at` int ms | coordinator |
+| `clock` | `kind` in `host_hello`/`host_heartbeat`/`turn_clock`/`idle_timer`/`question_deadline`/`wall_clock` or any `grace_*`, `at` int ms, `ref`? str (M5: with `question_deadline`, the question whose deadline passed) | coordinator |
 | `turn_start` | `turn_id` str, `type` in `regular`/`compaction`, `includes_through_seq` int `>= 0`, `model` str, `params` dict, `request_hash` str, `preamble_hash` str, `workspace_tree_id` str or null | coordinator |
 | `llm_response` | `turn_id` str, `message` dict (the assistant message verbatim), `finish_reason` str, `usage` dict, `response_id`? str or null | provider |
 | `tool_call` | `turn_id` str, `call_id` str (vLLM's, verbatim), `name` str, `side` in `guest`/`host`/`device`/`mcp`, `args` dict, `state` == `"RUNNING"` | submit |
@@ -43,7 +43,7 @@ strings. Times (`at`, `deadline`) are int milliseconds since the epoch.
 | `tool_result` | `call_id` str, `content` str (verbatim, truncated at `spill_threshold`), `spill_ref`? str or null, `rewrite`? str or null (after_tool output), `late`? bool | ops / hooks |
 | `wake` | `reason` in `input`/`tool_result`/`grace`/`idle`/`question`, `result_ids` list of str, `input_ids` list of str | coordinator |
 | `question` | `question_id` str, `call_id` str, `text` str, `options` list of str, `deadline` int ms `>= 0` | tools |
-| `parked` | `checkpoint_seq` int `>= 1`, `reason` str, `question_id`? str (M5: with `reason: "question"`, the open question the task waits on), `wall_used_ms`? int `>= 0` (M5: the task's wall clock used up to the park; absent when no task runs or no wall limit is set) | coordinator |
+| `parked` | `checkpoint_seq` int `>= 1`, `reason` str, `question_id`? str (M5: with `reason: "question"`, the open question the task waits on), `wall_used_ms`? int `>= 0` (M5: the task's wall clock used up to the park; absent when no task runs or no wall limit is set), `at`? int ms (M5: the guest clock at the park) | coordinator |
 | `compaction` | `range` `[from_seq, to_seq]` two ints with `1 <= from <= to`, `summary_turn_id` str, `tokens_before` int `>= 0`, `tokens_after` int `>= 0` | coordinator |
 | `memory` | `scope` in `user`/`session`, `op` in `write`/`remove`, `slug` str, `sha256` str, `derived_from` str (a call_id or a compaction `summary_turn_id`) | host |
 | `bulk` | `kind` in `spill`/`workspace`, `path` str, `sha256` str, `bytes` int `>= 0` | ops |
@@ -92,7 +92,8 @@ strings. Times (`at`, `deadline`) are int milliseconds since the epoch.
 ## M5 notes (what the guest writes)
 
 - A question deadline with `hello.config.limits.answer_wait_s > 0`:
-  `clock{question_deadline}` (none for a zero timeout without UI), then the
+  `clock{question_deadline, ref: question_id}` (none for a zero timeout
+  without UI), then the
   M3 park: `checkpoint` + `parked{checkpoint_seq, reason: "question",
   question_id}`. No `guard_decision{deny}`: the question stays open in the
   fold (`open_questions[qid].answered == false`) and does not count toward
@@ -109,6 +110,15 @@ strings. Times (`at`, `deadline`) are int milliseconds since the epoch.
   restoring the log takes the last park's value plus the guest-clock time
   since the first guest-side clock event after that park (the resume itself
   writes nothing).
+- `parked.at` (every park): the guest clock at the park. Question deadlines
+  are log-derived from it: a question is due at its `deadline` plus every
+  parked stretch after it was asked (a stretch runs from `parked.at` to the
+  first guest-side clock event after that park, as for the wall clock; a
+  log ending with `parked` is still in its stretch), because question timers
+  pause while parked. A fresh process restoring a parked log treats a
+  question as expired when a `clock{question_deadline, ref}` names it or its
+  due time is at or before the last park; one expired only by its due time
+  gets its `clock{question_deadline, ref}` on restore, before the expiry.
 - The fold does not check `parked.question_id` against `open_questions`.
 
 ## Log rules (`validate_log`)

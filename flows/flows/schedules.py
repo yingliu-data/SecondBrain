@@ -27,9 +27,11 @@ listed) are deleted.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 from collections.abc import Collection, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import timedelta
 from typing import Any
 
@@ -118,6 +120,32 @@ def entries_from_tenants(tenants_doc: dict[str, Any]) -> list[ScheduleEntry]:
     return out
 
 
+FINGERPRINT_MEMO = "fingerprint"
+"""The one memo key of a schedule's action: the hash of everything
+``_schedule_for`` builds it from (``_fingerprint``)."""
+
+POLICY = SchedulePolicy(
+    overlap=ScheduleOverlapPolicy.SKIP, catchup_window=CATCHUP_WINDOW, pause_on_failure=False,
+)
+"""Every schedule's policy: missed fires and overlapping fires are skipped."""
+
+
+def _fingerprint(entry: ScheduleEntry, task_queue: str) -> str:
+    """sha256 over every input of ``_schedule_for``.  The server stores the cron
+    compiled to a calendar, so a schedule read back never equals the one we
+    built; comparing this hash (kept in the action's memo) instead tells
+    whether a rewrite is needed."""
+    inputs = {
+        "id": entry.schedule_id, "workflow": ScheduleTickWorkflow.__name__,
+        "task_queue": task_queue, "user": entry.user, "tenant": entry.tenant,
+        "session": entry.session, "cron": entry.cron, "tz": entry.tz,
+        "prompt": entry.prompt, "config": asdict(entry.config),
+        "policy": [POLICY.overlap.name, POLICY.catchup_window.total_seconds(),
+                   POLICY.pause_on_failure],
+    }
+    return hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
+
+
 def _schedule_for(entry: ScheduleEntry, task_queue: str) -> Schedule:
     session = SessionRef(user=entry.user, tenant=entry.tenant, session_id=entry.session)
     return Schedule(
@@ -129,25 +157,25 @@ def _schedule_for(entry: ScheduleEntry, task_queue: str) -> Schedule:
             id=entry.schedule_id,
             task_queue=task_queue,
             execution_timeout=timedelta(seconds=entry.config.tick_timeout_s),
-            # The server stores the cron compiled to a calendar, so the spec
-            # read back never equals ours: the action carries what it was
-            # built from, and ``_same`` compares that instead.
-            memo={"cron": entry.cron, "tz": entry.tz},
+            memo={FINGERPRINT_MEMO: _fingerprint(entry, task_queue)},
         ),
         spec=ScheduleSpec(cron_expressions=[entry.cron], time_zone_name=entry.tz),
-        policy=SchedulePolicy(
-            overlap=ScheduleOverlapPolicy.SKIP,
-            catchup_window=CATCHUP_WINDOW,
-            pause_on_failure=False,
-        ),
+        policy=POLICY,
     )
 
 
-async def _same(client: Client, current: Schedule, new: Schedule) -> bool:
-    """``current`` (as described by the server) already is ``new``: same action
-    (payloads, timeouts and the cron/tz memo) and same policies."""
-    return (current.policy._to_proto() == new.policy._to_proto()
-            and await current.action._to_proto(client) == await new.action._to_proto(client))
+async def _stored_fingerprint(client: Client, current: Schedule) -> str | None:
+    """The fingerprint memo of a schedule read back from the server (``None``
+    for one written before fingerprints, or not by us). Decoded with the
+    client's full data converter: the memo was encoded with it (codec too)."""
+    memo = getattr(current.action, "memo", None) or {}
+    payload = memo.get(FINGERPRINT_MEMO)
+    if payload is None:
+        return None
+    try:
+        return (await client.data_converter.decode([payload], [str]))[0]
+    except Exception:  # noqa: BLE001 - an unreadable memo is a changed schedule
+        return None
 
 
 def _is_ours(sid: str, tenants: Collection[str]) -> bool:
@@ -170,9 +198,10 @@ async def ensure_schedules(
     ``tenants`` scopes the stale deletion (default: every tenant in the doc,
     or every tenant that has an entry).
 
-    An existing schedule is rewritten only when its action or policies
-    differ (``_same``), so a restart does not touch unchanged ones (nor
-    resume one paused by hand).
+    An existing schedule is rewritten only when its stored fingerprint
+    (``_fingerprint``) differs from the entry's, so a restart does not touch
+    unchanged ones (nor resume one paused by hand); one without a fingerprint
+    is rewritten once.
 
     Returns ``{schedule_id: "created" | "updated" | "unchanged" | "deleted"}``.
     """
@@ -184,6 +213,7 @@ async def ensure_schedules(
 
     async def _upsert(sid: str, entry: ScheduleEntry) -> tuple[str, str]:
         schedule = _schedule_for(entry, task_queue)
+        fingerprint = schedule.action.memo[FINGERPRINT_MEMO]
         if sid not in existing:
             try:
                 await client.create_schedule(sid, schedule)
@@ -194,7 +224,7 @@ async def ensure_schedules(
 
         async def _update(inp: ScheduleUpdateInput) -> ScheduleUpdate | None:
             nonlocal changed
-            if await _same(client, inp.description.schedule, schedule):
+            if await _stored_fingerprint(client, inp.description.schedule) == fingerprint:
                 return None  # the SDK skips the write
             changed = True
             return ScheduleUpdate(schedule=schedule)

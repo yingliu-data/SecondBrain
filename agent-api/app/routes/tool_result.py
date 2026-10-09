@@ -3,6 +3,7 @@ from app.auth.middleware import verify
 from app.agent.loop import tool_result_events, tool_results
 from app.host.sides import DEVICE_CALLS
 from app.routes.chat import uses_harness
+from app.session.ids import session_key
 from app.tenants import Tenant
 
 router = APIRouter()
@@ -17,8 +18,9 @@ async def tool_result_endpoint(request: Request, tenant: Tenant = Depends(verify
         # Harness engine: the open call lives in DeviceCalls, not in the
         # stream, so it survives a dropped SSE connection. Unknown or
         # terminal call ids are 409 (PLAN.md 14).
-        # only a call of this tenant's own sessions (Worker.session_key)
-        if DEVICE_CALLS.resolve(call_id, result, owner_prefix=f"{tenant.user}/{tenant.name}_"):
+        # only a call of this tenant's own sessions (the session_key prefix)
+        if DEVICE_CALLS.resolve(call_id, result,
+                                owner_prefix=session_key(tenant.user, tenant.name, "")):
             return {"status": "ok"}
         raise HTTPException(409, detail="Unknown or already completed tool call ID.")
     if call_id in tool_result_events:
