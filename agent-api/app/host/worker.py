@@ -127,6 +127,8 @@ CONTROL_POLICY: dict[str, ControlPolicy] = {
     "abort": ControlPolicy("hold", True, 1),
 }
 _DEFAULT_POLICY = ControlPolicy("hold", True, 1)
+# M5: the only controls that wake a guest parked on a question (send_control)
+QUESTION_PARK_WAKERS = ("ui_response", "abort")
 
 
 def control_policy(type: str) -> ControlPolicy:
@@ -452,6 +454,16 @@ class Worker:
             return True
         return await self.park(reason)
 
+    async def settle_park(self) -> None:
+        """Wait out a park in progress (vm_state parking, bounded by
+        park_timeout_s): an answer then sees the question park it ends,
+        instead of going to a guest that is closing its link."""
+        while True:
+            evt = self._changed
+            if self.vm_state != "parking":
+                return
+            await evt.wait()
+
     def answer(self, question_id: str, text: str, input_id: str) -> str:
         """ui_response{question_id, answer} to the guest (a parked one is
         restored first, ui_response first); send_control's status."""
@@ -635,7 +647,10 @@ class Worker:
           "held"      the guest is parked: a `hold` control is kept
                       unnumbered, the guest wakes (restore) and the wake
                       numbers the held controls by wake_order; a `drop` one
-                      (heartbeat, park) is dropped
+                      (heartbeat, park) is dropped. Parked on a question,
+                      only `ui_response` and `abort` wake it (the driver's
+                      answer wait holds the task; a woken guest would not
+                      park again): the others wait for that wake
           "no_guest"  no guest run can take it (never booted, or gone)"""
         if type == "side_result" and body.get("call_id") in self._lost_calls:
             self.sync.host_event("input", {"kind": "side_result", "call_id": body.get("call_id"),
@@ -644,7 +659,8 @@ class Worker:
         if self.vm_state == "parked":
             if control_policy(type).while_parked == "hold":
                 self._deferred.append((type, body))
-                self._request_wake()
+                if self.question_park is None or type in QUESTION_PARK_WAKERS:
+                    self._request_wake()
             return "held"
         if self._outbox is None or self.vm_state == "none":
             return "no_guest"
@@ -1039,9 +1055,12 @@ class Worker:
         if body is not None:
             return self._settled_again(input_id, body)
         task = self.start_task(task_input)
+
+        def _finish(t: asyncio.Task) -> None:
+            outcome = task_outcome(t)
+            self.finish_input(input_id, end_error(t, outcome), outcome=outcome)
         # before the waiters' callbacks: the streams end before act() returns
-        task.add_done_callback(lambda t: self.finish_input(
-            input_id, end_error(t, task_outcome(t)), outcome=task_outcome(t)))
+        task.add_done_callback(_finish)
         return await self._drive(input_id, task)
 
     async def _drive(self, input_id: str, task: asyncio.Task) -> dict:
@@ -1419,11 +1438,10 @@ def task_outcome(t: asyncio.Future) -> str:
 
 def end_error(t: asyncio.Future | None, outcome: str) -> str | None:
     """The SSE error that ends an input's stream (finish_input), on either
-    driver: the host failure, else for a non-done outcome its name."""
-    error = task_error(t)
-    if error is None and outcome != "done":
-        error = f"The task ended: {outcome}."
-    return error
+    driver: none for done, else the host failure or the outcome's name."""
+    if outcome == "done":
+        return None
+    return task_error(t) or f"The task ended: {outcome}."
 
 
 async def _first(fut: asyncio.Future, evt: asyncio.Event, timeout: float | None = None) -> None:

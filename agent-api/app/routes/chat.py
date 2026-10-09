@@ -212,6 +212,7 @@ async def _harness_turn(tenant: Tenant, session_id: str, message: str, input_id:
     session = worker.session
     set_current_context(session, tenant.user, tenant.name, session_id)
     if answer_to:
+        await worker.settle_park()      # a question park in progress ends first
         qp = worker.question_park
         # parked on another question: a ui_response would wake the guest
         # behind act()'s answer wait (as on the workflow path)
@@ -275,6 +276,7 @@ async def _workflow_turn(tenant: Tenant, session_id: str, message: str, input_id
             yield item
         return
 
+    await worker.settle_park()          # a question park in progress ends first
     qp = worker.question_park
     if qp is not None and qp["question_id"] == answer_to:
         # this process's worker is parked on that question: no status query

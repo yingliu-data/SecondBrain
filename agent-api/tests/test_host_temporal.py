@@ -528,3 +528,24 @@ async def test_direct_answer_to_another_question_while_parked_is_refused(direct,
     qid = w.question_park["question_id"]
     await direct.chat(message="fine", answer_to=qid, input_id="in_dq4_a")
     assert sse_events(await asyncio.wait_for(first, 60))[-1] == ("done", {})
+
+
+async def test_direct_redelivery_while_parked_on_a_question_does_not_wake(direct, monkeypatch):
+    """A redelivered input (act() again) or any control but the answer and
+    the abort is held without a wake: a woken guest would not park again
+    and the answer wait would be lost."""
+    monkeypatch.setattr("app.host.worker.HARNESS_QUESTION_TIMEOUT_S", 1)
+    direct.upstream.responses = [tool_call("call_q", "question", {"text": "Which?"}),
+                                 {"content": "ok"}]
+    first = asyncio.ensure_future(direct.chat(message="ask", input_id="in_dq5"))
+    w = await wait_until(lambda: direct.worker is not None
+                         and direct.worker.question_park is not None and direct.worker,
+                         30, "question park")
+    again = asyncio.ensure_future(w.act({"input_id": "in_dq5", "text": "ask"}))
+    await asyncio.sleep(1.0)
+    assert w.vm_state == "parked" and w.question_park is not None and not again.done()
+    qid = w.question_park["question_id"]
+    await direct.chat(message="fine", answer_to=qid, input_id="in_dq5_a")
+    assert sse_events(await asyncio.wait_for(first, 60))[-1] == ("done", {})
+    assert (await asyncio.wait_for(again, 10))["outcome"] == "done"
+    assert not direct.host_events("answer_timeout")
