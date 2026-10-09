@@ -91,6 +91,26 @@ async def _start_mcp_refresh():
         asyncio.create_task(skill.start_background_refresh())
 
 
+@app.on_event("startup")
+async def _start_temporal():
+    # M5 (harness/docs/M5-CONTRACTS.md): TEMPORAL_ADDRESS set -> the session
+    # workflow's worker runs on this loop with the real activities, and the
+    # tenants' schedules are ensured. A failed connect leaves the direct path.
+    from app.host import temporal
+    from app.host.activities import HostActivities
+    from app.session.dir_store import DirStore
+    if not isinstance(chat.sessions, DirStore):
+        return
+    acts = HostActivities(chat.workers, chat.sessions, tenant_registry, registry)
+    await temporal.start(acts.activities(), tenant_registry.tenants_doc())
+
+
+@app.on_event("shutdown")
+async def _stop_temporal():
+    from app.host import temporal
+    await temporal.stop()
+
+
 @app.on_event("shutdown")
 async def _stop_harness_workers():
     # Harness engine (AGENT_ENGINE=harness or a tenant's `engine`): stop every

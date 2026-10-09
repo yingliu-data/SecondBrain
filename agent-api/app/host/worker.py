@@ -36,6 +36,20 @@ M3 (harness/docs/M3-CONTRACTS.md): one long-lived guest per session.
   host events   vm{op: boot|restore|snapshot|destroy, source: rootfs|base|
                 session, ms}; workflow{parked|resume|idle|heartbeat ...}
 
+M5 (harness/docs/M5-CONTRACTS.md): the Temporal activities (activities.py)
+drive the same Worker. `answer_wait_s` set = the workflow path: hello limits
+carry it, the guest parks itself on a question deadline (parked{reason:
+question, question_id}), the worker adopts the park and records
+`question_park`; the task's wall clock stops while it waits. The streams of
+an input end at `deliver` (end_input_stream), not at the settle.
+  .ensure_ready()               boot / wake the guest (prepare_vm)
+  .start_task(task_input)       act() as a worker-owned task (an activity
+                                retry re-attaches to it by input_id)
+  .wait_outcome(input_id)       its settle (act's result), or
+                                {outcome: parked, question_id} at a question park
+  .answer(question_id, text, input_id)   ui_response to the live/parked guest
+  .abort(reason)                abort{reason} to the live/parked guest
+
 Threads touch sockets only (endpoints.py); everything reaches the asyncio
 loop through loop.call_soon_threadsafe and one inbound asyncio.Queue that a
 pump task drains. The pump is the single writer of state_sync.
@@ -131,7 +145,8 @@ class Worker:
                  max_resumes: int = HARNESS_MAX_RESUMES,
                  park_grace_s: float = HARNESS_PARK_GRACE_S,
                  gateway_url: str = MCP_GATEWAY_URL,
-                 gateway_tools_timeout_s: float = MCP_GATEWAY_TOOLS_TIMEOUT_S) -> None:
+                 gateway_tools_timeout_s: float = MCP_GATEWAY_TOOLS_TIMEOUT_S,
+                 answer_wait_s: int | None = None) -> None:
         self.session = session
         self.tenant = tenant
         self.registry = registry
@@ -199,6 +214,13 @@ class Worker:
         self._side_tasks: dict[str, asyncio.Task] = {}
         self._joined: dict[str, str] = {}           # answer input_id -> the task it joins
         self._bg: set[asyncio.Task] = set()         # fire-and-forget tasks (strong refs)
+        # M5: the workflow path (None = direct path, M1-M4 behaviour unchanged)
+        self.answer_wait_s = answer_wait_s
+        self.question_park: dict | None = None      # {input_id, question_id} while parked on it
+        self._qpark_evt = asyncio.Event()           # replaced (and set) on every change
+        self._acts: dict[str, asyncio.Task] = {}    # input_id -> act() run by start_task
+        self._fail_messages: dict[str, str] = {}    # input_id -> a host failure's message
+        self._question_bodies: dict[str, dict] = {}
         self._load_parked()
 
     def _spawn(self, coro) -> asyncio.Task:
@@ -221,6 +243,9 @@ class Worker:
         for call in self.device_calls.open_for(self.session_key):
             # PLAN.md 8: an open device call is re-emitted to the stream that attaches
             q.put_nowait(sse("tool_call", call))
+        for question in self.open_questions():
+            # M5 §3: so is an open question (the phone gets it on reconnect)
+            q.put_nowait(sse("question", question))
         return q
 
     def detach(self, q: asyncio.Queue) -> None:
@@ -251,6 +276,152 @@ class Worker:
     def _end_all_streams(self) -> None:
         for q in list(self.sinks):
             q.put_nowait(None)
+
+    # ------------------------------------------------------------ M5 workflow path
+    @property
+    def workflow_driven(self) -> bool:
+        """The Temporal path: deliver (not the settle) ends an input's streams."""
+        return self.answer_wait_s is not None
+
+    @property
+    def current_input_id(self) -> str | None:
+        return self._current[0] if self._current is not None and not self._current[1].done() else None
+
+    def open_questions(self) -> list[dict]:
+        """Unanswered questions of the current run whose call has no result
+        yet, as the SSE `question` payload."""
+        out = []
+        state = self.sync.state
+        for qid, q in state.open_questions.items():
+            call = state.open_calls.get(q["call_id"])
+            if q.get("answered") or call is None or "result" in call:
+                continue
+            body = self._question_bodies.get(qid)
+            if body is None:
+                ev = next(iter(self.sync.read(q["seq"] - 1)), None)
+                if ev is None or ev.get("type") != "question":
+                    continue
+                body = self._question_bodies[qid] = ev["body"]
+            out.append({k: body.get(k) for k in ("question_id", "call_id", "text",
+                                                 "options", "deadline")})
+        return out
+
+    def _set_question_park(self, value: dict | None) -> None:
+        self.question_park = value
+        evt, self._qpark_evt = self._qpark_evt, asyncio.Event()
+        evt.set()
+
+    async def ensure_ready(self) -> None:
+        """A guest that can take a control: wake a parked one, boot one
+        that is not running (prepare_vm; also the start of every act)."""
+        self._ensure_plumbing()
+        async with self._vm_lock:        # waits out a park in progress
+            if self.vm_state == "parked":
+                await self._wake_locked()
+            elif not self._guest_ready():
+                await self._boot(resume=False)
+
+    def start_task(self, task_input: dict) -> asyncio.Task:
+        """act(task_input) as a task the worker owns: the activity that
+        started it may be cancelled or fail, the task runs on, and a retry
+        (same input_id) gets the same task back."""
+        input_id = task_input["input_id"]
+        task = self._acts.get(input_id)
+        if task is None or (task.done() and (task.cancelled() or task.exception() is not None)):
+            task =self._acts[input_id] = asyncio.get_running_loop().create_task(
+                self.act(task_input), name=f"act:{self.session_key}:{input_id}")
+        return task
+
+    async def wait_outcome(self, input_id: str) -> dict:
+        """Wait for the settle of `input_id` (act's result: the settle body,
+        or the host's failure result) or for the guest to park on a question
+        of that input: {"input_id", "outcome": "parked", "question_id"}."""
+        task = self._acts.get(input_id)
+        while True:
+            evt = self._qpark_evt
+            qp = self.question_park
+            if qp is not None and qp["input_id"] == input_id:
+                return {"input_id": input_id, "outcome": "parked", "question_id": qp["question_id"]}
+            if task is None:
+                if input_id in self.sync.settled:
+                    return self.sync.settled[input_id]
+                raise GuestError(f"no task for input {input_id}")
+            if task.done():
+                return task.result()
+            await _first(task, evt)
+
+    def task_for(self, input_id: str) -> asyncio.Task | None:
+        return self._acts.get(input_id)
+
+    async def ensure_parked(self, reason: str) -> bool:
+        """park_vm: parked and snapshotted. An adopted park in progress
+        finishes first; a guest still running is asked to park."""
+        self._ensure_plumbing()
+        async with self._vm_lock:
+            pass
+        if self.vm_state == "parked":
+            return True
+        return await self.park(reason)
+
+    def _guest_reachable(self) -> bool:
+        """A control can be queued for this guest: parked (held, it wakes),
+        or a run whose outbox resends it on the next link (a stream drop
+        between restore and the guest's reconnect is not a lost guest)."""
+        return self._outbox is not None and self.vm_state != "none"
+
+    def answer(self, question_id: str, text: str, input_id: str) -> bool:
+        """ui_response{question_id, answer} to the guest (a parked one is
+        restored first, ui_response first). False when no guest can take it."""
+        self._ensure_plumbing()
+        if self.question_park is not None and self.question_park["question_id"] == question_id:
+            self._set_question_park(None)
+        reachable = self._guest_reachable()
+        self.sync.host_event("workflow", {"kind": "answer_signal", "input_id": input_id,
+                                          "question_id": question_id, "sent": reachable,
+                                          "vm_state": self.vm_state})
+        if not reachable:
+            return False
+        self.send_control("ui_response", {"input_id": input_id, "question_id": question_id,
+                                          "answer": text})
+        return True
+
+    def abort(self, reason: str) -> bool:
+        """abort{reason}: the guest settles the running task itself (M5 §4)."""
+        self._ensure_plumbing()
+        if not self._guest_reachable():
+            return False
+        self.sync.host_event("workflow", {"kind": "abort", "reason": reason,
+                                          "input_id": self.current_input_id})
+        self.send_control("abort", {"reason": reason})
+        return True
+
+    def forget_task(self, input_id: str) -> None:
+        """deliver is done with `input_id`."""
+        self._acts.pop(input_id, None)
+        self._fail_messages.pop(input_id, None)
+        for k in [k for k, v in self._joined.items() if v == input_id]:
+            del self._joined[k]
+
+    def end_input_stream(self, input_id: str, outcome: str) -> None:
+        """deliver: `error` (not done) + `done` + end of stream to the sinks of `input_id`."""
+        if outcome != "done":
+            message = self._fail_messages.get(input_id) or f"The task ended: {outcome}."
+            self._emit(sse("error", {"class": "fatal", "message": message,
+                                     "outcome": outcome}), input_id)
+        self._emit(DONE, input_id)
+        self._end_stream(input_id)
+
+    def replay_to(self, q: asyncio.Queue, input_id: str) -> bool:
+        """A settled input's answer + done + end of stream onto one sink."""
+        body = self.sync.settled.get(input_id)
+        if body is None:
+            return False
+        if body.get("answer"):
+            for item in tokens(body["answer"].strip()):
+                q.put_nowait(item)
+        q.put_nowait(DONE)
+        q.put_nowait(None)
+        return True
 
     # ------------------------------------------------------------ hello
     def tool_entries(self) -> list[dict]:
@@ -343,6 +514,8 @@ class Worker:
             "reserve_tokens": HARNESS_RESERVE_TOKENS,
             # M3: running guest ops get this long after `park`, then killed
             "park_grace_s": self.park_grace_s,
+            # M5: > 0 = a question deadline parks the task (workflow path only)
+            **({"answer_wait_s": int(self.answer_wait_s)} if self.answer_wait_s is not None else {}),
         }
 
     def build_hello(self, resume: bool = False) -> dict:
@@ -552,6 +725,8 @@ class Worker:
         vm event, then the held controls `ui_response` first."""
         self.vm_state = "running"
         self._clear_parked_file()
+        if self.question_park is not None:
+            self._set_question_park(None)
         self._vm_event(op, source, t0, **extra)
         self._send_ui_first(held)
 
@@ -628,7 +803,7 @@ class Worker:
                 await self._destroy("idle")
             return parked
 
-    async def _park_locked(self, reason: str) -> bool:
+    async def _park_locked(self, reason: str, question_id: str | None = None) -> bool:
         try:
             await asyncio.wait_for(self._parked_evt.wait(), timeout=self.park_timeout_s)
         except asyncio.TimeoutError:
@@ -658,14 +833,20 @@ class Worker:
         cp = self.sync.state.parked_at
         self._write_parked_file(reason, cp)
         self.sync.host_event("workflow", {"kind": "parked", "reason": reason, "checkpoint_seq": cp,
-                                          "snapshot": ok})
+                                          "snapshot": ok,
+                                          **({"question_id": question_id} if question_id else {})})
         return True
 
-    async def _adopt_park(self, reason: str) -> None:
-        """The guest parked on its own (a question with ui_attached=false, M5)."""
+    async def _adopt_park(self, reason: str, question_id: str | None = None,
+                          input_id: str | None = None) -> None:
+        """The guest parked on its own (M5 §4: a question deadline with
+        answer_wait_s > 0): snapshot it; a question park is what
+        wait_outcome() reports for the input."""
         async with self._vm_lock:
             if self.vm_state == "parking":
-                await self._park_locked(reason)
+                parked = await self._park_locked(reason, question_id)
+                if parked and reason == "question" and question_id and input_id:
+                    self._set_question_park({"input_id": input_id, "question_id": question_id})
 
     def _request_wake(self) -> None:
         if self._loop is None or self.closed:
@@ -827,6 +1008,8 @@ class Worker:
         body = self.sync.settled[input_id]
         self.sync.host_event("workflow", {"kind": "task_signal", "input_id": input_id,
                                           "dedupe": "settled"})
+        if self.workflow_driven:
+            return body             # the route replays to its own sink (replay_to)
         if body.get("answer"):
             self._emit_many(tokens(body["answer"].strip()), input_id)
         self._emit(DONE, input_id)
@@ -841,16 +1024,12 @@ class Worker:
         self._resumes = 0
         guest_settled = False
         try:
-            async with self._vm_lock:        # waits out a park in progress
-                if self.vm_state == "parked":
-                    await self._wake_locked()
-                elif not self._guest_ready():
-                    await self._boot(resume=False)
+            await self.ensure_ready()
             self.projector.begin_task()         # before any delta can arrive
             self.send_control(*self._task_message(task_input))
             hb = self._loop.create_task(self._heartbeat())
             try:
-                result = await asyncio.wait_for(asyncio.shield(fut), timeout=self.wall_clock_s + 5)
+                result = await self._wait_settle(fut)
                 guest_settled = True
             except asyncio.TimeoutError:
                 result = self._fail(input_id, "timeout",
@@ -872,10 +1051,11 @@ class Worker:
                                     else result.get("outcome", "failed"))
         if self.sides is not None:
             await self.sides.cancel_all()
-        self._end_stream()
+        if not self.workflow_driven:      # the workflow path: deliver ends the streams
+            self._end_stream()
+            for k in [k for k, v in self._joined.items() if v == input_id]:
+                del self._joined[k]
         self.sync.ticket_id = None
-        for k in [k for k, v in self._joined.items() if v == input_id]:
-            del self._joined[k]
         if self.vm_state == "running" and not self.closed:
             self._arm_idle()
         return result
@@ -884,8 +1064,11 @@ class Worker:
               input_id_scope: str | None = None) -> dict:
         logger.error("task %s: %s (%s)", input_id, message, outcome)
         self._emit_many(tokens(message), input_id_scope)
-        self._emit(sse("error", {"class": "fatal", "message": message}), input_id_scope)
-        self._emit(DONE, input_id_scope)
+        if self.workflow_driven:
+            self._fail_messages[input_id] = message     # deliver sends error + done
+        else:
+            self._emit(sse("error", {"class": "fatal", "message": message}), input_id_scope)
+            self._emit(DONE, input_id_scope)
         try:
             self.session.append_history("assistant", message, ticket_id=self.sync.ticket_id)
             self.session.append_trace("llm_error", {"error": message[:500], "outcome": outcome},
@@ -895,11 +1078,30 @@ class Worker:
         return {"input_id": input_id, "outcome": outcome, "answer": message,
                 "usage": {}, "manifest": {}}
 
+    async def _wait_settle(self, fut: asyncio.Future) -> dict:
+        """The settle within the wall clock (+5 s), which stops while the
+        task is parked on a question (M5, D12: the workflow's answer timer
+        bounds that wait). asyncio.TimeoutError when it runs out."""
+        left = self.wall_clock_s + 5
+        while not fut.done():
+            evt = self._qpark_evt
+            if self.question_park is not None:
+                await _first(fut, evt)
+                continue
+            t0 = time.monotonic()
+            await _first(fut, evt, timeout=left)
+            left -= time.monotonic() - t0
+            if not fut.done() and left <= 0 and self.question_park is None:
+                raise asyncio.TimeoutError
+        return fut.result()
+
     async def _heartbeat(self) -> None:
         """Every heartbeat_s while a task runs, parked or not (Temporal's
         activity heartbeat, M5); a parked guest gets no heartbeat message."""
         while True:
             await asyncio.sleep(self.heartbeat_s)
+            if self.question_park is not None:
+                continue                # the workflow holds a question-parked task
             if self.vm_state in ("parked", "parking"):
                 self.sync.host_event("workflow", {"kind": "heartbeat", "at": now_ms(),
                                                   "acked_seq": self.sync.last_seq,
@@ -1018,7 +1220,10 @@ class Worker:
             self._send_raw(ack(self.session_id, ack_seq=self.sync.last_seq))
         if acked == before:
             return                      # duplicate or gap: nothing new
-        self._emit_many(self.projector.project(ev))
+        items = self.projector.project(ev)
+        if self.workflow_driven and ev["type"] == "settle":
+            items = [s for s in items if s != DONE]     # deliver sends done
+        self._emit_many(items)
         etype, body = ev["type"], ev["body"]
         if etype == "tool_call" and self.sides is not None:
             if body["call_id"] in self._lost_calls:
@@ -1030,11 +1235,14 @@ class Worker:
                 task.add_done_callback(lambda _t, cid=cid: self._side_tasks.pop(cid, None))
         elif etype == "op_state" and body["state"] == "lost":
             self._on_lost(body["call_id"])
+        elif etype == "question":
+            self._question_bodies[body["question_id"]] = body
         elif etype == "parked":
             self._parked_evt.set()
             if self.vm_state == "running":      # not asked for: the guest parked itself
                 self.vm_state = "parking"
-                self._spawn(self._adopt_park(body["reason"]))
+                self._spawn(self._adopt_park(body["reason"], body.get("question_id"),
+                                             self.current_input_id))
         elif etype == "settle":
             fut = self._current_future()
             if fut is not None and body["input_id"] == self._current[0]:
@@ -1105,6 +1313,15 @@ class Worker:
         if self._accept_thread is not None:
             self._accept_thread.join(timeout=2)
         self._end_all_streams()
+
+
+async def _first(fut: asyncio.Future, evt: asyncio.Event, timeout: float | None = None) -> None:
+    """Return when `fut` is done, `evt` is set or `timeout` passed (never cancels `fut`)."""
+    waiter = asyncio.ensure_future(evt.wait())
+    try:
+        await asyncio.wait({fut, waiter}, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        waiter.cancel()
 
 
 class Workers:

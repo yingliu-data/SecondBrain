@@ -2,6 +2,10 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, HTTPException, Depends
 from app.auth.middleware import verify
+from flows.activities import SessionRef
+from flows.client import signal_abort
+from app.host import temporal
+from app.host.state_sync import StateSync
 from app.session.dir_store import DirStore
 from app.tenants import Tenant
 
@@ -112,3 +116,60 @@ async def session_traces(session_id: str, since_minutes: int | None = None,
     if session is None:
         raise HTTPException(404, f"Session '{session_id}' not found")
     return {"traces": session.read_trace(since=_since(since_minutes), limit=limit)}
+
+
+# ── M5: the session workflow (harness/docs/M5-CONTRACTS.md §3) ──
+
+def _session_or_404(tenant: Tenant, session_id: str):
+    if not _is_dir_store():
+        raise HTTPException(501, "Requires SESSION_BACKEND=dir")
+    try:
+        session = _sessions.get(tenant.user, tenant.name, session_id)
+    except ValueError:
+        raise HTTPException(400, "Invalid session id")
+    if session is None:
+        raise HTTPException(404, f"Session '{session_id}' not found")
+    return session
+
+
+def _ref(tenant: Tenant, session_id: str) -> SessionRef:
+    return SessionRef(user=tenant.user, tenant=tenant.name, session_id=session_id)
+
+
+def _live_worker(tenant: Tenant, session_id: str):
+    from app.routes import chat
+    return chat.workers.get(f"{tenant.user}/{tenant.name}_{session_id}")
+
+
+@router.get("/{session_id}")
+async def get_session(session_id: str, tenant: Tenant = Depends(verify)):
+    session = _session_or_404(tenant, session_id)
+    meta = session.read_meta()
+    return {"session_id": session_id, "updated_at": meta.get("updated_at"),
+            "workflow": temporal.status_dict(await temporal.status(_ref(tenant, session_id)))}
+
+
+@router.post("/{session_id}/abort")
+async def abort_session(session_id: str, tenant: Tenant = Depends(verify)):
+    """The `abort` signal (the workflow aborts the running or parked task).
+    Without Temporal: abort{aborted} to the live worker's guest."""
+    _session_or_404(tenant, session_id)
+    if temporal.enabled():
+        if await temporal.status(_ref(tenant, session_id)) is None:
+            raise HTTPException(404, "No workflow for this session")
+        await signal_abort(temporal.client, _ref(tenant, session_id), "aborted")
+        return {"status": "ok", "signal": "abort"}
+    w = _live_worker(tenant, session_id)
+    if w is None or w.current_input_id is None or not w.abort("aborted"):
+        raise HTTPException(409, "No running task")
+    return {"status": "ok", "abort": "sent"}
+
+
+@router.get("/{session_id}/events")
+async def session_events(session_id: str, after_seq: int = 0, tenant: Tenant = Depends(verify)):
+    """The session's guest events (current run) with seq > after_seq, for a
+    client catching up after a disconnect."""
+    session = _session_or_404(tenant, session_id)
+    w = _live_worker(tenant, session_id)
+    sync = w.sync if w is not None else StateSync(session)
+    return sync.read(max(0, after_seq))

@@ -45,6 +45,12 @@ class Tenant(BaseModel):
     max_tokens: int | None = None          # None -> LLM default
     engine: str | None = None              # None -> config.AGENT_ENGINE; "legacy" | "harness"
     is_default: bool = False
+    # M5 (Temporal session workflow, flows.SessionConfig.from_tenant): None
+    # keeps the flows default; `schedules` = [{cron, prompt, session, tz?}]
+    wall_clock_s: int | None = None
+    answer_wait_s: int | None = None       # parked question wait (phone 86400)
+    max_tasks_per_run: int | None = None
+    schedules: list[dict] = []
 
     @field_validator("name")
     @classmethod
@@ -75,6 +81,17 @@ class Tenant(BaseModel):
         if self.is_default:
             return session_id
         return f"{self.name}:{session_id}"
+
+    def workflow_entry(self) -> dict:
+        """The tenants.json view flows reads (SessionConfig.from_tenant,
+        schedules): no key, no prompt, unset knobs left out; `engine` is
+        the effective one (AGENT_ENGINE when unset: schedules skip legacy)."""
+        from app.config import AGENT_ENGINE
+        entry = self.model_dump(exclude_none=True,
+                                include={"name", "user", "wall_clock_s", "answer_wait_s",
+                                         "max_tasks_per_run", "schedules"})
+        entry["engine"] = self.engine or AGENT_ENGINE
+        return entry
 
     def allowed_skill_names(self) -> set[str] | None:
         """Skill names this tenant may use; None means unrestricted (default tenant)."""

@@ -172,6 +172,7 @@ class StateSync:
         self._host_log = host_log(self.events_dir, self.segment_events)
         self.seen_inputs: set[str] = set()       # across runs
         self.settled: dict[str, dict] = {}       # input_id -> settle body, across runs
+        self.settled_seq: dict[str, int] = {}    # input_id -> the settle's seq (in its run)
         self._load()
 
     # ------------------------------------------------------------ disk
@@ -204,6 +205,7 @@ class StateSync:
                     raise StateSyncError(f"run {run} does not fold: {e}") from e
                 if ev["type"] == "settle":
                     self.settled[ev["body"]["input_id"]] = ev["body"]
+                    self.settled_seq[ev["body"]["input_id"]] = ev["seq"]
             self.seen_inputs |= state.seen_input_ids
             self.run, self.state = run, state
 
@@ -299,6 +301,7 @@ class StateSync:
             self.seen_inputs.add(b["input_id"])
         elif etype == "settle":
             self.settled[b["input_id"]] = b
+            self.settled_seq[b["input_id"]] = event["seq"]
 
     # ------------------------------------------------------------ host log
     def host_event(self, type: str, body: dict) -> dict:

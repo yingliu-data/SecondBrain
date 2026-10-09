@@ -108,3 +108,17 @@ HARNESS_TOKEN_BUDGET = int(os.environ.get("HARNESS_TOKEN_BUDGET", 0))        # t
 # Context window the guest plans against (M2 compaction trigger: estimate > window - reserve).
 HARNESS_CONTEXT_WINDOW_TOKENS = int(os.environ.get("HARNESS_CONTEXT_WINDOW_TOKENS", 32768))
 HARNESS_RESERVE_TOKENS = int(os.environ.get("HARNESS_RESERVE_TOKENS", 4096))
+
+# ── Temporal (M5, harness/docs/M5-CONTRACTS.md) ──
+# Set -> POST /chat of a harness tenant goes through the session workflow
+# (flows.SessionWorkflow); unset -> the direct path (Worker.act).
+TEMPORAL_ADDRESS = os.environ.get("TEMPORAL_ADDRESS", "")
+TEMPORAL_NAMESPACE = os.environ.get("TEMPORAL_NAMESPACE", "secondbrain")
+TEMPORAL_TASK_QUEUE = os.environ.get("TEMPORAL_TASK_QUEUE", "secondbrain-agent")   # flows.TASK_QUEUE
+TEMPORAL_CONNECT_TIMEOUT_S = float(os.environ.get("TEMPORAL_CONNECT_TIMEOUT_S", 10))
+# run_task heartbeats {last_seq} at start and every this many seconds (the
+# workflow's heartbeat timeout is 120 s); an abort reaches the activity on a heartbeat
+HARNESS_ACTIVITY_HEARTBEAT_S = float(os.environ.get("HARNESS_ACTIVITY_HEARTBEAT_S", 60))
+# abort sent to the guest -> how long to wait for its settle (run_task
+# cancellation, deliver of escalated/aborted)
+HARNESS_ABORT_WAIT_S = float(os.environ.get("HARNESS_ABORT_WAIT_S", 30))

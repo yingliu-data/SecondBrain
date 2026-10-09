@@ -11,6 +11,8 @@ dependencies = [
     "pydantic>=2.0",
     "ddgs>=9.0",
     "secondbrain-harness",
+    "flows",
+    "temporalio>=1.0,<2",
 ]
 
 [dependency-groups]
@@ -24,3 +26,4 @@ package = false
 
 [tool.uv.sources]
 secondbrain-harness = { path = "../harness", editable = true }
+flows = { path = "../flows", editable = true }

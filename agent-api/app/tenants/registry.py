@@ -67,6 +67,14 @@ class TenantRegistry:
     def all_tenants(self) -> list[Tenant]:
         return list(self._tenants)
 
+    def get_by_name(self, name: str) -> Tenant | None:
+        return next((t for t in self._tenants if t.name == name), None)
+
+    def tenants_doc(self) -> dict:
+        """{"tenants": [...]} in the shape flows.schedules.ensure_schedules
+        reads (Tenant.workflow_entry: no api keys)."""
+        return {"tenants": [t.workflow_entry() for t in self._tenants]}
+
     def all_origins(self) -> list[str]:
         origins = []
         for t in self._tenants:

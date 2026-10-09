@@ -3,11 +3,15 @@ import contextlib
 import logging
 
 from fastapi import APIRouter, Request, Depends
+from flows.activities import SessionConfig, SessionRef, TaskSignal
+from flows.client import signal_answer, signal_task
+from flows.session_workflow import AnswerSignal
 from fastapi.responses import StreamingResponse
 from app.auth.middleware import verify
 from app.agent.loop import run_agent_loop, SSE_HEADERS
 from app.config import AGENT_ENGINE, HARNESS_KEEPALIVE_S, MAX_INPUT
-from app.host.stream import KEEPALIVE
+from app.host import temporal
+from app.host.stream import DONE, KEEPALIVE, sse, tokens
 from app.host.worker import Workers, new_input_id
 from app.session.dir_store import DirStore
 from app.session.factory import create_session_store
@@ -51,7 +55,11 @@ async def chat(request: Request, tenant: Tenant = Depends(verify)):
     message = body.get("message", "")[:MAX_INPUT]
     session_id = body.get("session_id", "default")
 
-    if uses_harness(tenant):
+    if uses_harness(tenant) and temporal.enabled():
+        input_id = body.get("input_id") or new_input_id()
+        generator = _workflow_turn(tenant, session_id, message, input_id,
+                                   answer_to=body.get("answer_to"))
+    elif uses_harness(tenant):
         input_id = body.get("input_id") or new_input_id()
         generator = _harness_turn(tenant, session_id, message, input_id,
                                   answer_to=body.get("answer_to"))
@@ -200,3 +208,56 @@ async def _harness_turn(tenant: Tenant, session_id: str, message: str, input_id:
                     session.append_trace("client_disconnected", ticket_id=ticket.ticket_id)
                 except Exception as e:
                     logger.warning(f"trace write failed: {e}")
+
+
+async def _workflow_turn(tenant: Tenant, session_id: str, message: str, input_id: str,
+                         *, answer_to: str | None = None):
+    """One input through the session workflow (M5-CONTRACTS §3): a `task`
+    signal-with-start, or for `answer_to` the `answer` signal when the
+    workflow is parked on that question (else ui_response to the live
+    worker). The response streams the Worker's events for the task's
+    input_id until `deliver` ends them; it is a projection only, a client
+    disconnect never touches the task."""
+    session = sessions.get_or_create(tenant.user, tenant.name, session_id)
+    set_current_context(session, tenant.user, tenant.name, session_id)
+    worker = workers.get_or_create(session, tenant, _registry)
+    entry = tenant.workflow_entry()
+    if worker.answer_wait_s is None:
+        worker.answer_wait_s = SessionConfig.from_tenant(entry).answer_wait_s
+    ref = SessionRef(user=tenant.user, tenant=tenant.name, session_id=session_id)
+
+    if answer_to:
+        st = await temporal.status(ref)
+        task_id = (st.current_input_id if st is not None else None) or worker.current_input_id
+        if task_id is None:
+            for item in tokens("No question is waiting for this answer.") + [
+                    sse("error", {"class": "fatal", "message": "no question is waiting"}), DONE]:
+                yield item
+            return
+        sink = worker.attach(task_id)
+        if st is not None and st.state == "parked" and st.question_id == answer_to:
+            await signal_answer(temporal.client, ref, AnswerSignal(question_id=answer_to,
+                                                                   text=message))
+        elif not worker.answer(answer_to, message, input_id):
+            worker.detach(sink)
+            for item in [sse("error", {"class": "fatal", "message": "no question is waiting"}),
+                         DONE]:
+                yield item
+            return
+    else:
+        sink = worker.attach(input_id)
+        if not worker.replay_to(sink, input_id):      # a settled input: its answer again
+            await signal_task(temporal.client, ref, TaskSignal(input_id=input_id, text=message),
+                              task_queue=temporal.task_queue, config=SessionConfig.from_tenant(entry))
+    try:
+        while True:
+            try:
+                item = await asyncio.wait_for(sink.get(), timeout=HARNESS_KEEPALIVE_S)
+            except asyncio.TimeoutError:
+                yield KEEPALIVE
+                continue
+            if item is None:
+                break
+            yield item
+    finally:
+        worker.detach(sink)
