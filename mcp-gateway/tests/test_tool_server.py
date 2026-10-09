@@ -137,6 +137,24 @@ async def test_quarantine_mid_session(upstream, harness, agent_api):
     assert q and q[0]["tool"] == "fake__echo" and q[0]["session_id"] == IDENT["X-SB-Session"]
 
 
+async def test_new_session_pins_fresh_definitions_after_ttl(upstream, harness):
+    # Stale-while-revalidate must not reach pin time: once the TTL has passed,
+    # a NEW session waits for the refresh and pins what the upstream serves now
+    # (else it would pin the replaced def and quarantine it on first use).
+    async with harness(make_config(upstream.url)) as gw:
+        assert (await gw.call("fake__echo", {"text": "a"}))["isError"] is False
+        upstream.change_echo()
+        gw.gateway.upstreams["fake"]._fetched_at = 0.0   # the TTL has passed
+        other = {**IDENT, "X-SB-Session": "sess_after_ttl"}
+        pinned = json.loads(text_of(await gw.call("describe_tool", {"name": "fake__echo"}, ident=other)))
+        current = (await gw.gateway.upstreams["fake"].refresh())["echo"][1]   # what upstream serves now
+        assert pinned["pin"] == current
+        assert text_of(await gw.call("fake__echo", {"text": "d"}, ident=other)) == "ECHO: D"
+        # The session pinned before the change is quarantined, not silently moved.
+        res = await gw.call("fake__echo", {"text": "b"})
+        assert res["isError"] is True and "quarantined" in text_of(res)
+
+
 async def test_concurrency_limit(upstream, harness):
     async with harness(make_config(upstream.url, max_concurrent=2)) as gw:
         slow1 = asyncio.create_task(gw.call("call_tool", {"name": "fake__slow"}))

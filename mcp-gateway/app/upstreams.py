@@ -84,14 +84,21 @@ class Upstream:
     def _backing_off(self) -> bool:
         return self._failed_at is not None and time.monotonic() - self._failed_at < FAILURE_BACKOFF_S
 
-    async def tools(self) -> ToolIndex:
+    async def tools(self, fresh: bool = False) -> ToolIndex:
         """Cached tools/list. Expired → the cached index, plus one background
-        refresh. Never fetched → fetched now (or the recent failure raised)."""
+        refresh. Never fetched → fetched now (or the recent failure raised).
+
+        `fresh=True` (pin time: a session's surface is fixed by what it sees
+        now) waits for the refresh when the cache has expired, so a new
+        session never pins a definition the upstream already replaced; if
+        the refresh fails it falls back to the cached index."""
         if self._tools is not None:
             expired = time.monotonic() - self._fetched_at >= self.cfg.tool_defs_ttl_s
             idle = self._refresh_task is None or self._refresh_task.done()
             if expired and idle and not self._backing_off():
                 self._refresh_task = asyncio.create_task(self._refresh_quietly())
+            if fresh and expired and self._refresh_task is not None and not self._refresh_task.done():
+                await asyncio.shield(self._refresh_task)
             return self._tools
         async with self._lock:
             if self._tools is None:

@@ -16,7 +16,7 @@ the contract.
 | `app/tool_server.py` | Low-level MCP `Server` behind a stateless, JSON-response `StreamableHTTPSessionManager` |
 | `app/internal.py` | `/internal/tools`, `/internal/upstreams/{name}/tools`, `/internal/call` |
 | `app/gateway.py` | Core: session surface, pins, policy checks, calls, input-required relay, events |
-| `app/upstreams.py` | One client per upstream (pooled httpx clients), tool-def cache `{tool: (defn, pin)}` with stale-while-revalidate and a failure backoff, `UpstreamCall` (one call in its own task) |
+| `app/upstreams.py` | One client per upstream (pooled httpx clients), tool-def cache `{tool: (defn, pin)}` with stale-while-revalidate for calls (pin time waits for an expired cache to refresh, so a new session never pins a replaced definition) and a failure backoff, `UpstreamCall` (one call in its own task) |
 | `app/policy.py` | Allow/deny globs, default deny, `max_concurrent` limiter |
 | `app/pins.py` | `pin_of`, per-session pin files (atomic write) |
 | `app/schema.py` | Canonical definition, MCP to OpenAI conversion |

@@ -117,7 +117,7 @@ class Gateway:
 
     async def _list_allowed(self, ident: Identity, upstream: str) -> dict[str, dict]:
         out = {}
-        for tool, (defn, pin) in (await self.upstreams[upstream].tools()).items():
+        for tool, (defn, pin) in (await self.upstreams[upstream].tools(fresh=True)).items():
             name = namespaced(upstream, tool)
             if self.policy.allowed(ident.tenant, name):
                 out[name] = {"pin": pin, "defn": defn}
