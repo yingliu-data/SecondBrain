@@ -95,14 +95,15 @@ async def _start_mcp_refresh():
 async def _start_temporal():
     # M5 (harness/docs/M5-CONTRACTS.md): TEMPORAL_ADDRESS set -> the session
     # workflow's worker runs on this loop with the real activities, and the
-    # tenants' schedules are ensured. A failed connect leaves the direct path.
+    # tenants' schedules are ensured, in the background: startup never waits
+    # for Temporal, the direct path serves /chat until (unless) it is up.
     from app.host import temporal
     from app.host.activities import HostActivities
     from app.session.dir_store import DirStore
     if not isinstance(chat.sessions, DirStore):
         return
     acts = HostActivities(chat.workers, chat.sessions, tenant_registry, registry)
-    await temporal.start(acts.activities(), tenant_registry.tenants_doc())
+    temporal.start_in_background(acts.activities(), tenant_registry.tenants_doc())
 
 
 @app.on_event("shutdown")

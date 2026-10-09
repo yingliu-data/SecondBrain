@@ -873,7 +873,7 @@ def test_wall_clock_kills_open_side_calls():
 
 
 # ---------------------------------------------------------------- control
-def test_abort_mid_call_fails_the_task():
+def test_abort_mid_call_settles_aborted():
     scn = Scenario(script=[tool_calls([("c", "bash", {"command": "sleep 100"})])], ops_manual=True)
     scn.task("x")
     scn.start()
@@ -884,7 +884,7 @@ def test_abort_mid_call_fails_the_task():
     assert scn.bodies("op_state")[-1]["state"] == "killed"
     assert scn.bodies("tool_result")[0]["content"] == "error: killed"
     assert result == scn.bodies("settle")[0]
-    assert result["outcome"] == "failed" and result["reason"] == "abort" and result["detail"] == "user cancelled"
+    assert result["outcome"] == "aborted" and result["reason"] == "abort" and result["detail"] == "user cancelled"
     check_log(scn)
 
 
@@ -892,7 +892,7 @@ def test_abort_before_any_task_returns_without_a_settle_event():
     scn = Scenario()
     scn.control("abort", {"reason": "shutdown"})
     result = scn.run()
-    assert result["outcome"] == "failed" and result["input_id"] is None
+    assert result["outcome"] == "aborted" and result["input_id"] is None
     assert scn.of("settle") == []
     check_log(scn)
 

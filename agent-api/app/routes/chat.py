@@ -1,5 +1,4 @@
 import asyncio
-import contextlib
 import logging
 
 from fastapi import APIRouter, Request, Depends
@@ -12,10 +11,11 @@ from app.agent.loop import run_agent_loop, SSE_HEADERS
 from app.config import AGENT_ENGINE, HARNESS_KEEPALIVE_S, MAX_INPUT
 from app.host import temporal
 from app.host.activities import bind_workflow
-from app.host.stream import DONE, KEEPALIVE, sse, tokens
+from app.host.stream import KEEPALIVE, fatal_items, tokens
 from app.host.worker import Workers, new_input_id
 from app.session.dir_store import DirStore
 from app.session.factory import create_session_store
+from app.session.ids import session_key
 from app.session.queue import SessionQueue
 from app.session.ticket import Ticket
 from app.skills.base import set_current_context
@@ -81,7 +81,7 @@ async def _dir_turn(tenant: Tenant, session_id: str, message: str):
     ticketed, fully traced; history survives client disconnects."""
     session = sessions.get_or_create(tenant.user, tenant.name, session_id)
 
-    async with session_queue.run(f"{tenant.user}/{tenant.name}_{session_id}"):
+    async with session_queue.run(session_key(tenant.user, tenant.name, session_id)):
         ticket = Ticket.start(session, "chat.turn", inputs={"message": message})
         set_current_context(session, tenant.user, tenant.name, session_id)
 
@@ -151,29 +151,73 @@ async def _legacy_turn(tenant: Tenant, session_id: str, message: str):
         sessions.save(store_key, history)
 
 
+NO_QUESTION = "No question is waiting for this answer."
+
+
+async def _error_stream(message: str):
+    """A request that runs nothing: its message as the answer, then a fatal
+    error + done."""
+    for item in tokens(message) + fatal_items(message):
+        yield item
+
+
+async def _drain(worker, sink, task: asyncio.Future | None = None):
+    """The Worker's SSE items of one sink until its end of stream, with
+    keepalives; with `task`, also stop once it is done and the sink is
+    empty. The sink is detached at the end (or a client disconnect)."""
+    try:
+        while True:
+            try:
+                item = await asyncio.wait_for(sink.get(), timeout=HARNESS_KEEPALIVE_S)
+            except asyncio.TimeoutError:
+                if task is not None and task.done() and sink.empty():
+                    return
+                yield KEEPALIVE
+                continue
+            if item is None:
+                return
+            yield item
+    finally:
+        worker.detach(sink)
+
+
+def _open_session(tenant: Tenant, session_id: str):
+    return lambda: sessions.get_or_create(tenant.user, tenant.name, session_id)
+
+
 async def _harness_turn(tenant: Tenant, session_id: str, message: str, input_id: str,
                         *, answer_to: str | None = None):
-    """One input through the harness engine: the session's Worker runs the
-    task in the sandbox; this generator streams the Worker's SSE sink and
-    keeps the connection alive. The task outlives a client disconnect; a
-    redelivered `input_id` attaches to the running task or gets the stored
-    answer again. An answer (`answer_to`) does not queue behind the session:
-    the task it answers holds the queue while it waits for it (the Worker
-    delivers it as `ui_response`, restoring a parked guest first, M3)."""
-    session = sessions.get_or_create(tenant.user, tenant.name, session_id)
+    """One input through the harness engine without Temporal: the session's
+    Worker runs the task in the sandbox (act(), the in-process driver);
+    this generator streams the Worker's SSE sink and keeps the connection
+    alive. The task outlives a client disconnect; a redelivered `input_id`
+    attaches to the running task or gets the stored answer again. An
+    answer (`answer_to`) does not queue behind the session: it goes to the
+    running task as ui_response (a parked guest is restored first, M3) and
+    streams that task, as on the workflow path."""
+    worker = workers.get_or_create(tenant, session_id, _registry,
+                                   _open_session(tenant, session_id))
+    session = worker.session
+    set_current_context(session, tenant.user, tenant.name, session_id)
+    if answer_to:
+        task_id = worker.current_input_id
+        sink = worker.attach(task_id) if task_id is not None else None
+        if sink is None or worker.answer(answer_to, message, input_id) == "no_guest":
+            if sink is not None:
+                worker.detach(sink)
+            async for item in _error_stream(NO_QUESTION):
+                yield item
+            return
+        async for item in _drain(worker, sink):
+            yield item
+        return
 
-    queue_cm = (contextlib.nullcontext() if answer_to
-                else session_queue.run(f"{tenant.user}/{tenant.name}_{session_id}"))
-    async with queue_cm:
-        ticket = Ticket.start(session, "chat.turn",
-                              inputs={"message": message, "input_id": input_id})
-        set_current_context(session, tenant.user, tenant.name, session_id)
-        worker = workers.get_or_create(session, tenant, _registry)
+    async with session_queue.run(session_key(tenant.user, tenant.name, session_id)):
+        ticket = await asyncio.to_thread(Ticket.start, session, "chat.turn",
+                                         inputs={"message": message, "input_id": input_id})
         sink = worker.attach(input_id)
-        task_input = {"input_id": input_id, "text": message, "ticket_id": ticket.ticket_id}
-        if answer_to:
-            task_input["answer_to"] = answer_to
-        task = asyncio.ensure_future(worker.act(task_input))
+        task = asyncio.ensure_future(worker.act({"input_id": input_id, "text": message,
+                                                 "ticket_id": ticket.ticket_id}))
 
         def _finish(t: asyncio.Task) -> None:
             try:
@@ -190,20 +234,10 @@ async def _harness_turn(tenant: Tenant, session_id: str, message: str, input_id:
         task.add_done_callback(_finish)
         completed = False
         try:
-            while True:
-                try:
-                    item = await asyncio.wait_for(sink.get(), timeout=HARNESS_KEEPALIVE_S)
-                except asyncio.TimeoutError:
-                    if task.done() and sink.empty():
-                        break
-                    yield KEEPALIVE
-                    continue
-                if item is None:
-                    break
+            async for item in _drain(worker, sink, task):
                 yield item
             completed = True
         finally:
-            worker.detach(sink)
             if not completed:
                 try:
                     session.append_trace("client_disconnected", ticket_id=ticket.ticket_id)
@@ -219,47 +253,42 @@ async def _workflow_turn(tenant: Tenant, session_id: str, message: str, input_id
     worker). The response streams the Worker's events for the task's
     input_id until `deliver` ends them; it is a projection only, a client
     disconnect never touches the task."""
-    session = sessions.get_or_create(tenant.user, tenant.name, session_id)
-    set_current_context(session, tenant.user, tenant.name, session_id)
-    worker = workers.get_or_create(session, tenant, _registry)
-    config = bind_workflow(worker, tenant)
+    worker, config = bind_workflow(workers, tenant, session_id, _registry,
+                                   _open_session(tenant, session_id))
+    set_current_context(worker.session, tenant.user, tenant.name, session_id)
     ref = SessionRef(user=tenant.user, tenant=tenant.name, session_id=session_id)
-    no_question = [sse("error", {"class": "fatal", "message": "no question is waiting"}), DONE]
 
-    if answer_to:
-        st = await temporal.status(ref)
-        task_id = (st.current_input_id if st is not None else None) or worker.current_input_id
-        if task_id is None:
-            for item in tokens("No question is waiting for this answer.") + no_question:
-                yield item
-            return
-        if st is not None and st.state == "parked" and st.question_id != answer_to:
-            # the workflow holds the parked task and ignores this answer:
-            # a ui_response to the worker would wake the guest behind its back
-            for item in no_question:
-                yield item
-            return
-    sink = worker.attach(task_id if answer_to else input_id)
-    try:
-        if answer_to:
-            if st is not None and st.state == "parked":
-                await signal_answer(temporal.client, ref, AnswerSignal(question_id=answer_to,
-                                                                       text=message))
-            elif not worker.answer(answer_to, message, input_id):
-                for item in no_question:
-                    yield item
-                return
-        elif not worker.replay_to(sink, input_id):      # a settled input: its answer again
+    if not answer_to:
+        sink = worker.attach(input_id)
+        if not worker.replay(input_id, sink):           # a settled input: its answer again
             await signal_task(temporal.client, ref, TaskSignal(input_id=input_id, text=message),
                               task_queue=temporal.task_queue, config=config)
-        while True:
-            try:
-                item = await asyncio.wait_for(sink.get(), timeout=HARNESS_KEEPALIVE_S)
-            except asyncio.TimeoutError:
-                yield KEEPALIVE
-                continue
-            if item is None:
-                break
+        async for item in _drain(worker, sink):
             yield item
-    finally:
+        return
+
+    qp = worker.question_park
+    if qp is not None and qp["question_id"] == answer_to:
+        # this process's worker is parked on that question: no status query
+        task_id, parked = qp["input_id"], True
+    else:
+        st = await temporal.status(ref)
+        task_id = (st.current_input_id if st is not None else None) or worker.current_input_id
+        parked = st is not None and st.state == "parked"
+        if task_id is None or (parked and st.question_id != answer_to):
+            # nothing waits, or the workflow holds a task parked on another
+            # question: a ui_response would wake the guest behind its back
+            async for item in _error_stream(NO_QUESTION):
+                yield item
+            return
+    sink = worker.attach(task_id)
+    if parked:
+        await signal_answer(temporal.client, ref, AnswerSignal(question_id=answer_to,
+                                                               text=message))
+    elif worker.answer(answer_to, message, input_id) == "no_guest":
         worker.detach(sink)
+        async for item in _error_stream(NO_QUESTION):
+            yield item
+        return
+    async for item in _drain(worker, sink):
+        yield item

@@ -124,8 +124,9 @@ OPTIONAL_BODY: dict[str, dict[str, tuple]] = {
                  "input_request": DICT},
     "tool_result": {"spill_ref": OPT_STR, "rewrite": OPT_STR, "late": BOOL},
     "error": {"ref": STR},
-    # M5: the question a `parked{reason: "question"}` waits on (D12)
-    "parked": {"question_id": STR},
+    # M5: the question a `parked{reason: "question"}` waits on (D12), and the
+    # task's wall clock used up to the park (ms; absent when no task runs)
+    "parked": {"question_id": STR, "wall_used_ms": INT},
 }
 
 ENUMS: dict[str, dict[str, frozenset]] = {
@@ -150,7 +151,7 @@ ENUMS: dict[str, dict[str, frozenset]] = {
     "error": {"class": frozenset({
         "transient", "overflow", "budget", "limit", "protocol", "fatal",
     })},
-    "settle": {"outcome": frozenset({"done", "failed", "timeout", "escalated"})},
+    "settle": {"outcome": frozenset({"done", "failed", "timeout", "escalated", "aborted"})},
 }
 
 # clock.kind: a fixed set plus the open `grace_*` family (PLAN.md section 5).
@@ -173,7 +174,7 @@ MIN_INT: dict[str, dict[str, int]] = {
     "op_state": {"duration_ms": 0, "attempt": 0},
     "bulk": {"bytes": 0},
     "checkpoint": {"through_seq": 1},
-    "parked": {"checkpoint_seq": 1},
+    "parked": {"checkpoint_seq": 1, "wall_used_ms": 0},
 }
 
 # list keys whose items must all be str. {type: (key, ...)}

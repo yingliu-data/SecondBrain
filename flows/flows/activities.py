@@ -74,6 +74,12 @@ def _default_activity_options() -> dict[str, ActivityOptions]:
     }
 
 
+SESSION_CONFIG_KEYS = ("wall_clock_s", "answer_wait_s", "max_tasks_per_run",
+                       "max_history_events")
+"""The ``tenants.json`` keys ``SessionConfig.from_tenant`` reads (agent-api's
+``Tenant`` declares the same fields and passes them through)."""
+
+
 @dataclass
 class SessionConfig:
     """Per-tenant knobs of a session workflow (PLAN 10: ``wall_clock_s``,
@@ -99,30 +105,22 @@ class SessionConfig:
     @classmethod
     def from_tenant(cls, tenant_entry: dict[str, Any]) -> SessionConfig:
         """Config from a ``tenants.json`` entry; missing (or null) keys keep the
-        defaults.  Reads ``wall_clock_s``, ``answer_wait_s``,
-        ``max_tasks_per_run`` and ``max_history_events``."""
+        defaults.  Reads the ``SESSION_CONFIG_KEYS``: each an int >= 1, but
+        ``answer_wait_s`` 0 = the guest never parks on a question (deny path,
+        D12; a park that happens anyway escalates at once)."""
         cfg = cls()
-
-        def _int(key: str, minimum: int = 1) -> int | None:
+        for key in SESSION_CONFIG_KEYS:
             value = tenant_entry.get(key)
             if value is None:
-                return None
-            n = int(value)
+                continue
+            n, minimum = int(value), 0 if key == "answer_wait_s" else 1
             if n < minimum:
                 raise ValueError(
                     f"tenant {tenant_entry.get('name')!r}: {key} must be >= {minimum}, got {n}")
-            return n
-
-        if (wall := _int("wall_clock_s")) is not None:
-            cfg.activities["run_task"] = replace(cfg.activities["run_task"], timeout_s=wall)
-        # 0 = the guest never parks on a question (deny path, D12); a park
-        # that happens anyway escalates at once.
-        if (wait := _int("answer_wait_s", minimum=0)) is not None:
-            cfg.answer_wait_s = wait
-        if (n := _int("max_tasks_per_run")) is not None:
-            cfg.max_tasks_per_run = n
-        if (n := _int("max_history_events")) is not None:
-            cfg.max_history_events = n
+            if key == "wall_clock_s":
+                cfg.activities["run_task"] = replace(cfg.activities["run_task"], timeout_s=n)
+            else:
+                setattr(cfg, key, n)
         return cfg
 
 

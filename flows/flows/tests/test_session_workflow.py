@@ -8,10 +8,11 @@ from datetime import timedelta
 
 import pytest
 
-from flows.activities import RunResult, SessionConfig, SessionRef, TaskSignal
+from flows.activities import SessionConfig, SessionRef, TaskSignal
 from flows.client import session_handle, signal_abort, signal_answer
 from flows.session_workflow import (
     AnswerSignal,
+    InFlight,
     SessionState,
     SessionWorkflow,
     parse_workflow_id,
@@ -111,7 +112,7 @@ async def test_b3_carried_parked_task_resumes_in_new_run(make_session):
     await s.client.start_workflow(
         SessionWorkflow.run,
         SessionState(session=s.ref, seen=["in-q"], generation=1,
-                     in_flight=(task, RunResult(outcome="parked", question_id="q-in-q"))),
+                     in_flight=InFlight(task, "q-in-q")),
         id=workflow_id(s.ref.user, s.ref.tenant, s.ref.session_id),
         task_queue=s.task_queue,
     )
@@ -248,8 +249,7 @@ async def test_b5_carried_expired_deadline_escalates(make_session):
     await s.client.start_workflow(
         SessionWorkflow.run,
         SessionState(session=s.ref, seen=["in-q"], generation=1,
-                     in_flight=(task, RunResult(outcome="parked", question_id="q-in-q")),
-                     in_flight_deadline=0.0),  # 1970: long past
+                     in_flight=InFlight(task, "q-in-q", deadline=0.0)),  # 1970: long past
         id=workflow_id(s.ref.user, s.ref.tenant, s.ref.session_id),
         task_queue=s.task_queue,
     )

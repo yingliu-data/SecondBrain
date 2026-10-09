@@ -12,7 +12,9 @@
                                   directory in the process)
     .read(after_seq=0)            events from disk, in seq order (safe from another
                                   thread: the bulk server's log return)
+  read_current_run(events_dir, after_seq)   the same without loading the session
     .state                        protocol.fold.State folded from the log
+    .question_bodies              question_id -> the `question` body (current run)
     .last_seq                     highest stored seq
 
 Segments hold HARNESS_SEGMENT_EVENTS events each (seq 1..N in 000001.jsonl,
@@ -124,17 +126,31 @@ class HostLog:
 
     def append(self, session_id: str | None, type: str, body: dict) -> dict:
         with self._lock:
-            # recount when the directory is gone (session deleted, maybe
-            # re-created under the same id): the cached count is stale
-            if self._count is None or not self.events_dir.is_dir():
+            if self._count is None:
                 self._count = count_host_events(self.events_dir, self.segment_events)
             self._count += 1
             return append_host_event(self.events_dir, self._count, session_id, type, body,
                                      self.segment_events)
 
 
+    def invalidate(self) -> None:
+        """Count from disk again on the next append (the directory was
+        deleted, maybe re-created under the same id)."""
+        with self._lock:
+            self._count = None
+
+
 _host_logs: dict[Path, HostLog] = {}
 _host_logs_guard = threading.Lock()
+
+
+def invalidate_host_logs(root: Path) -> None:
+    """Every HostLog at or under `root` recounts (DirStore.delete)."""
+    root = Path(root).resolve()
+    with _host_logs_guard:
+        logs = [log for key, log in _host_logs.items() if key == root or root in key.parents]
+    for log in logs:
+        log.invalidate()
 
 
 def host_log(events_dir: Path, segment_events: int = HARNESS_SEGMENT_EVENTS) -> HostLog:
@@ -145,6 +161,41 @@ def host_log(events_dir: Path, segment_events: int = HARNESS_SEGMENT_EVENTS) -> 
         if log is None:
             log = _host_logs[key] = HostLog(key, segment_events)
         return log
+
+
+def _read_run(run_dir: Path, after_seq: int, segment_events: int,
+              through: int | None = None) -> list[dict]:
+    """The events of one run directory with seq > after_seq (stopping at
+    `through`), skipping the segments that end before after_seq."""
+    out: list[dict] = []
+    start_segment = after_seq // segment_events + 1
+    pat = "[0-9][0-9][0-9][0-9][0-9][0-9].jsonl"
+    for path in sorted(run_dir.glob(pat)) if run_dir.is_dir() else []:
+        if int(path.stem) < start_segment:
+            continue
+        with path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                ev = json.loads(line)
+                seq = ev.get("seq", 0)
+                if seq > after_seq:
+                    out.append(ev)
+                if through is not None and seq >= through:
+                    break
+        if through is not None and out and out[-1].get("seq", 0) >= through:
+            break
+    out.sort(key=lambda e: e["seq"])
+    return out
+
+
+def read_current_run(events_dir: Path, after_seq: int = 0,
+                     segment_events: int = HARNESS_SEGMENT_EVENTS) -> list[dict]:
+    """The latest run's events with seq > after_seq, without loading the
+    session (no StateSync, no fold): GET /sessions/{id}/events."""
+    runs = sorted(p for p in Path(events_dir).glob("r[0-9][0-9][0-9][0-9]") if p.is_dir())
+    return _read_run(runs[-1], after_seq, max(1, int(segment_events))) if runs else []
 
 
 def _truncate(path: Path, size: int) -> None:
@@ -173,6 +224,7 @@ class StateSync:
         self.seen_inputs: set[str] = set()       # across runs
         self.settled: dict[str, dict] = {}       # input_id -> settle body, across runs
         self.settled_seq: dict[str, int] = {}    # input_id -> the settle's seq (in its run)
+        self.question_bodies: dict[str, dict] = {}  # question_id -> body, current run
         self._load()
 
     # ------------------------------------------------------------ disk
@@ -187,27 +239,20 @@ class StateSync:
                 out.append(int(p.name[1:]))
         return sorted(out)
 
-    def _segments(self, prefix: str = "", run: int | None = None) -> list[Path]:
-        pat = f"{prefix}[0-9][0-9][0-9][0-9][0-9][0-9].jsonl"
-        base = self.events_dir if prefix else self.events_dir / f"r{run or self.run:04d}"
-        if not base.is_dir():
-            return []
-        return sorted(p for p in base.glob(pat) if p.name.startswith(prefix))
+    def _host_segments(self) -> list[Path]:
+        return sorted(self.events_dir.glob("host-[0-9][0-9][0-9][0-9][0-9][0-9].jsonl"))
 
     def _load(self) -> None:
-        runs = self.runs()
-        for run in runs:
-            state = State()
+        for run in self.runs():
+            self.run, self.state = run, State()
+            self.question_bodies = {}
             for ev in self.read(0, run=run):
                 try:
-                    apply(state, ev)
+                    apply(self.state, ev)
                 except FoldError as e:
                     raise StateSyncError(f"run {run} does not fold: {e}") from e
-                if ev["type"] == "settle":
-                    self.settled[ev["body"]["input_id"]] = ev["body"]
-                    self.settled_seq[ev["body"]["input_id"]] = ev["seq"]
-            self.seen_inputs |= state.seen_input_ids
-            self.run, self.state = run, state
+                self._index(ev)
+            self.seen_inputs |= self.state.seen_input_ids
 
     def begin_run(self) -> int:
         """Open the next run (a fresh guest with its own session_start at
@@ -217,6 +262,7 @@ class StateSync:
                 return self.run
             self.run += 1
             self.state = State()
+            self.question_bodies = {}
             return self.run
 
     def read(self, after_seq: int = 0, *, run: int | None = None) -> list[dict]:
@@ -233,26 +279,8 @@ class StateSync:
                 run, through = self.run, self.state.last_seq
             if through <= after_seq:
                 return []
-        out: list[dict] = []
-        start_segment = after_seq // self.segment_events + 1
-        for path in self._segments(run=run):
-            if int(path.stem) < start_segment:
-                continue
-            with path.open("r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    ev = json.loads(line)
-                    seq = ev.get("seq", 0)
-                    if seq > after_seq:
-                        out.append(ev)
-                    if through is not None and seq >= through:
-                        break
-            if through is not None and out and out[-1].get("seq", 0) >= through:
-                break
-        out.sort(key=lambda e: e["seq"])
-        return out
+        return _read_run(self.events_dir / f"r{run:04d}", after_seq, self.segment_events,
+                         through)
 
     @property
     def last_seq(self) -> int:
@@ -295,10 +323,13 @@ class StateSync:
             return self.state.last_seq
 
     def _index(self, event: dict) -> None:
-        """What must hold across runs: the input_ids seen, each task's settle."""
+        """What must hold across runs: the input_ids seen, each task's
+        settle; and the current run's question bodies."""
         etype, b = event["type"], event["body"]
         if etype == "input":
             self.seen_inputs.add(b["input_id"])
+        elif etype == "question":
+            self.question_bodies[b["question_id"]] = b
         elif etype == "settle":
             self.settled[b["input_id"]] = b
             self.settled_seq[b["input_id"]] = event["seq"]
@@ -310,7 +341,7 @@ class StateSync:
 
     def read_host(self) -> list[dict]:
         out: list[dict] = []
-        for path in self._segments("host-"):
+        for path in self._host_segments():
             with path.open("r", encoding="utf-8") as f:
                 out.extend(json.loads(l) for l in f if l.strip())
         return out

@@ -87,7 +87,9 @@ HARNESS_SANDBOX = os.environ.get("HARNESS_SANDBOX", "local")       # "local" | "
 HARNESS_PORTS = {"control": 5000, "bulk": 5001, "llm": 5010,      # fixed (PROTOCOL.md 1)
                  "gateway": 5011}                                 # M4: MCP gateway forwarder
 HARNESS_HELLO_TIMEOUT_S = int(os.environ.get("HARNESS_HELLO_TIMEOUT_S", 30))   # guest connect
-HARNESS_HEARTBEAT_S = int(os.environ.get("HARNESS_HEARTBEAT_S", 60))            # host → guest
+# host → guest heartbeat; also run_task's Temporal heartbeat (M5: the
+# workflow's heartbeat timeout is 120 s; an abort reaches the activity on one)
+HARNESS_HEARTBEAT_S = int(os.environ.get("HARNESS_HEARTBEAT_S", 60))
 HARNESS_KEEPALIVE_S = int(os.environ.get("HARNESS_KEEPALIVE_S", 15))            # SSE comment
 HARNESS_WALL_CLOCK_S = int(os.environ.get("HARNESS_WALL_CLOCK_S", 600))        # per task
 HARNESS_MAX_TURNS = int(os.environ.get("HARNESS_MAX_TURNS", 12))
@@ -116,9 +118,6 @@ TEMPORAL_ADDRESS = os.environ.get("TEMPORAL_ADDRESS", "")
 TEMPORAL_NAMESPACE = os.environ.get("TEMPORAL_NAMESPACE", "secondbrain")
 TEMPORAL_TASK_QUEUE = os.environ.get("TEMPORAL_TASK_QUEUE", "secondbrain-agent")   # flows.TASK_QUEUE
 TEMPORAL_CONNECT_TIMEOUT_S = float(os.environ.get("TEMPORAL_CONNECT_TIMEOUT_S", 10))
-# run_task heartbeats {last_seq} at start and every this many seconds (the
-# workflow's heartbeat timeout is 120 s); an abort reaches the activity on a heartbeat
-HARNESS_ACTIVITY_HEARTBEAT_S = float(os.environ.get("HARNESS_ACTIVITY_HEARTBEAT_S", 60))
 # abort sent to the guest -> how long to wait for its settle (run_task
 # cancellation, deliver of escalated/aborted)
 HARNESS_ABORT_WAIT_S = float(os.environ.get("HARNESS_ABORT_WAIT_S", 30))

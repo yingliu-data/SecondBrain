@@ -72,12 +72,15 @@ def test_answer_wait_s_is_a_hello_limit_in_the_config_hash():
         raise AssertionError("a negative answer_wait_s must be rejected")
 
 
-def test_parked_question_id_is_an_optional_body_key():
+def test_parked_question_id_and_wall_used_ms_are_optional_body_keys():
     ok = {"session_id": "s", "seq": 3, "ts": "t", "schema": 1, "type": "parked",
           "body": {"checkpoint_seq": 2, "reason": "question", "question_id": "q-x"}}
     assert validate_event(ok) == []
     bad = dict(ok, body={"checkpoint_seq": 2, "reason": "question", "question_id": 7})
     assert validate_event(bad)
+    assert validate_event(dict(ok, body={**ok["body"], "wall_used_ms": 0})) == []
+    assert validate_event(dict(ok, body={**ok["body"], "wall_used_ms": -1}))
+    assert validate_event(dict(ok, body={**ok["body"], "wall_used_ms": "1"}))
 
 
 # ---------------------------------------------------------------- coordinator
@@ -90,7 +93,8 @@ def test_deadline_parks_with_question_id_then_answer_after_resume_completes():
     i = types.index("question")
     assert types[i:] == ["question", "clock", "checkpoint", "parked"]
     assert scn.bodies("clock")[-1]["kind"] == "question_deadline"
-    assert parked["body"] == {"checkpoint_seq": parked["seq"] - 1, "reason": "question", "question_id": qid}
+    assert parked["body"] == {"checkpoint_seq": parked["seq"] - 1, "reason": "question", "question_id": qid,
+                              "wall_used_ms": parked["body"]["wall_used_ms"]}
     assert "guard_decision" not in types[i:] and scn.state.denied_questions == 0
     assert scn.state.open_questions[qid]["answered"] is False      # the question stays open
     assert scn.transport.parks == 1 and scn.coord.parked
@@ -160,6 +164,33 @@ def test_fresh_process_resume_then_answer_completes_and_wall_clock_skips_the_par
     assert state_hash(state) == state_hash(b.state)
 
 
+def test_parked_records_the_wall_clock_used_and_restore_reads_it():
+    """parked.wall_used_ms is the task's wall clock up to the park; a fresh
+    process restoring after a resume adds only the guest time since the first
+    guest clock event after that park."""
+    a = Scenario(cfg=m5_cfg(*DEVICE), script=[q_call(), tool_calls([("c_dev", "calendar", {})])])
+    a.task("ask")
+    a.start()
+    a.wait_event("question")
+    a.clock.advance(30_000)
+    assert a.clock.fire(QUESTION_S) == 1
+    used = a.wait_event("parked")["body"]["wall_used_ms"]
+    assert 30_000 <= used < 31_000
+    a.clock.advance(3_600_000)                                 # parked for an hour
+    a.inbound.put(("link", "up"))
+    answer(a, a.bodies("question")[0]["question_id"], "a")
+    a.wait_for(lambda: any(e["body"].get("side_ref") for e in a.of("op_state")))
+    a.clock.advance(10_000)                                    # live after the resume, then death
+    log = list(a.events)
+    b = Scenario(cfg=m5_cfg(*DEVICE, resume=True), script=[text("done")])
+    b.clock.ms = a.clock.ms
+    b.coord.restore(log)
+    b.start()
+    b.wait_event("settle")
+    delays = [h.delay_s for h in b.clock.handles if h.delay_s > QUESTION_S]
+    assert WALL_S - 41 < delays[0] <= WALL_S - 40             # 30 s before the park + 10 s after
+
+
 def test_two_questions_past_their_deadline_park_one_after_the_other():
     """A bash op of the same round holds the park, so both deadlines pass
     before it: the task parks on the first, and once that is answered, on
@@ -203,7 +234,7 @@ def test_abort_escalated_after_resume_settles_escalated():
     check(scn.events)
 
 
-def test_abort_aborted_after_fresh_process_resume_settles_failed():
+def test_abort_aborted_after_fresh_process_resume_settles_aborted():
     a = Scenario(cfg=m5_cfg(), script=[q_call()])
     a.task("ask")
     park_on_question(a)
@@ -214,21 +245,21 @@ def test_abort_aborted_after_fresh_process_resume_settles_failed():
     b.wait_for(lambda: b.events)
     b.control("abort", {"reason": "aborted"})
     result = b.run()
-    assert result["outcome"] == "failed" and result["answer"] == "aborted: aborted"
-    assert b.events[-1]["body"]["outcome"] == "failed"
+    assert result["outcome"] == "aborted" and result["answer"] == ""
+    assert result["reason"] == "abort" and result["detail"] == "aborted"
+    assert b.events[-1]["body"]["outcome"] == "aborted"
     check(log + b.events)
 
 
 def test_abort_while_running_maps_the_reason():
-    for reason, outcome, text_ in (("escalated", "escalated", ""),
-                                   ("user cancelled", "failed", "aborted: user cancelled")):
+    for reason, outcome in (("escalated", "escalated"), ("user cancelled", "aborted")):
         scn = Scenario(cfg=make_cfg(DEVICE), script=[tool_calls([("c_dev", "calendar", {})])])
         scn.task("x")
         scn.start()
         scn.wait_for(lambda: any(e["body"].get("side_ref") for e in scn.of("op_state")))
         scn.control("abort", {"reason": reason})
         result = scn.run()
-        assert (result["outcome"], result["answer"]) == (outcome, text_)
+        assert (result["outcome"], result["answer"], result["detail"]) == (outcome, "", reason)
         check(scn.events)
 
 

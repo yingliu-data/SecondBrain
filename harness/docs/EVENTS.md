@@ -43,13 +43,13 @@ strings. Times (`at`, `deadline`) are int milliseconds since the epoch.
 | `tool_result` | `call_id` str, `content` str (verbatim, truncated at `spill_threshold`), `spill_ref`? str or null, `rewrite`? str or null (after_tool output), `late`? bool | ops / hooks |
 | `wake` | `reason` in `input`/`tool_result`/`grace`/`idle`/`question`, `result_ids` list of str, `input_ids` list of str | coordinator |
 | `question` | `question_id` str, `call_id` str, `text` str, `options` list of str, `deadline` int ms `>= 0` | tools |
-| `parked` | `checkpoint_seq` int `>= 1`, `reason` str, `question_id`? str (M5: with `reason: "question"`, the open question the task waits on) | coordinator |
+| `parked` | `checkpoint_seq` int `>= 1`, `reason` str, `question_id`? str (M5: with `reason: "question"`, the open question the task waits on), `wall_used_ms`? int `>= 0` (M5: the task's wall clock used up to the park; absent when no task runs or no wall limit is set) | coordinator |
 | `compaction` | `range` `[from_seq, to_seq]` two ints with `1 <= from <= to`, `summary_turn_id` str, `tokens_before` int `>= 0`, `tokens_after` int `>= 0` | coordinator |
 | `memory` | `scope` in `user`/`session`, `op` in `write`/`remove`, `slug` str, `sha256` str, `derived_from` str (a call_id or a compaction `summary_turn_id`) | host |
 | `bulk` | `kind` in `spill`/`workspace`, `path` str, `sha256` str, `bytes` int `>= 0` | ops |
 | `checkpoint` | `through_seq` int `>= 1`, `state_hash` str, `prev_hash` str | coordinator |
 | `error` | `class` in `transient`/`overflow`/`budget`/`limit`/`protocol`/`fatal`, `message` str, `retry` bool (whether the harness will retry), `ref`? str | any |
-| `settle` | `input_id` str (the task's), `outcome` in `done`/`failed`/`timeout`/`escalated`, `answer` str, `usage` dict (totals), `manifest` dict or list (workspace manifest) | coordinator |
+| `settle` | `input_id` str (the task's), `outcome` in `done`/`failed`/`timeout`/`escalated`/`aborted`, `answer` str, `usage` dict (totals), `manifest` dict or list (workspace manifest) | coordinator |
 
 ## M3 notes (what the guest writes)
 
@@ -101,9 +101,14 @@ strings. Times (`at`, `deadline`) are int milliseconds since the epoch.
   `input{ui_response}`, terminal `op_state` + `tool_result` (or, for an mcp
   op, `op_state{running, attempt + 1}`), `wake` and the next turn.
 - `abort{reason}` → `settle{outcome: "escalated", answer: ""}` when the reason
-  is `escalated`, else `settle{outcome: "failed", answer: "aborted: <reason>"}`;
-  both carry `reason: "abort"`, `detail: <reason>`, after the open calls are
-  closed `op_state{killed}`.
+  is `escalated`, else `settle{outcome: "aborted", answer: ""}`; both carry
+  `reason: "abort"`, `detail: <reason>`, after the open calls are closed
+  `op_state{killed}`.
+- `parked.wall_used_ms` (every park during a task with a wall limit): the
+  wall clock the task had used, from the paused wall timer. A fresh process
+  restoring the log takes the last park's value plus the guest-clock time
+  since the first guest-side clock event after that park (the resume itself
+  writes nothing).
 - The fold does not check `parked.question_id` against `open_questions`.
 
 ## Log rules (`validate_log`)

@@ -14,7 +14,8 @@ reasoning and tool_call fragments are never shown, nor is a compaction turn's
 summary. A turn that sent text adds
 nothing at its `llm_response`; one that did not (a guest without deltas) goes
 out word-wise there; a task that sent no text at all gets the settle answer
-word-wise. When a turn's text follows an earlier turn of the task whose text
+word-wise. The settle adds no `done`: an input's stream ends only at the
+worker's finish_input (fatal_items on failure). When a turn's text follows an earlier turn of the task whose text
 did not end in whitespace ("Let me check." then a tool call, or "Done." then
 a follow-up), one `token "\\n"` separates them.
 
@@ -29,6 +30,8 @@ a follow-up), one `token "\\n"` separates them.
   project(event) -> [sse]     stateless convenience (a fresh Projector)
   sse(event, data) -> str     the one formatter
   tokens(text) -> [sse]       word-wise token events
+  fatal_items(message, **extra) -> [sse]
+                              a fatal `error{class, message, **extra}` + `done`
   KEEPALIVE                   ": keepalive\\n\\n", every 15 s while a task runs
 """
 from __future__ import annotations
@@ -51,6 +54,12 @@ def tokens(text: str) -> list[str]:
 
 
 DONE = "event: done\ndata: {}\n\n"
+
+
+def fatal_items(message: str, **extra) -> list[str]:
+    """The end of a failed input's stream (before its end-of-stream)."""
+    return [sse("error", {"class": "fatal", "message": message, **extra}), DONE]
+
 NEWLINE = sse("token", {"text": "\n"})
 
 
@@ -141,7 +150,6 @@ class Projector:
                 out.extend(tokens(body["answer"].strip()))
             self._live.clear()                  # turn_ids never recur across tasks
             self._compaction.clear()
-            out.append(DONE)
             return out
         return []
 

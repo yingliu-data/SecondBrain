@@ -95,6 +95,11 @@ async def test_ensure_schedules_create_update_trigger_delete(tenv, make_session)
 
         res = await ensure_schedules(client, doc, task_queue=tq)
         assert res == {sid0: "created", sid1: "created"}
+        # a restart with the same file writes nothing
+        before = (await client.get_schedule_handle(sid0).describe()).info.last_updated_at
+        res = await ensure_schedules(client, doc, task_queue=tq)
+        assert res == {sid0: "unchanged", sid1: "unchanged"}
+        assert (await client.get_schedule_handle(sid0).describe()).info.last_updated_at == before
 
         desc = await client.get_schedule_handle(sid0).describe()
         # the server stores a cron expression as a structured calendar

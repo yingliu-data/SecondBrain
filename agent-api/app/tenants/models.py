@@ -45,11 +45,13 @@ class Tenant(BaseModel):
     max_tokens: int | None = None          # None -> LLM default
     engine: str | None = None              # None -> config.AGENT_ENGINE; "legacy" | "harness"
     is_default: bool = False
-    # M5 (Temporal session workflow, flows.SessionConfig.from_tenant): None
-    # keeps the flows default; `schedules` = [{cron, prompt, session, tz?}]
+    # M5 (Temporal session workflow): flows.SESSION_CONFIG_KEYS, read by
+    # SessionConfig.from_tenant (None keeps the flows default);
+    # `schedules` = [{cron, prompt, session, tz?}]
     wall_clock_s: int | None = None
     answer_wait_s: int | None = None       # parked question wait (phone 86400)
     max_tasks_per_run: int | None = None
+    max_history_events: int | None = None  # history length before continue-as-new
     schedules: list[dict] = []
 
     @field_validator("name")
@@ -87,9 +89,9 @@ class Tenant(BaseModel):
         schedules): no key, no prompt, unset knobs left out; `engine` is
         the effective one (AGENT_ENGINE when unset: schedules skip legacy)."""
         from app.config import AGENT_ENGINE
+        from flows.activities import SESSION_CONFIG_KEYS
         entry = self.model_dump(exclude_none=True,
-                                include={"name", "user", "wall_clock_s", "answer_wait_s",
-                                         "max_tasks_per_run", "schedules"})
+                                include={"name", "user", "schedules", *SESSION_CONFIG_KEYS})
         entry["engine"] = self.engine or AGENT_ENGINE
         return entry
 

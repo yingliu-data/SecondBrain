@@ -105,7 +105,7 @@ class Harness:
         self.registry = FakeRegistry()
         chat.set_dependencies(self.registry, None)
         self.acts = HostActivities(self.workers, self.store, self.tenants, self.registry,
-                                   heartbeat_s=0.2, abort_wait_s=20)
+                                   abort_wait_s=20)
         app = FastAPI()
         app.include_router(chat.router)
         app.include_router(sessions.router)
@@ -225,7 +225,7 @@ async def test_chat_task_completes_through_the_workflow(h):
     assert st.tasks_run == 1 and st.seen == 1
     [ticket] = h.tickets()
     seq = w.sync.settled_seq["in_t1"]
-    assert ticket == {"ticket_id": ticket_id_for(h.ref, "in_t1", seq), "input_id": "in_t1",
+    assert ticket == {"ticket_id": ticket_id_for(h.ref, "in_t1"), "input_id": "in_t1",
                       "outcome": "done", "answer": "Hello through Temporal",
                       "question_id": None, "manifest": ticket["manifest"],
                       "usage": ticket["usage"], "settled_seq": seq}
@@ -351,7 +351,7 @@ async def test_abort_signal_aborts_the_running_task(h):
     assert any(e == "error" and d["outcome"] == "aborted" for e, d in events)
     await h.wait_state("idle")
     settle = h.worker.sync.settled["in_ab"]
-    assert settle["outcome"] == "failed" and settle["answer"] == "aborted: aborted"
+    assert settle["outcome"] == "aborted" and settle["answer"] == ""
     [ticket] = h.tickets()
     assert ticket["outcome"] == "aborted"
     assert len(h.upstream.requests) == 1
@@ -380,7 +380,8 @@ async def test_answer_without_a_parked_question_streams_an_error(h):
     await h.start()
     body = await h.chat(message="x", answer_to="question_nope", input_id="in_n1")
     events = sse_events(body)
-    assert ("error", {"class": "fatal", "message": "no question is waiting"}) in events
+    assert ("error", {"class": "fatal",
+                      "message": "No question is waiting for this answer."}) in events
     assert events[-1] == ("done", {})
 
 
@@ -419,6 +420,15 @@ async def test_tenant_workflow_entry_and_doc(tmp_path):
     assert reg.get_by_name("b").workflow_entry()["engine"] == "legacy"
     cfg = SessionConfig.from_tenant(entry)
     assert (cfg.answer_wait_s, cfg.wall_clock_s) == (60, 300)
+    # every knob flows reads is a Tenant field that reaches the entry
+    from flows.activities import SESSION_CONFIG_KEYS
+    from app.tenants import Tenant
+    knobs = dict(zip(SESSION_CONFIG_KEYS, (301, 61, 7, 900)))
+    t = Tenant(name="k", api_key="k", **knobs)
+    assert {k: t.workflow_entry()[k] for k in SESSION_CONFIG_KEYS} == knobs
+    cfg = SessionConfig.from_tenant(t.workflow_entry())
+    assert (cfg.wall_clock_s, cfg.answer_wait_s, cfg.max_tasks_per_run,
+            cfg.max_history_events) == (301, 61, 7, 900)
     tdoc = reg.tenants_doc()
     assert all("api_key" not in t for t in tdoc["tenants"])
     [e] = entries_from_tenants(tdoc)

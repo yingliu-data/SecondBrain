@@ -217,8 +217,10 @@ async def test_no_guest_connection_is_a_clean_failure(session):
 async def test_workers_registry_and_prompt_stripping(session):
     reg = Workers(sandbox_factory=lambda: FakeSandbox([{"text": "x"}]))
     t = FakeTenant()
-    a = reg.get_or_create(session, t, FakeRegistry(), device_calls=DeviceCalls(), **worker_kwargs())
-    assert reg.get_or_create(session, t, FakeRegistry()) is a
+    a = reg.get_or_create(t, "s1", FakeRegistry(), lambda: session, device_calls=DeviceCalls(),
+                          **worker_kwargs())
+    # found by key: the session directory is not opened again
+    assert reg.get_or_create(t, "s1", FakeRegistry(), lambda: 1 / 0) is a
     await reg.shutdown()
     assert a.closed and reg.get("u/t_s1") is None
     assert strip_current_time("a\n- Current time: {current_time}\nb") == "a\nb"

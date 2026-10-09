@@ -4,6 +4,9 @@
                                    flows.worker.build_worker on this loop with
                                    the real activities, ensure_schedules; a
                                    failed connect logs and leaves the direct path
+  start_in_background(...)         start() as a task: startup never waits for
+                                   Temporal; /chat takes the direct path until
+                                   `client` is set (the worker runs)
   stop()                           shut the worker down
   client                           the connected Client, or None (direct path)
   status(ref)                      the session workflow's `status` query, or None
@@ -32,6 +35,7 @@ client: Client | None = None
 task_queue: str = TEMPORAL_TASK_QUEUE
 _worker = None
 _worker_task: asyncio.Task | None = None
+_start_task: asyncio.Task | None = None
 
 
 def enabled() -> bool:
@@ -69,6 +73,15 @@ async def start(activities: list, tenants_doc: dict | None = None, *,
     return True
 
 
+def start_in_background(activities: list, tenants_doc: dict | None = None,
+                        **kwargs) -> asyncio.Task:
+    """start() off the startup path (connect, worker, ensure_schedules)."""
+    global _start_task
+    _start_task = asyncio.get_running_loop().create_task(
+        start(activities, tenants_doc, **kwargs), name="temporal-start")
+    return _start_task
+
+
 def _worker_exited(t: asyncio.Task) -> None:
     """A worker that dies on its own (namespace missing, poll failure)
     would leave /chat signalling workflows no one runs: back to the direct
@@ -82,7 +95,10 @@ def _worker_exited(t: asyncio.Task) -> None:
 
 
 async def stop() -> None:
-    global client, _worker, _worker_task
+    global client, _worker, _worker_task, _start_task
+    if _start_task is not None and not _start_task.done():
+        _start_task.cancel()
+    _start_task = None
     w, t = _worker, _worker_task
     client, _worker, _worker_task = None, None, None
     if w is not None:

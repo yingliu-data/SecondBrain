@@ -52,7 +52,7 @@ Types: `hello`, `task`, `follow_up`, `steer`, `ui_response`, `side_result`,
 | `ui_response` | `input_id`, `question_id`, `answer` |
 | `side_result` | `call_id`, `side` (`host`/`device`/`mcp`), `content`, `ok`; optional `memory` `{scope, op, slug, sha256}`: the memory the call changed (`remember`/`forget`), which the guest records as a `memory` event after the ok `tool_result` (docs/GUEST.md) |
 | `park` | `reason` |
-| `abort` | `reason` — M5: `escalated` → `settle{escalated}`; any other → `settle{failed, answer: "aborted: <reason>"}` |
+| `abort` | `reason` — M5: `escalated` → `settle{escalated}`; any other → `settle{aborted, answer: ""}`; `detail` carries the reason |
 | `heartbeat` | `at` — every 60 s → `clock{host_heartbeat}` |
 
 ### Ack (either direction)

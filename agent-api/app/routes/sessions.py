@@ -1,12 +1,14 @@
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, HTTPException, Depends
+from temporalio.service import RPCError, RPCStatusCode
 from app.auth.middleware import verify
 from flows.activities import SessionRef
 from flows.client import signal_abort
 from app.host import temporal
-from app.host.state_sync import StateSync
+from app.host.state_sync import read_current_run
 from app.session.dir_store import DirStore
+from app.session.ids import session_key
 from app.tenants import Tenant
 
 router = APIRouter(prefix="/api/v1/sessions")
@@ -107,22 +109,16 @@ async def recent_traces(since_minutes: int = 10, limit: int = 200,
 @router.get("/{session_id}/traces")
 async def session_traces(session_id: str, since_minutes: int | None = None,
                          limit: int = 200, tenant: Tenant = Depends(verify)):
-    if not _is_dir_store():
-        raise HTTPException(501, "Traces require SESSION_BACKEND=dir")
-    try:
-        session = _sessions.get(tenant.user, tenant.name, session_id)
-    except ValueError:
-        raise HTTPException(400, "Invalid session id")
-    if session is None:
-        raise HTTPException(404, f"Session '{session_id}' not found")
+    session = _session_or_404(tenant, session_id, "Traces require SESSION_BACKEND=dir")
     return {"traces": session.read_trace(since=_since(since_minutes), limit=limit)}
 
 
 # ── M5: the session workflow (harness/docs/M5-CONTRACTS.md §3) ──
 
-def _session_or_404(tenant: Tenant, session_id: str):
+def _session_or_404(tenant: Tenant, session_id: str,
+                    not_dir: str = "Requires SESSION_BACKEND=dir"):
     if not _is_dir_store():
-        raise HTTPException(501, "Requires SESSION_BACKEND=dir")
+        raise HTTPException(501, not_dir)
     try:
         session = _sessions.get(tenant.user, tenant.name, session_id)
     except ValueError:
@@ -138,7 +134,7 @@ def _ref(tenant: Tenant, session_id: str) -> SessionRef:
 
 def _live_worker(tenant: Tenant, session_id: str):
     from app.routes import chat
-    return chat.workers.get(f"{tenant.user}/{tenant.name}_{session_id}")
+    return chat.workers.get(session_key(tenant.user, tenant.name, session_id))
 
 
 @router.get("/{session_id}")
@@ -155,21 +151,27 @@ async def abort_session(session_id: str, tenant: Tenant = Depends(verify)):
     Without Temporal: abort{aborted} to the live worker's guest."""
     _session_or_404(tenant, session_id)
     if temporal.enabled():
-        if await temporal.status(_ref(tenant, session_id)) is None:
-            raise HTTPException(404, "No workflow for this session")
-        await signal_abort(temporal.client, _ref(tenant, session_id), "aborted")
+        try:
+            await signal_abort(temporal.client, _ref(tenant, session_id), "aborted")
+        except RPCError as e:
+            if e.status == RPCStatusCode.NOT_FOUND:
+                raise HTTPException(404, "No workflow for this session")
+            raise
         return {"status": "ok", "signal": "abort"}
     w = _live_worker(tenant, session_id)
-    if w is None or w.current_input_id is None or not w.abort("aborted"):
+    if w is None or w.current_input_id is None or w.abort("aborted") == "no_guest":
         raise HTTPException(409, "No running task")
     return {"status": "ok", "abort": "sent"}
 
 
 @router.get("/{session_id}/events")
-async def session_events(session_id: str, after_seq: int = 0, tenant: Tenant = Depends(verify)):
+def session_events(session_id: str, after_seq: int = 0, tenant: Tenant = Depends(verify)):
     """The session's guest events (current run) with seq > after_seq, for a
-    client catching up after a disconnect."""
+    client catching up after a disconnect. A plain def: FastAPI runs the
+    file reads in its threadpool, off the event loop."""
     session = _session_or_404(tenant, session_id)
     w = _live_worker(tenant, session_id)
-    sync = w.sync if w is not None else StateSync(session)
-    return sync.read(max(0, after_seq))
+    after_seq = max(0, after_seq)
+    if w is not None:
+        return w.sync.read(after_seq)       # bounded by the acked seq, thread-safe
+    return read_current_run(session.root / "events", after_seq)

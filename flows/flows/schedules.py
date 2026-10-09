@@ -12,8 +12,8 @@ Each tenant may carry::
 on ``engine: legacy`` (Temporal drives only harness sessions), is logged and
 skipped, so one bad line never stops agent-api's startup.
 
-``ensure_schedules`` creates or updates one Schedule per entry, id
-``{tenant}/{session}/{index}``.  The action starts ``ScheduleTickWorkflow``
+``ensure_schedules`` creates or (when changed) updates one Schedule per
+entry, id ``{tenant}/{session}/{index}``.  The action starts ``ScheduleTickWorkflow``
 (workflow id ``{schedule-id}-{fire-time}``, Temporal appends the fire time),
 which runs the ``signal_session`` activity below: a signal-with-start of the
 session workflow ``{user}/{tenant}/{session}`` with a ``task`` of kind
@@ -43,6 +43,7 @@ from temporalio.client import (
     SchedulePolicy,
     ScheduleSpec,
     ScheduleUpdate,
+    ScheduleUpdateInput,
 )
 
 from flows import TASK_QUEUE
@@ -128,6 +129,10 @@ def _schedule_for(entry: ScheduleEntry, task_queue: str) -> Schedule:
             id=entry.schedule_id,
             task_queue=task_queue,
             execution_timeout=timedelta(seconds=entry.config.tick_timeout_s),
+            # The server stores the cron compiled to a calendar, so the spec
+            # read back never equals ours: the action carries what it was
+            # built from, and ``_same`` compares that instead.
+            memo={"cron": entry.cron, "tz": entry.tz},
         ),
         spec=ScheduleSpec(cron_expressions=[entry.cron], time_zone_name=entry.tz),
         policy=SchedulePolicy(
@@ -136,6 +141,13 @@ def _schedule_for(entry: ScheduleEntry, task_queue: str) -> Schedule:
             pause_on_failure=False,
         ),
     )
+
+
+async def _same(client: Client, current: Schedule, new: Schedule) -> bool:
+    """``current`` (as described by the server) already is ``new``: same action
+    (payloads, timeouts and the cron/tz memo) and same policies."""
+    return (current.policy._to_proto() == new.policy._to_proto()
+            and await current.action._to_proto(client) == await new.action._to_proto(client))
 
 
 def _is_ours(sid: str, tenants: Collection[str]) -> bool:
@@ -158,7 +170,11 @@ async def ensure_schedules(
     ``tenants`` scopes the stale deletion (default: every tenant in the doc,
     or every tenant that has an entry).
 
-    Returns ``{schedule_id: "created" | "updated" | "deleted"}``.
+    An existing schedule is rewritten only when its action or policies
+    differ (``_same``), so a restart does not touch unchanged ones (nor
+    resume one paused by hand).
+
+    Returns ``{schedule_id: "created" | "updated" | "unchanged" | "deleted"}``.
     """
     if isinstance(entries, dict):
         tenants = tenants or {t["name"] for t in entries.get("tenants", []) if t.get("name")}
@@ -174,8 +190,17 @@ async def ensure_schedules(
                 return sid, "created"
             except ScheduleAlreadyRunningError:
                 pass  # created since the listing (visibility lag)
-        await client.get_schedule_handle(sid).update(lambda _inp: ScheduleUpdate(schedule=schedule))
-        return sid, "updated"
+        changed = False
+
+        async def _update(inp: ScheduleUpdateInput) -> ScheduleUpdate | None:
+            nonlocal changed
+            if await _same(client, inp.description.schedule, schedule):
+                return None  # the SDK skips the write
+            changed = True
+            return ScheduleUpdate(schedule=schedule)
+
+        await client.get_schedule_handle(sid).update(_update)
+        return sid, "updated" if changed else "unchanged"
 
     async def _delete(sid: str) -> tuple[str, str]:
         await client.get_schedule_handle(sid).delete()

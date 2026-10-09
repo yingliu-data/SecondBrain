@@ -256,3 +256,39 @@ def test_compaction_summary_survives_reload(session):
     path = session.memory / "compaction-8.md"
     assert path.exists() and "Goal: greet. Progress: said hi." in path.read_text()
     assert "up to seq 6" in path.read_text()
+
+
+def test_dirstore_delete_makes_the_host_log_recount(tmp_path):
+    """HostLog counts hseq from disk once; DirStore.delete invalidates it, so
+    a session re-created under the same id starts again at hseq 1."""
+    from app.session.dir_store import DirStore
+    store = DirStore(tmp_path / "sessions")
+    s = store.get_or_create("u", "t", "s1")
+    sync = StateSync(s)
+    assert [sync.host_event("vm", {"op": "boot"})["hseq"] for _ in range(2)] == [1, 2]
+    assert store.delete("u", "t", "s1")
+    s2 = store.get_or_create("u", "t", "s1")
+    assert StateSync(s2).host_event("vm", {"op": "boot"})["hseq"] == 1
+    assert sync.host_event("vm", {"op": "boot"})["hseq"] == 2      # the same writer
+
+
+def test_ticket_id_is_per_input_not_per_seq():
+    from flows.activities import SessionRef
+    from app.host.activities import ticket_id_for
+    ref = SessionRef(user="u", tenant="t", session_id="s1")
+    a, b = ticket_id_for(ref, "in_a"), ticket_id_for(ref, "in_b")
+    assert a != b and a == ticket_id_for(ref, "in_a")
+    assert a.startswith("ticket_") and len(a) == len("ticket_") + 24
+    assert ticket_id_for(SessionRef(user="u", tenant="t", session_id="s2"), "in_a") != a
+
+
+def test_read_current_run_without_loading_the_session(session):
+    """GET /events with no live worker: the latest run only, no fold."""
+    from app.host.state_sync import read_current_run
+    sync = StateSync(session)
+    sync.accept(start())
+    sync.begin_run()
+    sync.accept(start())
+    assert sync.run == 2 and read_current_run(sync.events_dir, 0) == sync.read(0) == [start()]
+    assert read_current_run(sync.events_dir, 1) == []
+    assert read_current_run(session.root / "nothing", 0) == []

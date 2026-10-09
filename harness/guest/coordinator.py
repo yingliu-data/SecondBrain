@@ -164,9 +164,12 @@ M5 (docs/M5-CONTRACTS.md section 4, docs/GUEST.md "M5"):
     restore of a log ending with that parked) a ui_response is handled as
     always; a second question already past its deadline parks the task again
     (_park_next_waiting). answer_wait_s == 0: the deny path above.
-  - restore: the wall clock used by the task excludes parked stretches.
+  - park: parked.wall_used_ms = the task's wall clock used so far (from the
+    paused wall timer). restore: the wall clock used = the last park's
+    wall_used_ms + the guest-clock time since the first guest-side clock
+    event after it (or after the task's start, without a park).
   - abort{reason}: "escalated" -> settle{escalated}; any other reason ->
-    settle{failed, answer: "aborted: <reason>"} (settle.reason "abort").
+    settle{aborted}; answer "", settle.reason "abort", detail the reason.
 """
 from __future__ import annotations
 
@@ -198,6 +201,7 @@ CORRECTION_BOUNDS = (0.1, 10.0)   # a usage/estimate ratio outside this is a bro
 PARK_ACK_WAIT_S = 60.0            # how long a park waits for the host's ack of `parked`
 LOST_CONTENT = "error: operation lost (VM restarted)"
 PAUSED_ON_PARK = ("wall_clock", "question_deadline", "op_timeout", "idle_timer")
+HOST_CLOCK_KINDS = ("host_hello", "host_heartbeat")   # clock events in host time, not the guest's
 PARK_QUESTION = "question"        # M5: parked.reason of a park on an unanswered question
 ESCALATED = "escalated"           # M5: the abort reason that settles escalated
 
@@ -351,9 +355,8 @@ class Coordinator:
         self.workspace = workspace
         self.bulk = bulk
         self._paused: dict[str, tuple] = {}           # token -> (kind, remaining s) while parked
-        self._park_reason: str | None = None          # a park waiting for its moment
-        self._park_question: str | None = None        # M5: the question that park waits on
-        self._park_prior: str | None = None           # M5: a host park reason a question park took over
+        self._park_reason: str | None = None          # the host's park waiting for its moment
+        self._question_park_pending = False           # M5: a park on the oldest of _waiting is due
         self._waiting: set[str] = set()               # M5: questions past their deadline, parked on
         self.parked = False                           # parked: idle until the link comes back
         self._session_start: dict | None = None       # the event (head of the checkpoint chain)
@@ -591,10 +594,9 @@ class Coordinator:
             return
         self.emit("input", {**base, "dedupe": "new"})
         self._cancel(f"question:{qid}")
-        self._waiting.discard(qid)
-        if self._park_question == qid and not self.parked:
-            self._drop_question_park()       # answered before its park happened
-        pending = self._questions.pop(qid, None)
+        pending = self._forget_question(qid)
+        if not self._waiting:
+            self._question_park_pending = False   # answered before its park happened
         if pending is None:
             return
         call_id = pending["call_id"]
@@ -611,20 +613,28 @@ class Coordinator:
             self._finish_call(call_id, "done", answer)
         self._park_next_waiting()
 
-    def _drop_question_park(self) -> None:
-        """Forget a question park that has not happened yet (a host park it
-        took over stays pending)."""
-        if self._park_question is not None:
-            self._park_reason, self._park_prior = self._park_prior, None
-            self._park_question = None
+    def _forget_question(self, qid) -> dict | None:
+        """Drop a question from the loop's bookkeeping (answered or denied)."""
+        self._waiting.discard(qid)
+        return self._questions.pop(qid, None)
+
+    def _oldest_waiting(self) -> str:
+        return min(self._waiting, key=lambda q: self.state.open_questions[q]["seq"])
+
+    def _request_question_park(self, message: str) -> None:
+        """M5: park on the oldest question past its deadline at the loop's
+        next _maybe_park (a pending host park is folded into it)."""
+        self._question_park_pending = True
+        self.log(message, level="info", question_id=self._oldest_waiting())
 
     def _park_next_waiting(self) -> None:
         """M5: another question went past its deadline while the task was
         parked on the one just answered: park on that one next."""
-        if self._waiting and self.settled is None and not self.parked and self._park_reason is None:
-            qid = min(self._waiting, key=lambda q: self.state.open_questions[q]["seq"])
-            self._park_reason, self._park_question = PARK_QUESTION, qid
-            self.log("another question is unanswered: parking for it", level="info", question_id=qid)
+        if self._waiting and self.settled is None and not self.parked and not self._question_park_pending:
+            self._request_question_park("another question is unanswered: parking for it")
+
+    def _park_wanted(self) -> bool:
+        return self._park_reason is not None or self._question_park_pending
 
     def _on_side_result(self, body: dict) -> None:
         call_id = body.get("call_id")
@@ -658,7 +668,7 @@ class Coordinator:
         self.log(f"link {status}", level="info")
         if self._link_up and self.parked:
             self._unpark()
-        if self._link_up and self._turn_deferred and self._park_reason is None:
+        if self._link_up and self._turn_deferred and not self._park_wanted():
             self._turn_deferred = False
             self._start_turn()
 
@@ -683,7 +693,7 @@ class Coordinator:
             self.log("idle", level="info")
         elif kind == "grace_park":
             running = self._guest_running()
-            if self._park_reason is None or not running:
+            if not self._park_wanted() or not running:
                 return
             self.emit("clock", {"kind": "grace_park", "at": self.clock.now_ms()})
             self.log("park grace expired: killing guest operations", level="warning",
@@ -910,7 +920,7 @@ class Coordinator:
         turn first when the estimate is over the window."""
         if self.settled is not None:
             return
-        if not self._link_up or self.parked or self._park_reason is not None:
+        if not self._link_up or self.parked or self._park_wanted():
             self._turn_deferred = True
             self.log("turn deferred: " + ("link down" if not self._link_up else "park"), level="debug")
             return
@@ -1290,17 +1300,14 @@ class Coordinator:
         self._waiting.add(qid)
         if self.parked:                      # cannot happen (timers pause): be safe
             return
-        if self._park_reason is not None and self._park_question is not None:
+        if self._question_park_pending:
             self.log("question deadline while parking on another question", level="info",
                      question_id=qid)
             return
-        self._park_prior = self._park_reason  # a host park still pending: taken over
-        self._park_reason = PARK_QUESTION
-        self._park_question = qid
-        self.log("question unanswered: parking for the answer", level="info", question_id=qid)
+        self._request_question_park("question unanswered: parking for the answer")
 
     def _deny_question(self, qid: str) -> None:
-        pending = self._questions.pop(qid, None)
+        pending = self._forget_question(qid)
         if pending is None:
             return
         self._cancel(f"question:{qid}")
@@ -1409,28 +1416,26 @@ class Coordinator:
 
     def _abort(self, reason: str) -> None:
         """abort{reason} (M5): "escalated" settles escalated (the workflow's
-        answer_wait_s ran out), anything else failed with answer "aborted:
-        <reason>". settle.reason stays "abort" (main exits on it)."""
+        answer_wait_s ran out), anything else settles aborted; the answer is
+        empty and detail carries the reason. settle.reason stays "abort"
+        (main exits on it)."""
         self.log(f"abort: {reason}", level="warning")
         self._abandon_open_work("killed")
-        if reason == ESCALATED:
-            outcome, answer = ESCALATED, ""
-        else:
-            outcome, answer = "failed", f"aborted: {reason}"
+        outcome = ESCALATED if reason == ESCALATED else "aborted"
         if self.task_input_id is None:
             # nothing to settle: no input was ever accepted (settle must name one)
             self._cancel_all()
-            self.settled = {"input_id": None, "outcome": outcome, "answer": answer,
+            self.settled = {"input_id": None, "outcome": outcome, "answer": "",
                             "usage": {}, "manifest": {}, "reason": "abort", "detail": reason}
             return
-        self._settle(outcome, answer, reason="abort", detail=reason)
+        self._settle(outcome, "", reason="abort", detail=reason)
 
     def _settle(self, outcome: str, answer: str, **extra) -> None:
         if self.settled is not None:
             return
         self._cancel_all()
         self._waiting.clear()
-        self._drop_question_park()
+        self._question_park_pending = False
         body = {
             "input_id": self.task_input_id or "",
             "outcome": outcome,
@@ -1464,7 +1469,7 @@ class Coordinator:
                 if c not in self._side_calls and c not in asked and c not in self._mcp_calls}
 
     def _request_park(self, reason: str) -> None:
-        if self.parked or self._park_reason is not None:
+        if self.parked or self._park_wanted():
             self.log("park requested while already parking; ignored", level="info", reason=reason)
             return
         self._park_reason = reason
@@ -1474,7 +1479,7 @@ class Coordinator:
     def _maybe_park(self) -> None:
         """Park when nothing guest-side is in flight; otherwise make sure the
         park grace runs while guest operations do."""
-        if self._park_reason is None or self.parked:
+        if not self._park_wanted() or self.parked:
             return
         if self._guest_running():
             if "park_grace" not in self._timers:
@@ -1485,9 +1490,9 @@ class Coordinator:
         self._park()
 
     def _park(self) -> None:
-        reason, self._park_reason = self._park_reason, None
-        question, self._park_question = self._park_question, None
-        self._park_prior = None
+        question = self._oldest_waiting() if self._question_park_pending and self._waiting else None
+        reason = PARK_QUESTION if question is not None else self._park_reason
+        self._park_reason, self._question_park_pending = None, False
         self._cancel("park_grace")
         self._detach_mcp()
         self._pause_timers()
@@ -1499,6 +1504,9 @@ class Coordinator:
         body = {"checkpoint_seq": cp["seq"], "reason": reason}
         if question is not None:
             body["question_id"] = question
+        wall, paused = _limit(self.limits, "wall_clock_s", None), self._paused.get("wall")
+        if wall and paused is not None:          # the task's wall clock used so far (restore reads it)
+            body["wall_used_ms"] = max(0, int(round((float(wall) - paused[1]) * 1000)))
         parked = self.emit("parked", body)
         self.parked = True
         self.log("parked", level="info", reason=reason, seq=parked["seq"], question_id=question)
@@ -1530,10 +1538,10 @@ class Coordinator:
             raise ValueError("the returned log does not start with this session's session_start")
         calls: dict[str, dict] = {}                 # call_id -> tool_call body
         last_guard_policy = None
-        # wall clock used by the task: guest-clock time between its first
-        # turn_clock and now, minus the parked stretches (a park ends at the
-        # first guest-side clock event after it; nothing is logged on resume)
-        active_ms, seg_start, last_at = 0, None, None
+        # wall clock used by the task: what the last park recorded, plus the
+        # guest-clock time since the first guest-side clock event after it (or
+        # after the task's start; nothing is logged on resume)
+        wall_used_ms, live_since = 0, None
         for ev in events:
             etype, body = ev["type"], ev["body"]
             if etype == "turn_start" and body["type"] == "regular":
@@ -1550,18 +1558,14 @@ class Coordinator:
                     self._task_ops_base = self.state.limits_consumed["ops"]
                     self._task_turns = 0
                     self._user_memory = []
-                    active_ms, seg_start = 0, None
+                    wall_used_ms, live_since = 0, None
             elif etype == "input" and body["dedupe"] == "new" and body["kind"] == "ui_response":
-                self._questions.pop(body.get("question_id"), None)
-                self._waiting.discard(body.get("question_id"))
-            elif etype == "clock" and not body["kind"].startswith("host_"):
-                last_at = body["at"]
-                if seg_start is None and self.task_input_id is not None:
-                    seg_start = body["at"]
+                self._forget_question(body.get("question_id"))
+            elif etype == "clock" and body["kind"] not in HOST_CLOCK_KINDS:
+                if live_since is None and self.task_input_id is not None:
+                    live_since = body["at"]
             elif etype == "parked":
-                if seg_start is not None and last_at is not None:
-                    active_ms += max(0, last_at - seg_start)
-                seg_start = None
+                wall_used_ms, live_since = body.get("wall_used_ms", wall_used_ms), None
                 if body.get("question_id") in self._questions:
                     self._waiting.add(body["question_id"])
             elif etype == "turn_start":
@@ -1576,8 +1580,7 @@ class Coordinator:
             elif etype == "guard_decision":
                 last_guard_policy = body["policy_id"]
                 if body["decision"] == "deny" and body["reason"] == UNANSWERED:
-                    self._questions.pop(body["ref"], None)
-                    self._waiting.discard(body["ref"])
+                    self._forget_question(body["ref"])
                 continue
             elif etype == "tool_call":
                 calls[body["call_id"]] = body
@@ -1636,8 +1639,8 @@ class Coordinator:
         max_tools = _limit(self.limits, "max_tools", None)
         self._final_turn = bool(self.task_input_id is not None and max_tools
                                 and self._ops_this_task() >= max_tools)
-        self._restored = {"after_park": events[-1]["type"] == "parked", "active_ms": active_ms,
-                          "segment_start": seg_start}
+        self._restored = {"after_park": events[-1]["type"] == "parked", "wall_used_ms": wall_used_ms,
+                          "live_since": live_since}
 
     def _register_preamble(self, body: dict) -> None:
         """The preamble text a regular turn used, rebuilt from the state just
@@ -1664,11 +1667,10 @@ class Coordinator:
             self._cancel("idle")
             wall = _limit(self.limits, "wall_clock_s", None)
             if wall:
-                used_ms = restored.get("active_ms") or 0
-                if restored.get("segment_start") is not None:
-                    used_ms += max(0, self.clock.now_ms() - restored["segment_start"])
-                used = used_ms / 1000.0
-                self._arm("wall_clock", "wall", max(1.0, float(wall) - used))
+                used_ms = restored["wall_used_ms"]
+                if restored["live_since"] is not None:
+                    used_ms += max(0, self.clock.now_ms() - restored["live_since"])
+                self._arm("wall_clock", "wall", max(1.0, float(wall) - used_ms / 1000.0))
         if restored.get("after_park"):
             # a fresh process after a park: nothing was lost; wait for the host again
             for call_id in self._side_calls:

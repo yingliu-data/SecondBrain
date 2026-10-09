@@ -35,8 +35,9 @@ async def test_final_text_matches_legacy_word_wise_tokens():
     out += p.project(ev(6, "settle", {"input_id": "in_1", "outcome": "done",
                                       "answer": "Hello there, wörld 1 2", "usage": {},
                                       "manifest": {}}))
-    assert out == legacy
-    assert out[-1] == DONE == "event: done\ndata: {}\n\n"
+    # the settle adds no done: the worker's finish_input ends the stream
+    assert out + [DONE] == legacy
+    assert legacy[-1] == DONE == "event: done\ndata: {}\n\n"
     assert out[0] == "event: token\ndata: " + json.dumps({"text": "Hello "}) + "\n\n"
 
 
@@ -45,10 +46,10 @@ def test_settle_streams_answer_when_no_text_was_streamed():
     p.project(ev(2, "input", {"input_id": "i", "kind": "task", "text": "x", "dedupe": "new"}))
     out = p.project(ev(3, "settle", {"input_id": "i", "outcome": "done", "answer": "a b",
                                      "usage": {}, "manifest": {}}))
-    assert out == tokens("a b") + [DONE]
-    # a stateless project() of a settle is just done
+    assert out == tokens("a b")
+    # a stateless project() of a settle is just its answer (finish_input ends the stream)
     assert project(ev(3, "settle", {"input_id": "i", "outcome": "done", "answer": "a b",
-                                    "usage": {}, "manifest": {}}))[-1] == DONE
+                                    "usage": {}, "manifest": {}})) == tokens("a b")
 
 
 def test_tool_call_device_and_avatar_result():
@@ -94,7 +95,7 @@ def test_question_error_and_live_delta():
                                             "message": {"role": "assistant",
                                                         "content": "Hello"}})) == []
     assert p.project(ev(7, "settle", {"input_id": "i", "outcome": "done", "answer": "Hello",
-                                      "usage": {}, "manifest": {}})) == [DONE]
+                                      "usage": {}, "manifest": {}})) == []
     assert KEEPALIVE == ": keepalive\n\n"
 
 
@@ -142,7 +143,7 @@ def test_streamed_content_deltas_are_tokens_verbatim_and_suppress_the_response()
                                      "dedupe": "new"}))
     out += p.project(response(5, "t1", "Hello, wörld"))
     out += p.project(settle(6, "Hello, wörld"))
-    assert token_text(out) == "Hello, wörld\n" and out[-1] == DONE
+    assert token_text(out) == "Hello, wörld\n" and DONE not in out
     assert sum(1 for s in out if s.startswith("event: token")) == 3
 
 
@@ -165,7 +166,7 @@ def test_streamed_tool_turn_preamble_ends_with_a_newline():
     out += p.project(response(9, "t2", "Done."))
     out += p.project(settle(10, "Done."))
     assert out == [sse("token", {"text": "Let me check."}), sse("token", {"text": "\n"}),
-                   sse("token", {"text": "Done."}), DONE]
+                   sse("token", {"text": "Done."})]
 
 
 def test_follow_up_turn_text_is_separated_by_a_newline():
@@ -184,7 +185,7 @@ def test_follow_up_turn_text_is_separated_by_a_newline():
     out += p.live(delta("t2", "content", "Next."))
     out += p.project(response(8, "t2", "Next."))
     out += p.project(settle(9, "Next."))
-    assert token_text(out) == "Done.\nNext." and out[-1] == DONE
+    assert token_text(out) == "Done.\nNext." and DONE not in out
     p.begin_task()
     out = p.live(delta("t3", "text", "One two"))
     out += p.live(delta("t4", "text", "Three"))
@@ -200,17 +201,17 @@ def test_non_streamed_turn_falls_back_to_word_wise_response():
     out += p.project(response(5, "t1", "Hello there world"))
     assert out[1:] == tokens("Hello there world")
     out += p.project(settle(6, "Hello there world"))
-    assert out[-1] == DONE and token_text(out) == "Hello there world "
+    assert DONE not in out and token_text(out) == "Hello there world "
 
 
 def test_begin_task_resets_between_tasks_and_tool_turns_add_no_text():
     p = Projector()
     p.begin_task()
     p.live(delta("t1", "content", "first"))
-    assert p.project(settle(3, "first")) == [DONE]
+    assert p.project(settle(3, "first")) == []
     # a second task on the same projector: nothing streamed yet
     p.begin_task()
-    assert p.project(settle(6, "second")) == tokens("second") + [DONE]
+    assert p.project(settle(6, "second")) == tokens("second")
     # a tool-call turn: no text at llm_response, deltas (if any) still stream
     p.begin_task()
     assert p.project(ev(8, "llm_response", {
@@ -219,7 +220,7 @@ def test_begin_task_resets_between_tasks_and_tool_turns_add_no_text():
             {"id": "c", "type": "function", "function": {"name": "bash", "arguments": "{}"}}]},
     })) == []
     assert p.live(delta("t4", "content", "done")) == [sse("token", {"text": "done"})]
-    assert p.project(settle(12, "done")) == [DONE]
+    assert p.project(settle(12, "done")) == []
 
 
 def test_compaction_summary_is_never_shown():
@@ -232,4 +233,4 @@ def test_compaction_summary_is_never_shown():
     assert p.project(comp) == []
     assert p.project(response(3, "tc", "goal: ... progress: ...")) == []
     out = p.project(settle(4, "Hello"))
-    assert out[:-1] == tokens("Hello")
+    assert out == tokens("Hello")

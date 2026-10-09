@@ -85,7 +85,7 @@ Details that matter:
   While parked: delivers `aborted` without resuming (deliver wakes the guest
   so it writes its own settle). While idle: ignored and logged.
 - **Continue-as-new while parked** carries the task, its question and the
-  **deadline** (`SessionState.in_flight_deadline`): a hop does not re-arm the
+  **deadline** (`SessionState.in_flight: InFlight(task, question_id, deadline)`): a hop does not re-arm the
   full `answer_wait_s`. The new run calls `park_vm` again (idempotent) and
   waits for what is left; an expired deadline escalates at once.
 - **Heartbeats.** The workflow never reads them. When `run_task` attempt 1
@@ -148,10 +148,12 @@ four host activities.
 `cron` and `prompt` are required; `session` defaults to `daily`, `tz` to
 `UTC`. agent-api calls `flows.schedules.ensure_schedules(client, tenants_doc)`
 at startup: one Temporal Schedule per entry, id `{tenant}/{session}/{index}`
-(index = position in the tenant's list), created or updated in place;
+(index = position in the tenant's list), created, or updated in place when
+its action or policies changed (an unchanged one is not rewritten);
 schedules of a listed tenant that are no longer in the file are deleted. A
 malformed entry, a tenant with a bad config, or a tenant on `engine: legacy`
-is logged and skipped. Returns `{schedule_id: created|updated|deleted}`.
+is logged and skipped. Returns
+`{schedule_id: created|updated|unchanged|deleted}`.
 
 A fire starts `ScheduleTickWorkflow` (id `{schedule_id}-{fire time}`, e.g.
 `default/daily/0-2026-10-10T06:00:00Z`) whose `signal_session` activity

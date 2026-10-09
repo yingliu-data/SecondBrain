@@ -232,9 +232,9 @@ async def test_park_mid_task_then_resume_delivers_ui_response_first(session):
     # a device result, then the answer: both held, the wake sends the answer first
     assert dc.resolve("call_d", "[]") is True
     await asyncio.sleep(0)
-    t2 = asyncio.ensure_future(w.act({"input_id": "in_ans", "text": "yes", "answer_to": "q_1"}))
-    r1, r2 = await asyncio.gather(t1, t2)
-    assert r1["outcome"] == "done" and r1["answer"] == "after park" and r2 == r1
+    assert w.answer("q_1", "yes", "in_ans") == "held"
+    r1 = await t1
+    assert r1["outcome"] == "done" and r1["answer"] == "after park"
     after = [c["type"] for c in guest.controls[n_controls:]]
     assert after[:2] == ["ui_response", "side_result"], after
     assert [c["type"] for c in guest.controls].count("hello") == 1   # no new hello
@@ -382,7 +382,7 @@ async def test_death_mid_call_resumes_from_base_with_log_return_and_lost_call(se
     assert not dc.is_open("call_d") and dc.resolve("call_d", "late") is False
     assert any(b.get("state") == "lost" for b in host(w, "side_call"))
     assert w.send_control("side_result", {"call_id": "call_d", "side": "device",
-                                          "content": "late", "ok": True}) == {}
+                                          "content": "late", "ok": True}) == "dropped"
     assert {"kind": "side_result", "call_id": "call_d", "side": "device",
             "dedupe": "late"} in host(w, "input")
     assert any(b.get("kind") == "resume" and b["reason"] == "guest_died"

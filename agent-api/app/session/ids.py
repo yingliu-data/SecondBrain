@@ -19,6 +19,12 @@ def make_ticket_id() -> str:
     return "tk_" + uuid.uuid4().hex[:8]
 
 
+def session_key(user: str, tenant: str, session_id: str) -> str:
+    """The in-process key of one session: the Worker registry, the chat
+    session queue, device-call ownership (`{user}/{tenant}_` prefix)."""
+    return f"{user}/{tenant}_{session_id}"
+
+
 def safe_key(user_id: str, session_id: str) -> str:
     """Compose a filesystem-safe directory name from user_id + session_id.
 

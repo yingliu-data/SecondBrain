@@ -333,17 +333,20 @@ Contracts: docs/M4-CONTRACTS.md (sections 3.1-3.3 and 4). What the guest does:
   kept open (`_waiting`), and a park with reason `question` is requested; it
   happens at the loop's next `_maybe_park` (never mid-round), through the M3
   path (guest ops get `park_grace_s`, mcp in-flight ops detach, timers pause,
-  `checkpoint` + `parked{..., question_id}`, ack wait, idle). A host `park`
-  still pending is taken over (and restored if the question is answered
-  before the park happens). An input-required mcp op stays suspended.
+  `checkpoint` + `parked{..., question_id}`, ack wait, idle). The intent is
+  one flag (`_question_park_pending`); `_park` parks on the oldest question in
+  `_waiting`. A host `park` still pending (`_park_reason`) is folded into it,
+  and parks as asked if the question is answered before the park happens. An
+  input-required mcp op stays suspended.
 - **Resume**: same process — timers resume, the parked-on question has none;
   fresh process — `restore` rebuilds `_waiting` from the last `parked`'s
-  `question_id` and does not re-arm that question's deadline. The restored
-  wall clock now counts only the time before the park (guest-side clock
-  events between the task's first `turn_clock` and each `parked`, plus the
-  stretch after the first guest clock event following one), not the parked
+  `question_id` and does not re-arm that question's deadline. Every park during a
+  task records `parked.wall_used_ms` (the wall limit minus what the paused
+  wall timer had left); the restored wall clock is the last park's value plus
+  the guest-clock time since the first guest-side clock event after it (not
+  `host_hello`/`host_heartbeat`, which carry host time), never the parked
   hours. A `ui_response` then works as before; if another question is still
   past its deadline the task parks again on it (`_park_next_waiting`).
 - **Abort** (`_abort`): reason `escalated` → `settle{escalated, answer: ""}`;
-  any other → `settle{failed, answer: "aborted: <reason>"}`; `settle.reason`
+  any other → `settle{aborted, answer: ""}`; `settle.reason`
   stays `abort` (main exits 0 on it), `detail` = the reason.

@@ -47,6 +47,9 @@ class DirStore:
         if not p.exists():
             return False
         shutil.rmtree(p)
+        # the process-wide host-log writers of that directory count from disk again
+        from app.host.state_sync import invalidate_host_logs
+        invalidate_host_logs(p)
         return True
 
     def list_for_tenant(self, user: str, tenant: str) -> list[dict[str, Any]]:

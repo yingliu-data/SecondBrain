@@ -82,7 +82,8 @@ def test_park_waits_for_the_provider_then_parks_at_the_turn_boundary():
     cp = scn.of("checkpoint")[0]
     assert cp["body"]["prev_hash"] == hash_value(scn.events[0])          # chain head
     assert cp["body"]["through_seq"] == cp["seq"] - 1
-    assert scn.of("parked")[0]["body"] == {"checkpoint_seq": cp["seq"], "reason": "idle"}
+    parked = scn.of("parked")[0]["body"]
+    assert parked == {"checkpoint_seq": cp["seq"], "reason": "idle", "wall_used_ms": parked["wall_used_ms"]}
     assert len(scn.provider.requests) == 1                               # turn 2 deferred
     scn.inbound.put(("link", "up"))
     scn.run()
