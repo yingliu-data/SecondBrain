@@ -657,6 +657,29 @@ def test_malformed_arguments_get_an_error_result_without_running():
     check_log(scn)
 
 
+def test_malformed_arguments_error_result_then_the_next_turn_repairs_the_call():
+    """PLAN 14 "malformed tool arguments → one repair turn, then an error
+    result", as the guest does it today (coordinator docstring, M1
+    deviations): the malformed call gets its error result at once, the next
+    turn shows the model that error, and a corrected call in that turn runs."""
+    scn = Scenario(script=[tool_calls([("bad", "bash", '{"command": ')]),
+                           tool_calls([("good", "bash", {"command": "echo fixed"})]),
+                           text("done")],
+                   ops_results={"bash": "fixed"})
+    scn.task("x")
+    scn.run()
+    results = {b["call_id"]: b["content"] for b in scn.bodies("tool_result")}
+    assert results["bad"].startswith("error: arguments are not valid JSON")
+    assert results["good"] == "fixed"
+    # the repair turn saw the error result of the malformed call
+    repair = scn.provider.requests[1].messages
+    assert repair[-1]["role"] == "tool" and repair[-1]["tool_call_id"] == "bad"
+    assert repair[-1]["content"].startswith("error: arguments are not valid JSON")
+    assert scn.ops.submitted == [("good", "bash", {"command": "echo fixed"})]
+    assert scn.bodies("settle")[0]["outcome"] == "done"
+    check_log(scn)
+
+
 def test_hook_deny_and_after_tool_rewrite():
     hooks = hooks_mod.Hooks()
     hooks.register_before(lambda state, call: ("deny", "policy") if call["name"] == "write" else ("allow", "ok"))

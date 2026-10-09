@@ -8,6 +8,9 @@ from protocol.events import make_event
 
 SID = "sess-log"
 
+# the buffer is tested with bare clock events, not session logs
+pytestmark = pytest.mark.no_log_verify("synthetic clock-only segments")
+
 
 def ev(seq, body=None):
     return make_event(SID, seq, f"2026-10-07T00:00:{seq % 60:02d}Z", "clock",
