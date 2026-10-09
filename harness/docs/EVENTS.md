@@ -43,7 +43,7 @@ strings. Times (`at`, `deadline`) are int milliseconds since the epoch.
 | `tool_result` | `call_id` str, `content` str (verbatim, truncated at `spill_threshold`), `spill_ref`? str or null, `rewrite`? str or null (after_tool output), `late`? bool | ops / hooks |
 | `wake` | `reason` in `input`/`tool_result`/`grace`/`idle`/`question`, `result_ids` list of str, `input_ids` list of str | coordinator |
 | `question` | `question_id` str, `call_id` str, `text` str, `options` list of str, `deadline` int ms `>= 0` | tools |
-| `parked` | `checkpoint_seq` int `>= 1`, `reason` str | coordinator |
+| `parked` | `checkpoint_seq` int `>= 1`, `reason` str, `question_id`? str (M5: with `reason: "question"`, the open question the task waits on) | coordinator |
 | `compaction` | `range` `[from_seq, to_seq]` two ints with `1 <= from <= to`, `summary_turn_id` str, `tokens_before` int `>= 0`, `tokens_after` int `>= 0` | coordinator |
 | `memory` | `scope` in `user`/`session`, `op` in `write`/`remove`, `slug` str, `sha256` str, `derived_from` str (a call_id or a compaction `summary_turn_id`) | host |
 | `bulk` | `kind` in `spill`/`workspace`, `path` str, `sha256` str, `bytes` int `>= 0` | ops |
@@ -88,6 +88,23 @@ strings. Times (`at`, `deadline`) are int milliseconds since the epoch.
   keeps `attempt` and `input_request` on `open_calls[call_id]` (the request
   is dropped on the next state), which is what a resumed guest rebuilds a
   suspended call from.
+
+## M5 notes (what the guest writes)
+
+- A question deadline with `hello.config.limits.answer_wait_s > 0`:
+  `clock{question_deadline}` (none for a zero timeout without UI), then the
+  M3 park: `checkpoint` + `parked{checkpoint_seq, reason: "question",
+  question_id}`. No `guard_decision{deny}`: the question stays open in the
+  fold (`open_questions[qid].answered == false`) and does not count toward
+  escalation; an input-required mcp op stays `input_required` (no cancel
+  re-send). After the resume a `ui_response` for it is the usual
+  `input{ui_response}`, terminal `op_state` + `tool_result` (or, for an mcp
+  op, `op_state{running, attempt + 1}`), `wake` and the next turn.
+- `abort{reason}` → `settle{outcome: "escalated", answer: ""}` when the reason
+  is `escalated`, else `settle{outcome: "failed", answer: "aborted: <reason>"}`;
+  both carry `reason: "abort"`, `detail: <reason>`, after the open calls are
+  closed `op_state{killed}`.
+- The fold does not check `parked.question_id` against `open_questions`.
 
 ## Log rules (`validate_log`)
 

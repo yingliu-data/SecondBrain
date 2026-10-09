@@ -22,7 +22,10 @@ M2 (docs/GUEST.md "M2 contracts"): `params.stream` (bool, default True; the
 coordinator reads it with `stream_enabled(cfg)`) and the limits
 `context_window_tokens` (32768) and `reserve_tokens` (4096: the compaction
 threshold is window - reserve). M3: `park_grace_s` (30): how long running
-guest operations may finish after a `park` before they are killed. The token budget is the host proxy's knob
+guest operations may finish after a `park` before they are killed. M5:
+`answer_wait_s` (int >= 0, default 0): > 0 means the host waits that long for
+an answer (the Temporal path), so a question deadline parks the task
+(`parked{reason: question, question_id}`) instead of denying it. The token budget is the host proxy's knob
 alone (it answers 402); it is not guest config, so an ops change to it does
 not change config_hash.
 
@@ -64,6 +67,7 @@ class Limits:
     context_window_tokens: int = 32768   # M2: the model's context length
     reserve_tokens: int = 4096           # M2: headroom kept for the response
     park_grace_s: float = 30.0           # M3: guest ops get this long after `park`, then killed
+    answer_wait_s: int = 0               # M5: > 0 = a question deadline parks the task (D12)
 
 
 @dataclass

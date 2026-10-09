@@ -321,3 +321,29 @@ Contracts: docs/M4-CONTRACTS.md (sections 3.1-3.3 and 4). What the guest does:
   `attempt` and `input_request`) waits for its answer and re-sends.
 - **Not done**: an mcp connection broken by a link loss without a park is an
   error result (no automatic re-attach).
+
+## M5 as built (questions park the task, escalation via abort)
+
+- **Limit**: `answer_wait_s` (int ≥ 0, default 0) joins `hello.config.limits`
+  (part of `config_hash`). The worker sends the tenant's value only on the
+  Temporal path; 0 keeps the M1–M4 behaviour (deny, three → escalated; an
+  input-required op is cancelled).
+- **Deadline with `answer_wait_s > 0`** (`Coordinator._question_expired`):
+  `clock{question_deadline}`, the deadline timer is dropped, the question is
+  kept open (`_waiting`), and a park with reason `question` is requested; it
+  happens at the loop's next `_maybe_park` (never mid-round), through the M3
+  path (guest ops get `park_grace_s`, mcp in-flight ops detach, timers pause,
+  `checkpoint` + `parked{..., question_id}`, ack wait, idle). A host `park`
+  still pending is taken over (and restored if the question is answered
+  before the park happens). An input-required mcp op stays suspended.
+- **Resume**: same process — timers resume, the parked-on question has none;
+  fresh process — `restore` rebuilds `_waiting` from the last `parked`'s
+  `question_id` and does not re-arm that question's deadline. The restored
+  wall clock now counts only the time before the park (guest-side clock
+  events between the task's first `turn_clock` and each `parked`, plus the
+  stretch after the first guest clock event following one), not the parked
+  hours. A `ui_response` then works as before; if another question is still
+  past its deadline the task parks again on it (`_park_next_waiting`).
+- **Abort** (`_abort`): reason `escalated` → `settle{escalated, answer: ""}`;
+  any other → `settle{failed, answer: "aborted: <reason>"}`; `settle.reason`
+  stays `abort` (main exits 0 on it), `detail` = the reason.

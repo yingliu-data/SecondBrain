@@ -124,6 +124,8 @@ OPTIONAL_BODY: dict[str, dict[str, tuple]] = {
                  "input_request": DICT},
     "tool_result": {"spill_ref": OPT_STR, "rewrite": OPT_STR, "late": BOOL},
     "error": {"ref": STR},
+    # M5: the question a `parked{reason: "question"}` waits on (D12)
+    "parked": {"question_id": STR},
 }
 
 ENUMS: dict[str, dict[str, frozenset]] = {

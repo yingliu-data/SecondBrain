@@ -52,7 +52,7 @@ Types: `hello`, `task`, `follow_up`, `steer`, `ui_response`, `side_result`,
 | `ui_response` | `input_id`, `question_id`, `answer` |
 | `side_result` | `call_id`, `side` (`host`/`device`/`mcp`), `content`, `ok`; optional `memory` `{scope, op, slug, sha256}`: the memory the call changed (`remember`/`forget`), which the guest records as a `memory` event after the ok `tool_result` (docs/GUEST.md) |
 | `park` | `reason` |
-| `abort` | `reason` |
+| `abort` | `reason` — M5: `escalated` → `settle{escalated}`; any other → `settle{failed, answer: "aborted: <reason>"}` |
 | `heartbeat` | `at` — every 60 s → `clock{host_heartbeat}` |
 
 ### Ack (either direction)
@@ -132,6 +132,19 @@ Types: `ready`, `delta`, `log`, `bulk_ref`. No `seq`, no `session_id`.
   yet in the log, with new cseqs after the hello). An `ack_seq` the host sends
   before the guest has fetched the log is ignored (logged). After the log
   return the guest's next event is the returned `last_seq + 1`.
+
+### As built in M5 (guest side)
+
+- `hello.config.limits.answer_wait_s` (int ≥ 0, default 0; in `config_hash`).
+  When > 0 a question deadline makes the guest park **itself**: no `park`
+  control is involved; the worker sees `parked{reason: "question",
+  question_id}`, must stop accepting :5000 as for any park, and snapshots.
+  The resume is the usual reconnect (or `hello{resume: true}` + the log return
+  for a fresh process); the worker then sends `ui_response{question_id}` or
+  `abort{reason}`. A parked-on question has no deadline timer after the
+  resume (the workflow's `answer_wait_s` timer owns the wait). If another
+  question of the same round passed its deadline before the park happened,
+  answering the first parks again on that one.
 
 ## 7. Gateway channel (:5011)
 
