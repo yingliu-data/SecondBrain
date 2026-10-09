@@ -9,7 +9,7 @@ from guest import context
 from guest.config import GuestConfig, Limits, Principal
 from protocol.allowlist import effective_tools
 from protocol.canonical import canonical_json, hash_value, sha256_hex
-from protocol.fold import State, fold
+from protocol.fold import PLACEHOLDER, State, fold
 from tests.logbuilder import Log
 
 SID = "sess-ctx"
@@ -216,7 +216,9 @@ def test_denied_call_gets_a_filler_tool_message():
                                 "content": context.MISSING_TOOL_MESSAGE}
 
 
-def test_open_call_is_not_filled():
+def test_open_call_shows_the_placeholder_the_fold_commits():
+    """A turn started with a call open (async mode) shows it as the fold's
+    PLACEHOLDER tool message, never the MISSING_TOOL_MESSAGE filler."""
     cfg = make_cfg()
     log = Log(SID, tools=cfg.tools)
     log.start()
@@ -226,7 +228,8 @@ def test_open_call_is_not_filled():
     log.call("t1", "call_1", "bash", "guest", {"cmd": "ls"})
     state = fold(log.events)
     req = context.build_request(state, cfg, 1)
-    assert [m["role"] for m in req.messages] == ["system", "user", "assistant"]
+    assert [m["role"] for m in req.messages] == ["system", "user", "assistant", "tool"]
+    assert req.messages[-1] == {"role": "tool", "tool_call_id": "call_1", "content": PLACEHOLDER}
 
 
 def test_committed_user_message_renders_with_its_registered_preamble():
@@ -365,3 +368,41 @@ def test_request_after_compaction_starts_with_the_summary_then_the_staged_items(
     req2 = context.build_request(fold(log.events), cfg, 1_790_000_900_000, preambles=preambles)
     assert req2.messages[: len(req.messages)] == req.messages
     assert req2.prefix_bytes().startswith(req.prefix_bytes()[:-1])
+
+
+def test_async_turn_commits_what_the_request_showed_and_a_late_result_is_a_user_message():
+    """build_request emits the placeholders the fold commits at turn_start, in
+    the fold's order (the call's position), so the next request's prefix is
+    the previous request verbatim; a result after its placeholder is the
+    late user message naming the call, after everything already shown."""
+    cfg = make_cfg()
+    preambles: dict = {}
+    log = Log(SID, tools=cfg.tools)
+    log.start()
+    log.input("in-1", "two lookups")
+    req1 = context.build_request(fold(log.events), cfg, 1_000, preambles=preambles)
+    log.turn("t1", preamble=req1.preamble_hash, request_hash=req1.request_hash)
+    log.response("t1", calls=[("c1", "bash", {"cmd": "a"}), ("c2", "read", {"path": "b"})])
+    log.call("t1", "c1", "bash", "guest", {"cmd": "a"})
+    log.call("t1", "c2", "read", "guest", {"path": "b"})
+    log.result("c2", "b body")                             # the second call lands first
+    req2 = context.build_request(fold(log.events), cfg, 2_000, preambles=preambles)
+    assert req2.messages[-2:] == [
+        {"role": "tool", "tool_call_id": "c1", "content": PLACEHOLDER},
+        {"role": "tool", "tool_call_id": "c2", "content": "b body"}]
+    log.turn("t2", preamble=req2.preamble_hash, request_hash=req2.request_hash)
+    state = fold(log.events)
+    assert state.placeholders == {"c1"}
+    assert [context._render_item(m, preambles) for m in state.committed_prefix] == req2.messages[1:]
+    log.response("t2", content="waiting")
+    log.result("c1", "a out", late=True)
+    log.input("in-2", "and?", kind="follow_up")
+    req3 = context.build_request(fold(log.events), cfg, 3_000, preambles=preambles)
+    assert req3.messages[: len(req2.messages)] == req2.messages
+    tail = req3.messages[len(req2.messages):]
+    assert tail[0] == {"role": "assistant", "content": "waiting"}
+    assert tail[1] == {"role": "user", "content": context.LATE_RESULT_HEADER.format(
+        call_id="c1", name="bash") + "\na out"}
+    assert tail[2]["role"] == "user" and tail[2]["content"].endswith("\n\nand?")
+    assert req3.preamble_input_id == "in-2"                  # the preamble skips the late message
+    assert not context.placeholder_items(fold(log.events))

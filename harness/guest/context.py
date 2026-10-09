@@ -69,6 +69,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from protocol.canonical import canonical_json, hash_value, sha256_hex
+from protocol.fold import PLACEHOLDER
 
 try:  # the sibling package; TOOL_DEFINITIONS may still be a stub ({}).
     from guest.tools import TOOL_DEFINITIONS
@@ -81,6 +82,16 @@ CHARS_PER_TOKEN = 4
 # sampling params never sent to the model as-is: `stream` is the transport
 # mode the coordinator passes to the provider (config.stream_enabled)
 NON_SAMPLING_PARAMS = ("stream",)
+# async mode (cfg.async_tools): the fixed system-block section, and the shape of
+# a result that arrives after the model saw its call's PLACEHOLDER
+ASYNC_TOOLS_NOTE = (
+    "## Tool calls\n"
+    "Tool calls run asynchronously. A call that is still running when you are "
+    f"woken shows the result {PLACEHOLDER}. Its real result arrives later as a message "
+    "that starts with \"[late tool result] call_id: <id>\" naming the same call. "
+    "While calls are pending, continue with work that does not depend on them, or "
+    "end your turn without tool calls to wait for them.")
+LATE_RESULT_HEADER = "[late tool result] call_id: {call_id}, tool: {name}"
 COMPACTION_INSTRUCTION = (
     "[compaction]\n"
     "The conversation above is being compacted. Write a summary that will replace "
@@ -146,6 +157,8 @@ def system_block(cfg) -> str:
         index = _render_block(block.get("memory_index"))
     base = base.replace(CURRENT_TIME_TOKEN, "").strip()
     sections = [base]
+    if getattr(cfg, "async_tools", False):
+        sections.append(ASYNC_TOOLS_NOTE)
     if profile:
         sections.append("## Profile\n" + profile)
     if index:
@@ -241,6 +254,34 @@ def _prefix_items(state) -> list:
     return list(state.committed)
 
 
+def _is_late(item: dict, state) -> bool:
+    """A tool item that is the result of a call whose placeholder was
+    committed: the fold stages it at its own seq, never at the call's."""
+    message = item["message"]
+    if message.get("role") != "tool":
+        return False
+    cid = message.get("tool_call_id")
+    call = (getattr(state, "open_calls", None) or {}).get(cid)
+    return (call is not None and cid in (getattr(state, "placeholders", None) or ())
+            and item["origin"] != call["seq"])
+
+
+def _late_message(message: dict, state) -> dict:
+    """A late result as a user message naming the call (a second tool message
+    for an id the model already saw answered by the placeholder is not
+    well-formed chat, and may sit after other turns or after a compaction)."""
+    cid = message.get("tool_call_id")
+    name = state.open_calls[cid]["name"]
+    header = LATE_RESULT_HEADER.format(call_id=cid, name=name)
+    return {"role": "user", "content": header + "\n" + (message.get("content") or "")}
+
+
+def _render(item: dict, state, preambles: dict) -> dict:
+    if _is_late(item, state):
+        return _late_message(item["message"], state)
+    return _render_item(item["message"], preambles)
+
+
 def _render_item(message: dict, preambles: dict) -> dict:
     role = message.get("role")
     if role == "user":
@@ -291,7 +332,7 @@ def _assemble(state, cfg, preambles: dict, tail: list, *, with_tools: bool, prea
     system = system_block(cfg)
     schemas = tool_schemas(cfg)
     known_calls = set(getattr(state, "open_calls", {}) or {})
-    prefix = [_render_item(it["message"], preambles) for it in _prefix_items(state)]
+    prefix = [_render(it, state, preambles) for it in _prefix_items(state)]
     present = {m.get("tool_call_id") for m in prefix + tail if m.get("role") == "tool"}
     prefix = _fill_missing_tool_messages(prefix, known_calls, present)
     tail = _fill_missing_tool_messages(tail, known_calls, present)
@@ -311,6 +352,29 @@ def _assemble(state, cfg, preambles: dict, tail: list, *, with_tools: bool, prea
         preamble=preamble,
         preamble_input_id=preamble_input_id,
     )
+
+
+def placeholder_items(state) -> list:
+    """The placeholders the fold will commit at the next turn_start
+    (protocol.fold._turn_start): one PLACEHOLDER tool message per call that
+    has no result yet and was not shown as a placeholder before, at the
+    call's position (origin = the tool_call's seq). The fold gives them the
+    turn_start's seq; any seq above every staged one sorts the same. Empty in
+    sync mode (a turn never starts with a call open)."""
+    after = getattr(state, "last_seq", 0) + 1
+    return [{"seq": after, "origin": call["seq"],
+             "message": {"role": "tool", "tool_call_id": cid, "content": PLACEHOLDER}}
+            for cid, call in (getattr(state, "open_calls", None) or {}).items()
+            if "result" not in call and cid not in state.placeholders]
+
+
+def _turn_items(state) -> list:
+    """What a turn started now commits: the staged suffix and the new
+    placeholders, in the fold's (origin, seq) order."""
+    extra = placeholder_items(state)
+    if not extra:
+        return list(state.staged_suffix)
+    return sorted([*state.staged_suffix, *extra], key=lambda it: (it["origin"], it["seq"]))
 
 
 def build_request(state, cfg, clock_at_ms: int, *, attachments=None, preambles=None,
@@ -333,7 +397,7 @@ def build_request(state, cfg, clock_at_ms: int, *, attachments=None, preambles=N
 
     # the staged suffix: the first user message gets this turn's preamble
     first_input = None
-    for it in state.staged_suffix:
+    for it in _turn_items(state):
         if it["message"].get("role") == "user":
             first_input = it["message"].get("input_id")
             break
@@ -343,14 +407,14 @@ def build_request(state, cfg, clock_at_ms: int, *, attachments=None, preambles=N
 
     suffix = []
     seen_user = False
-    for it in state.staged_suffix:
+    for it in _turn_items(state):
         msg = it["message"]
         if msg.get("role") == "user" and not seen_user:
             seen_user = True
             suffix.append({"role": "user",
                            "content": _with_preamble(preamble, msg.get("content") or "")})
         else:
-            suffix.append(_render_item(msg, preambles))
+            suffix.append(_render(it, state, preambles))
     return _assemble(state, cfg, preambles, suffix, with_tools=with_tools, preamble=preamble,
                      preamble_hash=p_hash, preamble_input_id=first_input if seen_user else None)
 

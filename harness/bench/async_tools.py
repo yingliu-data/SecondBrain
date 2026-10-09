@@ -13,7 +13,11 @@ ports, once with `async_tools: false` and once with `async_tools: true`
 
 The LLM on :5010 is either
   - --fake: tests/fakes/fake_llm.FakeLLM scripted from each task's `fake`
-    entry (one response with the parallel calls, then the answer), or
+    entry (`fake_script`): one response with the task's parallel calls plus
+    FAKE_SLOW_CALL (a bash call that outlasts the fake grace window, so the
+    `on` rows wake on a placeholder), then, per request, "waiting" while the
+    request still shows a [pending] call whose late result it does not
+    carry, else the answer; or
   - --llm-url/--model: a forwarding proxy that POSTs the guest's request
     to <llm-url>/v1/chat/completions (an OpenAI-compatible server: vLLM),
     non-streamed, the way the host's LLM proxy does.
@@ -50,6 +54,10 @@ ROOT = Path(__file__).resolve().parents[1]          # harness/
 DEFAULT_TASKS = ROOT / "bench" / "tasks.json"
 SID = "sess-bench"
 USER, TENANT = "bench-user", "bench"
+DEFAULT_GRACE_S = 2.0              # limits.grace_s for a real model
+FAKE_GRACE_S = 0.25                # --fake: short, and well below the slow call
+FAKE_SLOW_CALL = ["bash", {"command": "sleep 0.75; echo slow lookup done"}]
+FAKE_WAITING = "Waiting for the remaining lookups."
 SYSTEM_PROMPT = ("You are a careful assistant working in a project workspace. Use the tools "
                  "to look things up; when several lookups are independent, request them "
                  "together in one response. Answer briefly and include the exact values. "
@@ -87,14 +95,36 @@ def check(spec: dict, answer: str | None) -> tuple[bool, list[str]]:
 
 
 # ---------------------------------------------------------------- the LLM side
+def still_pending(messages: list) -> set:
+    """The call_ids a request shows as [pending] without their late result
+    (guest.context's late message names the call: "[late tool result]
+    call_id: <id>, ...")."""
+    from protocol.fold import PLACEHOLDER
+    pending = {m.get("tool_call_id") for m in messages
+               if m.get("role") == "tool" and m.get("content") == PLACEHOLDER}
+    for m in messages:
+        content = m.get("content") if m.get("role") == "user" else None
+        if isinstance(content, str) and content.startswith("[late tool result] call_id: "):
+            pending.discard(content.split("call_id: ", 1)[1].split(",", 1)[0])
+    return pending
+
+
 def fake_script(task: dict) -> list:
+    """The task's parallel calls (plus FAKE_SLOW_CALL), then per request:
+    FAKE_WAITING (no calls: the model ends its turn to wait) while a call is
+    still [pending], else the answer. Sync runs use two entries."""
     from tests.fakes.fake_llm import text, tool_calls
     calls = [(f"call_{task['id']}_{i}", name, args)
-             for i, (name, args) in enumerate(task["fake"]["calls"])]
+             for i, (name, args) in enumerate([*task["fake"]["calls"], FAKE_SLOW_CALL])]
     usage = {"prompt_tokens": 300, "completion_tokens": 20 * len(calls), "total_tokens": 300 + 20 * len(calls)}
-    return [tool_calls(calls, usage=usage),
-            text(task["fake"]["answer"], usage={"prompt_tokens": 400, "completion_tokens": 25,
-                                                "total_tokens": 425})]
+
+    def after(request: dict) -> dict:
+        if still_pending(request.get("messages") or []):
+            return text(FAKE_WAITING, usage={"prompt_tokens": 350, "completion_tokens": 8,
+                                             "total_tokens": 358})
+        return text(task["fake"]["answer"], usage={"prompt_tokens": 400, "completion_tokens": 25,
+                                                   "total_tokens": 425})
+    return [tool_calls(calls, usage=usage), *([after] * (len(calls) + 1))]
 
 
 class _UnixHTTPServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
@@ -185,9 +215,9 @@ def hello_body(model: str, async_tools: bool, limits: dict) -> dict:
     }
 
 
-def default_limits(wall_clock_s: int) -> dict:
+def default_limits(wall_clock_s: int, grace_s: float = DEFAULT_GRACE_S) -> dict:
     return {"wall_clock_s": wall_clock_s, "max_tools": 16, "max_turns": 8, "max_tokens": 1024,
-            "op_timeout_s": {"guest": 30, "device": 5, "host": 5}, "grace_s": 2.0,
+            "op_timeout_s": {"guest": 30, "device": 5, "host": 5}, "grace_s": grace_s,
             "idle_wake_s": 600}
 
 
@@ -221,6 +251,7 @@ def metrics(events: list, task: dict, wall_s: float, fake: bool = False) -> dict
         "max_parallel": max(per_turn.values(), default=0),
         "tool_errors": tool_errors,
         "placeholders": len(state.placeholders),
+        "late_results": state.counters.get("placeholder_fills", 0),
         "wall_s": round(wall_s, 3),
         "replay_errors": errors,
         "answer": settle.get("answer"),
@@ -228,7 +259,8 @@ def metrics(events: list, task: dict, wall_s: float, fake: bool = False) -> dict
 
 
 def run_one(task: dict, spec: dict, *, async_tools: bool, model: str, llm_url: str | None,
-            api_key: str | None, work: Path, wall_clock_s: int, keep: bool = False) -> dict:
+            api_key: str | None, work: Path, wall_clock_s: int, keep: bool = False,
+            grace_s: float | None = None) -> dict:
     """One task through a fresh guest; returns the metrics row."""
     from tests.fakes.fake_host import FakeHost
     from tests.fakes.fake_llm import FakeLLM
@@ -240,7 +272,9 @@ def run_one(task: dict, spec: dict, *, async_tools: bool, model: str, llm_url: s
     seed_workspace(workspace, spec["workspace"])
     llm = (FakeLLM(str(sock), fake_script(task)) if llm_url is None
            else ForwardingLLM(str(sock), llm_url, api_key))
-    host = FakeHost(str(sock), hello_body(model, async_tools, default_limits(wall_clock_s)))
+    if grace_s is None:
+        grace_s = FAKE_GRACE_S if llm_url is None else DEFAULT_GRACE_S
+    host = FakeHost(str(sock), hello_body(model, async_tools, default_limits(wall_clock_s, grace_s)))
     proc = None
     try:
         llm.start()
@@ -298,6 +332,7 @@ def totals(rows: list) -> dict:
             "completion_tokens": sum(r["completion_tokens"] for r in sel),
             "tool_calls": sum(r["tool_calls"] for r in sel),
             "placeholders": sum(r["placeholders"] for r in sel),
+            "late_results": sum(r["late_results"] for r in sel),
             "wall_s": round(sum(r["wall_s"] for r in sel), 3),
         }
     return out
@@ -305,7 +340,7 @@ def totals(rows: list) -> dict:
 
 def run_bench(spec: dict, *, fake: bool, model: str, llm_url: str | None = None,
               api_key: str | None = None, runs: int = 1, only=None, wall_clock_s: int = 180,
-              work_dir=None, keep: bool = False, progress=None) -> dict:
+              work_dir=None, keep: bool = False, progress=None, grace_s: float | None = None) -> dict:
     tasks = [t for t in spec["tasks"] if not only or t["id"] in only]
     work = Path(work_dir) if work_dir else Path(tempfile.mkdtemp(prefix="bench-"))
     work.mkdir(parents=True, exist_ok=True)
@@ -318,7 +353,8 @@ def run_bench(spec: dict, *, fake: bool, model: str, llm_url: str | None = None,
                 for flag in (False, True):
                     row = run_one(task, spec, async_tools=flag, model=model,
                                   llm_url=None if fake else llm_url, api_key=api_key,
-                                  work=work, wall_clock_s=wall_clock_s, keep=keep)
+                                  work=work, wall_clock_s=wall_clock_s, keep=keep,
+                                  grace_s=grace_s)
                     row["run"] = n + 1
                     rows.append(row)
                     if progress:
@@ -327,6 +363,7 @@ def run_bench(spec: dict, *, fake: bool, model: str, llm_url: str | None = None,
         if not work_dir and not keep:
             shutil.rmtree(work, ignore_errors=True)
     return {"model": model, "llm": "fake" if fake else llm_url, "runs": runs,
+            "grace_s": grace_s if grace_s is not None else FAKE_GRACE_S if fake else DEFAULT_GRACE_S,
             "rows": rows, "totals": totals(rows)}
 
 
@@ -362,6 +399,8 @@ def main(argv=None) -> int:
     ap.add_argument("--runs", type=int, default=1)
     ap.add_argument("--only", help="comma-separated task ids")
     ap.add_argument("--wall-clock-s", type=int, default=180, help="per-task limit in the guest")
+    ap.add_argument("--grace-s", type=float, default=None,
+                    help=f"limits.grace_s (default {DEFAULT_GRACE_S}, {FAKE_GRACE_S} with --fake)")
     ap.add_argument("--work-dir", help="keep run dirs here (default: a temp dir, removed)")
     ap.add_argument("--keep", action="store_true", help="keep each run's dir (logs, workspace)")
     ap.add_argument("--json", action="store_true", help="print the result as JSON")
@@ -379,7 +418,7 @@ def main(argv=None) -> int:
     result = run_bench(spec, fake=args.fake, model=args.model, llm_url=args.llm_url,
                        api_key=args.api_key, runs=args.runs, only=only,
                        wall_clock_s=args.wall_clock_s, work_dir=args.work_dir, keep=args.keep,
-                       progress=progress)
+                       progress=progress, grace_s=args.grace_s)
     if args.out:
         Path(args.out).write_text(json.dumps(result, indent=2), encoding="utf-8")
     print(json.dumps(result, indent=2) if args.json else format_table(result))

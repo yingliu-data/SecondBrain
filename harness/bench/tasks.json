@@ -1,5 +1,5 @@
 {
-  "about": "Fixed task set for python -m bench.async_tools (docs/ASYNC-TOOLS.md). Every task needs two or more independent tool calls (bash/read/grep) over the seeded workspace; `check` is applied to the settle answer; `fake` scripts the LLM for --fake (first response: the parallel calls, second: the answer).",
+  "about": "Fixed task set for python -m bench.async_tools (docs/ASYNC-TOOLS.md). Every task needs two or more independent tool calls (bash/read/grep) over the seeded workspace; `check` is applied to the settle answer; `fake` scripts the LLM for --fake (first response: the parallel calls plus bench.async_tools.FAKE_SLOW_CALL; then the answer, after one 'waiting' turn while a call shows [pending] in async mode).",
   "workspace": {
     "README.md": "# Demo service\n\nVersion 2.3.9. See docs/notes.md for ownership.\n",
     "src/config.py": "VERSION = \"2.4.1\"\nPORT = 8443\n# TODO: move secrets to the environment\nDB_URL = \"sqlite:///data/app.db\"\n",
@@ -8,6 +8,7 @@
     "docs/notes.md": "# Notes\n\nOwner: Priya Raman\nOn-call rotation: weekly.\n\nTODO: write the runbook.\n",
     "data/users.csv": "id,name,email\n1,Ana Lima,ana.lima@example.com\n2,Ben Okafor,ben.okafor@example.com\n3,Chen Wei,chen.wei@example.com\n4,Dara Byrne,dara.byrne@example.com\n5,Priya Raman,priya.raman@example.com\n6,Tomas Novak,tomas.novak@example.com\n7,Yuki Sato,yuki.sato@example.com\n",
     "data/orders.csv": "order_id,user_id,total\n1001,1,12.50\n1002,3,8.00\n1003,5,41.20\n1004,2,3.99\n1005,5,15.00\n1006,7,22.10\n1007,4,9.90\n1008,6,30.00\n1009,1,5.25\n1010,2,61.00\n1011,3,7.75\n1012,5,18.40\n",
+    "scripts/report.sh": "# the slow lookup of the set: async mode shows it as [pending]\nsleep 3\necho \"report: 42 open tickets\"\n",
     "logs/server.log": "2026-10-01T09:00:00Z INFO boot\n2026-10-01T09:00:01Z INFO listening on port 8080\n2026-10-01T09:05:12Z WARN slow request /api/orders 1450ms\n2026-10-01T09:07:40Z ERROR db timeout\n2026-10-01T09:07:41Z INFO retry ok\n2026-10-01T09:12:03Z ERROR upstream 502\n2026-10-01T09:15:00Z WARN cache miss storm\n2026-10-01T09:20:31Z ERROR db timeout\n2026-10-01T09:22:10Z INFO healthy\n2026-10-01T09:30:00Z WARN disk 85%\n2026-10-01T09:41:09Z ERROR worker crashed\n2026-10-01T09:41:10Z INFO worker restarted\n"
   },
   "tasks": [
@@ -85,6 +86,15 @@
                   ["bash", {"command": "wc -l < src/util.py"}],
                   ["bash", {"command": "wc -l < src/config.py"}]],
         "answer": "src/app.py has 14 lines, src/util.py has 7 and src/config.py has 4."
+      }
+    },
+    {
+      "id": "slow_report",
+      "prompt": "Run `bash scripts/report.sh` (it takes a few seconds) to get the number of open tickets, and read README.md for the version it mentions. Answer with both.",
+      "check": {"contains_all": ["42", "2.3.9"]},
+      "fake": {
+        "calls": [["bash", {"command": "bash scripts/report.sh"}], ["read", {"path": "README.md"}]],
+        "answer": "There are 42 open tickets; README.md mentions version 2.3.9."
       }
     }
   ]

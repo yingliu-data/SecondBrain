@@ -38,10 +38,32 @@ def test_fake_bench_runs_every_task_off_and_on():
            for r in rows if not r["pass"]]
     assert not bad
     for r in rows:
-        assert r["turns"] == 2 and r["tool_calls"] == r["max_parallel"] >= 2
+        # the task's calls plus the fake slow call, all in the first response
+        assert r["tool_calls"] == r["max_parallel"] >= 3
         assert r["prompt_tokens"] > 0 and r["tool_errors"] == 0
-    assert set(result["totals"]) == {"off", "on"}
+        if r["async_tools"]:
+            # the grace window closes on the fast results: the slow call (and
+            # slow_report's script) shows [pending], the fake model ends its
+            # turn to wait, each late result wakes it (the last one for the answer)
+            assert r["placeholders"] >= 1 and r["late_results"] == r["placeholders"], r
+            assert r["turns"] == 2 + r["placeholders"], r
+        else:
+            assert r["placeholders"] == 0 and r["late_results"] == 0 and r["turns"] == 2, r
+    totals = result["totals"]
+    assert set(totals) == {"off", "on"}
+    assert totals["on"]["placeholders"] >= len(spec["tasks"]) and totals["off"]["placeholders"] == 0
+    assert totals["on"]["turns"] > totals["off"]["turns"]
     assert "total async=on" in bench.format_table(result)
+
+
+def test_still_pending_reads_placeholders_and_late_messages():
+    from guest.context import LATE_RESULT_HEADER
+    from protocol.fold import PLACEHOLDER
+    msgs = [{"role": "tool", "tool_call_id": "a", "content": PLACEHOLDER},
+            {"role": "tool", "tool_call_id": "b", "content": PLACEHOLDER},
+            {"role": "user", "content": LATE_RESULT_HEADER.format(call_id="a", name="bash") + "\nout"}]
+    assert bench.still_pending(msgs) == {"b"}
+    assert bench.still_pending(msgs[:1] + msgs[2:]) == set()
 
 
 class _OpenAIDouble(http.server.BaseHTTPRequestHandler):
@@ -56,7 +78,8 @@ class _OpenAIDouble(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         self.seen.append((self.path, body))
-        data = json.dumps(expand(self.script.pop(0))).encode()
+        entry = self.script.pop(0)
+        data = json.dumps(expand(entry(body) if callable(entry) else entry)).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))

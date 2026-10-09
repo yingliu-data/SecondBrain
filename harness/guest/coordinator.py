@@ -18,8 +18,8 @@ as clock{host_hello} and clock{host_heartbeat}. `ts` on the envelope is
 clock.now_iso() and is never read back. Ids are derive_id(user, tenant,
 session_id, seq, kind).
 
-Sync mode only: a turn starts when nothing is running and nothing is
-awaited. The wake rules:
+Sync mode (cfg.async_tools false, the default): a turn starts when nothing
+is running and nothing is awaited. The wake rules:
   - the task's first turn starts on the task input (no wake event: the task is
     the wake, as in the goldens);
   - after a response with tool calls, the next turn starts on the last
@@ -28,7 +28,28 @@ awaited. The wake rules:
     that landed mid-turn) start another turn: wake{input}; otherwise settle;
   - grace: armed after a response with tool calls; if it fires while
     operations still run it is recorded (clock{grace_expiry} + log) and has no
-    other effect in sync mode (async mode would start a turn on placeholders).
+    other effect.
+
+Async mode (cfg.async_tools true; docs/GUEST.md "Async mode"): calls run on
+across turns (_turn_pending holds every open call of the task, _unseen the
+call_ids whose result landed since the last regular turn_start). The wake
+rule is _async_tick, run by the loop only when the inbound queue is empty
+(the slurp: results and inputs already queued share one turn). With no
+provider call in flight it wakes on any unseen result or staged input:
+  - a result inside the grace window (armed after a response whose calls
+    still run) waits for the window, unless no call runs any more; when the
+    window closes with results unseen: clock{grace_expiry} + wake{grace};
+    after it, every result wakes at once: wake{tool_result};
+  - a staged input wakes at once, grace or not: wake{input};
+  - the turn shows every open call as the fold's PLACEHOLDER tool message
+    (context.placeholder_items); a result landing after that is
+    tool_result{late: true} and reaches the model in the next turn as the
+    late message (context.LATE_RESULT_HEADER), the prefix untouched;
+  - a response without tool calls settles only when no call runs and no
+    result or input is unseen (otherwise the next result wakes the model);
+    with max_tools reached the wrap-up turn repeats per wake until then;
+  - max_turns with calls running kills them first (error tool results);
+    wall_clock, abort and escalation close them as in sync mode.
 
 Limits (cfg.limits): wall_clock_s → settle{timeout}; max_tools → one final
 turn without tools, then settle{done}; max_turns → error{limit} +
@@ -192,7 +213,7 @@ from datetime import datetime, timezone
 from protocol.allowlist import is_allowed
 from protocol.canonical import canonical_json, canonicalisable_error, derive_id, hash_value, is_int, sha256_hex
 from protocol.events import OP_INPUT_REQUIRED, UNANSWERED, make_event, validate_event
-from protocol.fold import State, apply, state_hash
+from protocol.fold import State, apply, checkpoint_body
 from protocol.mcp import CALL_TOOL, split_namespaced
 from guest import hooks as default_hooks
 from guest.config import stream_enabled
@@ -342,6 +363,9 @@ class Coordinator:
         self._attachments: dict[str, list] = {}
         self._call_counts: dict[str, int] = {}
         self._pending_inputs: list[str] = []   # input_ids staged since the last turn start
+        self._unseen: list[str] = []           # call_ids with a result since the last regular turn start
+        self._async = bool(getattr(cfg, "async_tools", False))
+        self._grace_fired = False              # async: the grace window closed with results unseen
 
         # context
         self._correction = 1.0                 # usage.prompt_tokens / raw estimate
@@ -370,6 +394,7 @@ class Coordinator:
         self.parked = False                           # parked: idle until the link comes back
         self._session_start: dict | None = None       # the event (head of the checkpoint chain)
         self._last_checkpoint_hash: str | None = None
+        self._last_event: dict | None = None           # the newest event on the log
         self._uploaded: dict[str, str] = {}           # workspace path -> sha256 the host holds
         self._digests: dict[str, tuple] = {}          # workspace path -> (stat key, sha256)
         self._restored: dict | None = None            # set by restore(): what run() must finish
@@ -385,6 +410,7 @@ class Coordinator:
 
     def _track(self, event: dict) -> None:
         """The checkpoint chain's bookkeeping, for emitted and restored events."""
+        self._last_event = event
         if event["type"] == "session_start":
             self._session_start = event
         elif event["type"] == "checkpoint":
@@ -484,6 +510,10 @@ class Coordinator:
                 self._resume_restored(restored)
             while self.settled is None:
                 self._maybe_park()
+                if self._async and self.inbound.empty():
+                    self._async_tick()        # every queued item handled first (the slurp)
+                    if self.settled is not None:
+                        break
                 item = self.inbound.get()
                 self._dispatch(item)
         finally:
@@ -701,6 +731,9 @@ class Coordinator:
             self.emit("clock", {"kind": "grace_expiry", "at": self.clock.now_ms()})
             self.log("grace expired with operations running", level="debug",
                      running=sorted(self._turn_pending))
+            # async: the results so far wake the model now (wake{grace}); with
+            # none yet, the first one to land does (wake{tool_result})
+            self._grace_fired = self._async and bool(self._unseen)
         elif kind == "idle_timer":
             self.emit("clock", {"kind": "idle_timer", "at": self.clock.now_ms()})
             self.log("idle", level="info")
@@ -941,6 +974,8 @@ class Coordinator:
         if max_turns and self._turns_this_task() >= max_turns:
             self.emit("error", {"class": "limit", "message": f"max_turns {max_turns} reached",
                                 "retry": False})
+            if self._turn_pending:            # async: calls still running
+                self._abandon_open_work("killed")
             self._settle("failed", "", reason="max_turns")
             return
         max_tools = _limit(self.limits, "max_tools", None)
@@ -994,8 +1029,10 @@ class Coordinator:
         self._turn_raw = estimate_tokens(request)
         if kind == "regular":
             self._task_turns += 1
-            self._turn_calls, self._turn_pending = [], set()
-            self._pending_inputs = []
+            self._turn_calls = []
+            if not self._async:               # async: calls run on across turns
+                self._turn_pending = set()
+            self._pending_inputs, self._unseen, self._grace_fired = [], [], False
         else:
             self._tokens_before = tokens_before
         self._cancel("grace")
@@ -1070,6 +1107,8 @@ class Coordinator:
             self._run_tool_calls(turn_id, calls)
             return
         self._last_response_had_calls = False
+        if self._async and (self._turn_pending or self._unseen):
+            return      # no settle while calls run or results are unseen: _async_tick wakes
         if self._final_turn:
             self._settle("done", text, reason="max_tools")
             return
@@ -1078,6 +1117,25 @@ class Coordinator:
             self._start_turn()
             return
         self._settle("done", text)
+
+    def _async_tick(self) -> None:
+        """Async mode's wake rule (module doc), run by the loop whenever the
+        inbound queue is empty, so every item already queued (coincident
+        results, an input) is in the same turn. Wakes when no provider call
+        is in flight and a result or an input is unseen; while the grace
+        window after a response with calls is open, results wait for it
+        (or for the last running call), an input does not."""
+        if (self.settled is not None or self.task_input_id is None or self.current_turn is not None
+                or self._task_turns == 0 or not self._link_up or self.parked or self._park_wanted()):
+            return
+        if not self._unseen and not self._pending_inputs:
+            return
+        if self._turn_pending and "grace" in self._timers and not self._pending_inputs:
+            return
+        reason = "grace" if self._grace_fired else "tool_result" if self._unseen else "input"
+        self._cancel("grace")
+        self._wake(reason, list(self._unseen), list(self._pending_inputs))
+        self._start_turn()
 
     def _wake(self, reason: str, result_ids: list, input_ids: list) -> None:
         self.emit("wake", {"reason": reason, "result_ids": list(result_ids), "input_ids": list(input_ids)})
@@ -1172,7 +1230,9 @@ class Coordinator:
         return None
 
     def _run_tool_calls(self, turn_id: str, calls: list) -> None:
-        self._turn_calls, self._turn_pending = [], set()
+        self._turn_calls = []
+        if not self._async:
+            self._turn_pending = set()
         max_tools = _limit(self.limits, "max_tools", None)
         self._suppress_wake = True
         try:
@@ -1183,6 +1243,13 @@ class Coordinator:
         finally:
             self._suppress_wake = False
         if self.settled is not None:
+            return
+        if self._async:
+            # the grace window batches this round's results; _async_tick wakes
+            self._grace_fired = False
+            grace = _limit(self.limits, "grace_s", 1.0)
+            if grace and any(c in self._turn_pending for c in self._turn_calls):
+                self._arm("grace_expiry", "grace", float(grace))
             return
         if not self._turn_pending:
             self._after_round()
@@ -1379,6 +1446,9 @@ class Coordinator:
         if state == "done" and memory is not None:
             self._emit_memory(call_id, memory)
         self._turn_pending.discard(call_id)
+        self._unseen.append(call_id)
+        if self._async:
+            return      # _async_tick wakes once the queue is drained
         if (not self._turn_pending and self._last_response_had_calls and not self._suppress_wake
                 and self.settled is None and self.current_turn is None):
             self._after_round()
@@ -1518,8 +1588,7 @@ class Coordinator:
         if self._session_start is None:
             raise FatalProtocolError("park without a session_start to chain the checkpoint to")
         prev = self._last_checkpoint_hash or hash_value(self._session_start)
-        cp = self.emit("checkpoint", {"through_seq": self.state.last_seq,
-                                      "state_hash": state_hash(self.state), "prev_hash": prev})
+        cp = self.emit("checkpoint", checkpoint_body([self._last_event], prev, state=self.state))
         body = {"checkpoint_seq": cp["seq"], "reason": reason}
         if question is not None:
             body["question_id"] = question
@@ -1601,8 +1670,10 @@ class Coordinator:
                 self.current_turn = body["turn_id"]
                 if body["type"] == "regular":
                     self._task_turns += 1
-                    self._turn_calls, self._turn_pending = [], set()
-                    self._pending_inputs = []
+                    self._turn_calls = []
+                    if not self._async:
+                        self._turn_pending = set()
+                    self._pending_inputs, self._unseen = [], []
             elif etype == "llm_response":
                 self.current_turn = None
                 self._last_response_had_calls = False
@@ -1639,6 +1710,7 @@ class Coordinator:
                     "timeout_s": self._question_timeout(), "expired": False}
             elif etype == "tool_result":
                 self._turn_pending.discard(body["call_id"])
+                self._unseen.append(body["call_id"])
                 self._side_calls.pop(body["call_id"], None)
                 # a question whose call has its result is closed (live: answered,
                 # denied or abandoned): never re-armed or expired by a restore
@@ -1654,7 +1726,7 @@ class Coordinator:
                     self._user_memory.remove(slug)
             elif etype == "settle":
                 self.task_input_id = None
-                self._pending_inputs = []
+                self._pending_inputs, self._unseen = [], []
                 self._turn_calls, self._turn_pending = [], set()
                 self._last_response_had_calls = False
                 self._final_turn = False
@@ -1719,10 +1791,24 @@ class Coordinator:
             self._suppress_wake = False
         if self.task_input_id is None:
             return
+        last = self.state.last_turn()
+        if self._async:
+            # every open call is lost now: unseen results and staged inputs wake
+            # through _async_tick; otherwise the lost turn (or the task's first)
+            # runs again, or the settle a dead guest owed is made
+            if lost_turn is not None or not self._task_turns:
+                self._start_turn()
+            elif self._unseen or self._pending_inputs:
+                pass
+            elif last is not None and last["type"] == "regular" and last["response_seq"] is not None:
+                self._finish_response(self._restored_message(last["response_seq"]),
+                                      last.get("finish_reason"))
+            else:
+                self._start_turn()
+            return
         if self._last_response_had_calls and not self._turn_pending:
             self._after_round()
             return
-        last = self.state.last_turn()
         if lost_turn is None and last is not None and last["type"] == "regular" \
                 and last["response_seq"] is not None and not self._last_response_had_calls:
             self._finish_response(self._restored_message(last["response_seq"]),
@@ -1766,6 +1852,13 @@ class Coordinator:
             self._suppress_wake = False
         if restored["park_question"] in self._waiting:
             self._question_park_pending = False   # the log's own park is that park
+        if self._async:
+            # unseen results and inputs wake through _async_tick; only a first
+            # turn the park deferred is started here
+            if self.task_input_id is not None and self.settled is None \
+                    and self.current_turn is None and not self._task_turns:
+                self._start_turn()
+            return
         if self.task_input_id is not None and self.settled is None \
                 and self.current_turn is None and not self._turn_pending:
             if self._last_response_had_calls:

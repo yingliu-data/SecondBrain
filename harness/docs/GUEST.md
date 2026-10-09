@@ -75,7 +75,7 @@ Fatal protocol errors (`second hello`, unsupported schema): emit
   `after_tool(state, call, content) -> str | None` (rewrite); pass-through defaults.
 - `guest.coordinator`: `Coordinator(cfg, state, inbound, log_writer, transport,
   provider, ops, clock)`: `run() -> settle body`; `emit(type, body) -> event`.
-  Wake rules and limits: PLAN.md section 6. Sync mode only in M1.
+  Wake rules and limits: PLAN.md section 6; async mode below ("Async mode").
 
 ## Sides
 
@@ -364,3 +364,68 @@ Contracts: docs/M4-CONTRACTS.md (sections 3.1-3.3 and 4). What the guest does:
 - **Abort** (`_abort`): reason `escalated` → `settle{escalated, answer: ""}`;
   any other → `settle{aborted, answer: ""}`; `settle.reason`
   stays `abort` (main exits 0 on it), `detail` = the reason.
+
+## Async mode (`hello.config.async_tools: true`)
+
+Off by default (PLAN.md D6); with it off every log is byte for byte what it
+was. The measurement lives in docs/ASYNC-TOOLS.md.
+
+- **System block.** A fixed `## Tool calls` section (`context.ASYNC_TOOLS_NOTE`)
+  follows the base prompt: calls run asynchronously, a running call shows the
+  result `[pending]`, its real result arrives later as a message starting
+  `[late tool result] call_id: <id>`, and the model may continue with
+  independent work or end its turn without tool calls to wait. It is part of
+  the system text, so it is in `session_start.system_hash` (and
+  `async_tools` in `config_hash`); it never changes within a session.
+- **Wake rule** (`Coordinator._async_tick`). Calls run on across turns. The
+  loop runs the tick only when the inbound queue is empty, so every item
+  already queued (coincident results, an input) is handled first and lands
+  in the same turn (the slurp). With no provider call in flight, the tick
+  wakes the model when a result or an input is unseen:
+  - after a response whose calls still run, `limits.grace_s` batches
+    results: a result inside the window waits for it, unless no call runs any
+    more (then `wake{tool_result}` at once, as in sync mode). The window
+    closing with results unseen is `clock{grace_expiry}` + `wake{grace,
+    result_ids}`; closing with none is only the clock event, and the first
+    result after it wakes;
+  - after the window, every terminal result wakes: `wake{tool_result}`;
+  - a staged `follow_up`/`steer` wakes at once, grace or not: `wake{input}`;
+  - `wake.result_ids` = the calls whose result landed since the last regular
+    `turn_start`, in arrival order; `input_ids` = the inputs staged since.
+  The model may answer with more tool calls while earlier ones run; they
+  join the running set (`max_tools` counts every call of the task as before;
+  once reached, each further wake is the no-tools wrap-up turn).
+- **Settle.** A response without tool calls settles only when no call runs
+  (open questions and held mcp calls count as running) and no result or input
+  is unseen. Otherwise the coordinator waits: the next result wakes the model.
+  `max_turns` reached with calls running kills them (`error: killed`
+  results) before `settle{failed}`; `wall_clock`, `abort` and escalation
+  close open calls as in sync mode. The idle timer is unchanged.
+- **Context.** A turn started while calls are open shows each open call as
+  `{"role": "tool", "tool_call_id": id, "content": "[pending]"}` at the
+  call's position (`context.placeholder_items`: exactly the placeholders the
+  fold commits at that `turn_start`, same order, so `request_hash` replays and
+  the next request's prefix is this request verbatim). A result after its
+  placeholder was committed is `tool_result{late: true}` (the fold's one late
+  rule) and is shown in the next turn, after everything already shown, as a
+  user message:
+
+  ```
+  {"role": "user", "content": "[late tool result] call_id: <id>, tool: <name>\n<content>"}
+  ```
+
+  A second `tool` message for an id the model already saw answered would not
+  be well-formed chat (OpenAI-compatible servers may reject it, and the
+  Qwen template does not render `tool_call_id`), and after a compaction the
+  call it answers may be summarised away; the header names the call either
+  way. The late message never takes the turn's preamble (that goes to the
+  first new input).
+- **Park, restore, questions, mcp.** Placeholders are fold state, so a
+  restore keeps them; an open call lost on restore gets `late: true` when its
+  placeholder was committed. A restored task with unseen results or inputs
+  wakes through the tick; a lost turn (or the task's first) is re-run. A
+  parked task resumes waiting for its open calls; their results are late.
+  Questions and input-required mcp calls are open calls like any other
+  (shown `[pending]` until answered). Compaction counts placeholders in the
+  estimate (they are in the request) and may summarise them away; a late
+  result after that still renders as the late message.

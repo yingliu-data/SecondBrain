@@ -158,6 +158,10 @@ reports them next to the `validate_log` ones (docs/REPLAY.md).
 - `tool_result.late` is exactly `(the call already has a result) or (its placeholder was
   committed by a turn)`. A second result is counted and ignored; a first result after a
   committed placeholder is a new item; a `late: true` that is neither is an error.
+  Placeholders only occur with `hello.config.async_tools` (docs/GUEST.md "Async mode"):
+  there `wake{grace}` is the wake when the grace window closes with results unseen,
+  and a late result reaches the model as a `[late tool result] call_id: ...` user
+  message.
 - `input{dedupe: new}` with an `input_id` seen before is an error; `ui_response` names an
   open, unanswered `question_id`.
 - `compaction.summary_turn_id` names a `turn_start` of type `compaction` whose
