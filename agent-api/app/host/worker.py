@@ -834,8 +834,13 @@ class Worker:
         cseq continues, `hello{resume: true}`, the guest takes the log return
         on :5001 and continues the run's seq; the unacked controls of the
         previous guest are numbered again after the hello. Base snapshot
-        restore when the sandbox has one, else a rootfs boot (start)."""
+        restore when the sandbox has one, else a rootfs boot (start).
+        M6: a fresh boot whose current run is a migrated legacy history no
+        guest continued yet (StateSync.migrated_run) is a resume: the guest
+        folds the migrated run, so the prior conversation is in context."""
         carried: list[tuple[str, dict]] = []
+        migrated = not resume and self.sync.migrated_run
+        resume = resume or migrated
         if resume:
             highest = 0
             if self._outbox is not None:
@@ -859,9 +864,11 @@ class Worker:
             self._deferred = held + self._deferred
             raise GuestError(f"guest did not connect within {self.hello_timeout_s}s")
         await self.load_gateway_entries()
-        # M6 merge point: a fresh boot whose current run is a migrated one
-        # (StateSync.migrated_run, the events migration) sends resume=True.
         hello = self.build_hello(resume=resume)
+        if migrated:
+            # the migrated run's allowlist holds only its legacy tools:
+            # re-pin it to this hello's before the guest takes the log return
+            self.sync.retool_migrated(effective_tools(hello["config"]))
         self.last_hello = hello
         self.send_control("hello", hello)
         self._mark_running(*started, carried + held, resume=resume)

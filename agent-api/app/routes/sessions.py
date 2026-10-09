@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, HTTPException, Depends
@@ -8,10 +9,14 @@ from flows.client import signal_abort
 from app.host import temporal
 from app.host.state_sync import read_current_run
 from app.session.dir_store import DirStore
+from app.session.eventlog import parse_ts
 from app.session.ids import session_key
 from app.tenants import Tenant
 
 router = APIRouter(prefix="/api/v1/sessions")
+logger = logging.getLogger("routes.sessions")
+
+_EPOCH = datetime.fromtimestamp(0, timezone.utc)
 
 _sessions = None
 
@@ -88,10 +93,12 @@ def _since(minutes: int | None) -> datetime | None:
 
 
 @router.get("/traces/recent")
-async def recent_traces(since_minutes: int = 10, limit: int = 200,
-                        tenant: Tenant = Depends(verify)):
-    """Trace events across all of this tenant's sessions — answers
-    'which tools ran in the last N minutes'. Requires the dir backend."""
+def recent_traces(since_minutes: int = 10, limit: int = 200,
+                  tenant: Tenant = Depends(verify)):
+    """Trace rows across all of this tenant's sessions — answers 'which
+    tools ran in the last N minutes'. Built from each session's event log
+    (every run; M6-CONTRACTS §2). Requires the dir backend. A plain def:
+    FastAPI runs the file reads in its threadpool, off the event loop."""
     if not _is_dir_store():
         raise HTTPException(501, "Traces require SESSION_BACKEND=dir")
     floor = _since(since_minutes)
@@ -100,15 +107,21 @@ async def recent_traces(since_minutes: int = 10, limit: int = 200,
         session = _sessions.get(tenant.user, tenant.name, row["session_id"])
         if session is None:
             continue
-        for event in session.read_trace(since=floor):
+        try:
+            rows = session.read_trace(since=floor)
+        except Exception as e:      # one unreadable log never hides the others
+            logger.warning("traces: session %s unreadable: %s", row["session_id"], e)
+            continue
+        for event in rows:
             out.append({"session_id": row["session_id"], **event})
-    out.sort(key=lambda e: e.get("ts", ""))
-    return {"traces": out[-limit:]}
+    out.sort(key=lambda e: parse_ts(e.get("ts")) or _EPOCH)
+    return {"traces": out[-limit:] if limit > 0 else []}
 
 
 @router.get("/{session_id}/traces")
-async def session_traces(session_id: str, since_minutes: int | None = None,
-                         limit: int = 200, tenant: Tenant = Depends(verify)):
+def session_traces(session_id: str, since_minutes: int | None = None,
+                   limit: int = 200, tenant: Tenant = Depends(verify)):
+    """One session's trace rows from its event log (every run)."""
     session = _session_or_404(tenant, session_id, "Traces require SESSION_BACKEND=dir")
     return {"traces": session.read_trace(since=_since(since_minutes), limit=limit)}
 

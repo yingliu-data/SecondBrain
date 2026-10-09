@@ -2,7 +2,7 @@
 
   StateSync(session_dir)
     .accept(event) -> ack_seq     validate, append to events/NNNNNN.jsonl, fsync,
-                                  fold into .state, write the projections, THEN
+                                  fold into .state, project memory, THEN
                                   return the seq to ack (durable = host ack after
                                   append). Duplicates (seq <= last_seq) and gaps
                                   (seq > last_seq + 1) are not appended; the ack
@@ -32,12 +32,20 @@ log `events/host-NNNNNN.jsonl` is one per session, across runs. With one
 long-lived guest per session (M3) there is one run and the layout is the
 plan's `events/000001.jsonl` one directory down.
 
-Projections (kept one release, PLAN.md 3): `history.jsonl` gets the user text
-of each new task/follow_up/steer input and the assistant answer at settle
-(SessionDir.append_history); `logs/trace.jsonl` gets today's event names
-(SessionDir.append_trace): tool_call, tool_result, assistant_response,
-llm_error, loop_exhausted — plus question, settle, error and memory for the
-viewer.
+Projections. The event log is the only record of the conversation and the
+trace: the `history.jsonl` / `logs/trace.jsonl` projections retired in M6
+(readers fold the log: app.session.eventlog). What remains is the memory
+projection below.
+
+Migrated runs (M6-CONTRACTS section 4). `migrated_run` is True while the
+current run is one `app.session.migrate --events` wrote from a legacy
+history (its session_start has `migrated: true`) and no guest has continued
+it yet (it still ends with the migration's checkpoint). The worker's first
+boot of such a session is a resume: `retool_migrated(tools)` re-pins the
+run's session_start.tools to the hello's effective tools (the legacy run
+never had a guest; its own allowlist holds only the legacy tools), then
+hello{resume: true} makes the guest fold the migrated run (the log return),
+so the prior conversation is in context and the run continues its seqs.
 
 Memory projection (D23, PLAN.md 7). A guest `memory{scope: session}` event
 whose `derived_from` is a compaction turn of this run (read from the fold:
@@ -57,6 +65,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import threading
 from pathlib import Path
 
@@ -69,12 +78,6 @@ from app.session.session_dir import SessionDir, utcnow_iso
 from app.user.memory import MemoryStore
 
 logger = logging.getLogger("host.state_sync")
-
-_ERROR_TRACE = {
-    "transient": "llm_error", "overflow": "llm_error", "budget": "llm_error",
-    "limit": "loop_exhausted", "protocol": "error", "fatal": "error",
-}
-
 
 class StateSyncError(Exception):
     """An event the host refuses to store (schema or fold error)."""
@@ -246,6 +249,8 @@ class StateSync:
         self.seen_inputs: set[str] = set()       # across runs
         self.settled: dict[str, dict] = {}       # input_id -> settle body, across runs
         self.question_bodies: dict[str, dict] = {}  # question_id -> body, current run
+        self._migrated_start = False             # current run written by migrate --events
+        self._last_type: str | None = None       # type of the current run's last event
         self._load()
 
     # ------------------------------------------------------------ disk
@@ -260,6 +265,7 @@ class StateSync:
         for run in self.runs():
             self.run, self.state = run, State()
             self.question_bodies = {}
+            self._migrated_start, self._last_type = False, None
             for ev in self.read(0, run=run):
                 try:
                     apply(self.state, ev)
@@ -277,6 +283,7 @@ class StateSync:
             self.run += 1
             self.state = State()
             self.question_bodies = {}
+            self._migrated_start, self._last_type = False, None
             return self.run
 
     def read(self, after_seq: int = 0, *, run: int | None = None) -> list[dict]:
@@ -340,12 +347,54 @@ class StateSync:
         """What must hold across runs: the input_ids seen, each task's
         settle; and the current run's question bodies."""
         etype, b = event["type"], event["body"]
-        if etype == "input":
+        self._last_type = etype
+        if etype == "session_start":
+            self._migrated_start = b.get("migrated") is True
+        elif etype == "input":
             self.seen_inputs.add(b["input_id"])
         elif etype == "question":
             self.question_bodies[b["question_id"]] = b
         elif etype == "settle":
             self.settled[b["input_id"]] = b
+
+    # ------------------------------------------------------------ migrated runs
+    @property
+    def migrated_run(self) -> bool:
+        """The current run is a migrated legacy history no guest has
+        continued yet (it still ends with the migration's checkpoint)."""
+        return self._migrated_start and self._last_type == "checkpoint"
+
+    def retool_migrated(self, tools: list[dict]) -> bool:
+        """Re-pin the current migrated run's session_start.tools to `tools`
+        (the effective tools of the hello about to resume it; the legacy
+        tools its calls name stay offered) and recompute its checkpoint, so
+        the resumed guest may call every tool it offers. Rewrites the run's
+        segments (a new directory swapped in) and refolds it. False when the
+        run is not an uncontinued migrated one or cannot be re-pinned."""
+        from app.session.migrate import retool, write_segments
+        with self._lock:
+            if not self.migrated_run:
+                return False
+            events = _read_run(self.run_dir, 0, self.segment_events)
+            try:
+                events = retool(events, tools)
+            except ValueError as e:
+                logger.warning("migrated run %s keeps its tools: %s", self.run_dir, e)
+                return False
+            fresh = self.events_dir / f".{self.run_dir.name}.retool"
+            old = self.events_dir / f".{self.run_dir.name}.old"
+            for stale in (fresh, old):
+                if stale.exists():
+                    shutil.rmtree(stale)
+            write_segments(fresh, events, self.segment_events)
+            os.rename(self.run_dir, old)
+            os.rename(fresh, self.run_dir)
+            shutil.rmtree(old, ignore_errors=True)
+            self.state, self.question_bodies = State(), {}
+            for ev in events:
+                apply(self.state, ev)
+                self._index(ev)
+            return True
 
     # ------------------------------------------------------------ host log
     def host_event(self, type: str, body: dict) -> dict:
@@ -360,46 +409,9 @@ class StateSync:
         return out
 
     # ------------------------------------------------------------ projections
-    def _trace(self, event: str, detail: dict | None = None) -> None:
-        self.session.append_trace(event, detail, ticket_id=self.ticket_id)
-
     def _project(self, event: dict) -> None:
-        etype, body = event["type"], event["body"]
-        if etype == "input":
-            if body["dedupe"] == "new" and body["kind"] in ("task", "follow_up", "steer"):
-                self.session.append_history("user", body["text"], ticket_id=self.ticket_id)
-        elif etype == "tool_call":
-            self._trace("tool_call", {"name": body["name"], "arguments": body["args"],
-                                      "call_id": body["call_id"], "side": body["side"]})
-        elif etype == "tool_result":
-            call = self.state.open_calls.get(body["call_id"], {})
-            detail = {"name": call.get("name", "?"), "result": body["content"][:2000],
-                      "call_id": body["call_id"]}
-            if "duration_ms" in call:
-                detail["duration_ms"] = call["duration_ms"]
-            self._trace("tool_result", detail)
-        elif etype == "llm_response":
-            msg = body["message"]
-            if body["finish_reason"] != "tool_calls" and not msg.get("tool_calls"):
-                text = (msg.get("content") or "").strip()
-                self._trace("assistant_response",
-                            {"chars": len(text), "turn_id": body["turn_id"]})
-        elif etype == "error":
-            self._trace(_ERROR_TRACE.get(body["class"], "error"),
-                        {"error": body["message"][:500], "class": body["class"]})
-        elif etype == "question":
-            self._trace("question", {"question_id": body["question_id"],
-                                     "text": body["text"][:500]})
-        elif etype == "settle":
-            if body["answer"]:
-                self.session.append_history("assistant", body["answer"],
-                                            ticket_id=self.ticket_id)
-            self._trace("settle", {"input_id": body["input_id"], "outcome": body["outcome"],
-                                   "usage": body["usage"]})
-        elif etype == "memory":
-            self._trace("memory", {"scope": body["scope"], "op": body["op"], "slug": body["slug"],
-                                   "sha256": body["sha256"], "derived_from": body["derived_from"]})
-            self._project_memory(body)
+        if event["type"] == "memory":
+            self._project_memory(event["body"])
 
     # ------------------------------------------------------------ memory (D23)
     def _project_memory(self, body: dict) -> None:

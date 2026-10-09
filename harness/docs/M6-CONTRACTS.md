@@ -63,8 +63,10 @@ the fold. Migrated sessions (§4) are covered the same way.
 every session that has `history.jsonl` and no `events/` into an event log run
 `r0000`:
 
-- `session_start` with the session's user/tenant, `resumed: false`, empty
-  `tools`, and `migrated: true` (new optional body key);
+- `session_start` with the session's user/tenant, `resumed: false`,
+  `tools` = the legacy tools its tool calls name (side host; empty when
+  none: the fold's allowlist needs them), and `migrated: true` (new
+  optional body key);
 - per legacy user message: `input{kind: task, input_id: derive_key_id(
   "input", user, tenant, session_id, <line no>)}`; per assistant reply:
   `turn_start{type: regular}` + `llm_response{message: {role: assistant,
@@ -74,7 +76,11 @@ every session that has `history.jsonl` and no `events/` into an event log run
 
 The result must pass `verify_session`. A migrated session continues under the
 harness engine: the guest folds the migrated run on its first hello like any
-resume, so the prior conversation is in context. `--dry-run` reports what
+resume, so the prior conversation is in context. (As built: the worker's
+first boot of a run that is migrated and not yet continued is a resume, and
+`StateSync.retool_migrated` first re-pins that run's `session_start.tools` to
+the hello's effective tools plus the legacy ones and recomputes its closing
+checkpoint, so the resumed guest can call every tool it offers.) `--dry-run` reports what
 would be written. Idempotent: a session with `events/` is skipped.
 
 ## 5. Async tool calls (`harness/bench/`)

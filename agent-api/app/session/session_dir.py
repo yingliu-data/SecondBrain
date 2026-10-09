@@ -4,12 +4,17 @@ Layout::
 
     {root}/{user_id}_{session_id}/
         session.json         # metadata + forward-only state
-        history.jsonl        # append-only LLM conversation log
+        events/              # the event log (canonical): rNNNN/ runs, host-*.jsonl
         workspace/           # agent-produced files
         memory/              # durable facts
         ipc/                 # atomic-rename handoff (Phase 3)
         tickets/             # append-only per-operation records (Phase 3)
-        logs/trace.jsonl     # append-only event stream
+        logs/
+
+M6: the conversation and the trace are read from the event log
+(app.session.eventlog); `history.jsonl` and `logs/trace.jsonl` are no longer
+written. A legacy session's `history.jsonl` is converted to an event log run
+by `python -m app.session.migrate --events`.
 """
 from __future__ import annotations
 
@@ -19,6 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from app.session.eventlog import conversation, load_runs, trace_rows
 from app.session.state import transition
 
 SCHEMA_VERSION = 1
@@ -49,6 +55,7 @@ class SessionDir:
 
     @property
     def history_jsonl(self) -> Path:
+        """Legacy conversation file (pre-M6); only migrate --events reads it."""
         return self.root / "history.jsonl"
 
     @property
@@ -73,6 +80,7 @@ class SessionDir:
 
     @property
     def trace_jsonl(self) -> Path:
+        """Legacy trace file (pre-M6); only migrate --events reads it."""
         return self.logs / "trace.jsonl"
 
     @classmethod
@@ -89,8 +97,6 @@ class SessionDir:
         root.mkdir(parents=True, exist_ok=True)
         for sub in _SUBDIRS:
             (root / sub).mkdir(exist_ok=True)
-        (root / "history.jsonl").touch(exist_ok=True)
-        (root / "logs" / "trace.jsonl").touch(exist_ok=True)
         now = utcnow_iso()
         meta = {
             "session_id": session_id,
@@ -135,53 +141,14 @@ class SessionDir:
         if new_state != current:
             self.update_meta(state=new_state)
 
-    def append_history(
-        self,
-        role: str,
-        content: str,
-        *,
-        tool_call_id: str | None = None,
-        ticket_id: str | None = None,
-    ) -> None:
-        entry: dict[str, Any] = {
-            "ts": utcnow_iso(),
-            "role": role,
-            "content": content,
-        }
-        if tool_call_id is not None:
-            entry["tool_call_id"] = tool_call_id
-        if ticket_id is not None:
-            entry["ticket_id"] = ticket_id
-        line = json.dumps(entry, separators=(",", ":")) + "\n"
-        with self.history_jsonl.open("a", encoding="utf-8") as f:
-            f.write(line)
-            f.flush()
-            os.fsync(f.fileno())
-        current_count = self.read_meta().get("message_count", 0)
-        self.update_meta(message_count=current_count + 1)
+    @property
+    def events(self) -> Path:
+        return self.root / "events"
 
     def read_history(self, *, limit: int | None = None) -> list[dict[str, Any]]:
-        """Return messages in OpenAI chat shape (role + content [+ tool_call_id])."""
-        if not self.history_jsonl.exists():
-            return []
-        rows: list[dict[str, Any]] = []
-        for line in self.history_jsonl.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rows.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-        if limit is not None:
-            rows = rows[-limit:]
-        out: list[dict[str, Any]] = []
-        for r in rows:
-            m: dict[str, Any] = {"role": r["role"], "content": r.get("content", "")}
-            if r.get("tool_call_id"):
-                m["tool_call_id"] = r["tool_call_id"]
-            out.append(m)
-        return out
+        """The conversation from the event log (every run): user text and
+        settled answers, as {role, content}."""
+        return conversation(load_runs(self.root), limit=limit)
 
     def read_trace(
         self,
@@ -189,43 +156,6 @@ class SessionDir:
         limit: int | None = None,
         since: datetime | None = None,
     ) -> list[dict[str, Any]]:
-        """Read trace events, oldest-first; optionally filtered by timestamp."""
-        if not self.trace_jsonl.exists():
-            return []
-        rows: list[dict[str, Any]] = []
-        for line in self.trace_jsonl.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rows.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-        if since is not None:
-            floor = (
-                since.astimezone(timezone.utc)
-                .isoformat(timespec="milliseconds")
-                .replace("+00:00", "Z")
-            )
-            rows = [r for r in rows if r.get("ts", "") >= floor]
-        if limit is not None:
-            rows = rows[-limit:]
-        return rows
-
-    def append_trace(
-        self,
-        event: str,
-        detail: dict[str, Any] | None = None,
-        *,
-        ticket_id: str | None = None,
-    ) -> None:
-        entry: dict[str, Any] = {"ts": utcnow_iso(), "event": event}
-        if ticket_id is not None:
-            entry["ticket_id"] = ticket_id
-        if detail is not None:
-            entry["detail"] = detail
-        line = json.dumps(entry, separators=(",", ":")) + "\n"
-        with self.trace_jsonl.open("a", encoding="utf-8") as f:
-            f.write(line)
-            f.flush()
-            os.fsync(f.fileno())
+        """Trace rows built from the event log (every run), oldest first;
+        optionally only those at or after `since`."""
+        return trace_rows(load_runs(self.root), since=since, limit=limit)

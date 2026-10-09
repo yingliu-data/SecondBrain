@@ -415,6 +415,9 @@ async def test_second_death_in_a_task_fails_it(session):
     assert result["outcome"] == "failed" and "died again" in result["answer"]
     assert any(s.startswith("event: error") for s in sse) and sse[-1] == DONE
     assert len(sandbox.guests) == 2                          # max_resumes = 1
+    # M6: the host's failure is in the host log (no history.jsonl projection)
+    assert any(h["type"] == "workflow" and h["body"].get("kind") == "completed"
+               and h["body"].get("outcome") == "failed" for h in w.sync.read_host())
     # the next task starts fresh (a new run); its resume budget is its own
     sandbox.die_runs = 0
     sandbox.script = [{"text": "fresh"}]

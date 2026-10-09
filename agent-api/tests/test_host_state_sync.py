@@ -100,17 +100,72 @@ def test_segments_rotate_and_read_replays_equal(session):
     assert again.seen_inputs == {"in_1"}
 
 
-def test_projections_history_and_trace(session):
+def test_no_history_or_trace_projection_files(session):
+    """M6: history.jsonl and logs/trace.jsonl are no longer written; the
+    conversation and the trace are read from the event log."""
     sync = StateSync(session)
     sync.ticket_id = "tk_1"
     for e in text_task():
         sync.accept(e)
+    assert not session.history_jsonl.exists()
+    assert not session.trace_jsonl.exists()
     hist = session.read_history()
     assert hist == [{"role": "user", "content": "hi"},
                     {"role": "assistant", "content": "hello there world"}]
     names = [t["event"] for t in session.read_trace()]
-    assert "assistant_response" in names and "settle" in names
-    assert all(t.get("ticket_id") == "tk_1" for t in session.read_trace())
+    assert names == ["turn_start", "assistant_response", "settle"]
+    assert all(t["ts"] == "2026-10-07T12:00:00Z" for t in session.read_trace())
+
+
+def _migrated(session, tool="wcc-events__draft_event"):
+    from app.session.migrate import migrate_session
+    rows = [{"ts": "2026-05-01T10:00:00.000Z", "role": "user", "content": "hi"},
+            {"ts": "2026-05-01T10:00:01.000Z", "role": "tool", "tool_call_id": "c0",
+             "name": tool, "content": "ok"},
+            {"ts": "2026-05-01T10:00:02.000Z", "role": "assistant", "content": "hello"}]
+    session.history_jsonl.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    assert migrate_session(session)["status"] == "migrated"
+
+
+def test_migrated_run_flag(session):
+    """migrated_run: the current run is a migrated one no guest continued
+    (the worker's first boot resumes it); continuing or a new run clears it."""
+    _migrated(session)
+    sync = StateSync(session)
+    assert sync.run == 0 and sync.migrated_run is True
+    assert sync.seen_inputs and sync.settled
+    last = sync.last_seq
+    sync.accept(ev(last + 1, "clock", {"kind": "host_hello", "at": 5}))
+    assert sync.migrated_run is False                       # a guest continued it
+    assert StateSync(session).migrated_run is False         # from disk too
+    sync.begin_run()
+    sync.accept(start())
+    assert sync.migrated_run is False
+
+
+def test_retool_migrated_run(session):
+    """retool_migrated re-pins session_start.tools to the hello's tools (the
+    legacy tool stays offered), recomputes the checkpoint and refolds."""
+    from protocol.replay import verify_session
+    _migrated(session)
+    sync = StateSync(session)
+    before = sync.read(0)
+    assert [t["name"] for t in before[0]["body"]["tools"]] == ["wcc-events__draft_event"]
+    assert sync.retool_migrated(TOOLS) is True
+    after = sync.read(0)
+    assert [t["name"] for t in after[0]["body"]["tools"]] == [
+        "bash", "get_calendar_events", "wcc-events__draft_event", "web_search"]
+    assert [e["type"] for e in after] == [e["type"] for e in before]
+    assert after[-1]["body"]["state_hash"] != before[-1]["body"]["state_hash"]
+    assert verify_session(session.root) == []
+    assert state_hash(fold(after)) == state_hash(sync.state)
+    assert sorted(p.name for p in (session.root / "events").iterdir()
+                  if not p.name.startswith("host-")) == ["r0000"]
+    assert sync.migrated_run is True                       # still uncontinued
+    # a legacy tool named like an offered tool on another side: kept as is
+    clash = [{"name": "wcc-events__draft_event", "side": "mcp", "pin": None}]
+    assert sync.retool_migrated(clash) is False
+    assert sync.read(0) == after
 
 
 def test_tool_trace_projection(session):

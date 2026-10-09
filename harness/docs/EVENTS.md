@@ -32,7 +32,7 @@ strings. Times (`at`, `deadline`) are int milliseconds since the epoch.
 
 | type | body | writer |
 |---|---|---|
-| `session_start` | `user` str, `tenant` str, `workflow_run_id` str, `config_hash` str, `system_hash` str, `tools` list of `{name: str, side: guest/host/device/mcp, pin: str or null}` (unique names, `pin` key required), `harness_version` str, `image_version` str, `resumed` bool | guest main |
+| `session_start` | `user` str, `tenant` str, `workflow_run_id` str, `config_hash` str, `system_hash` str, `tools` list of `{name: str, side: guest/host/device/mcp, pin: str or null}` (unique names, `pin` key required), `harness_version` str, `image_version` str, `resumed` bool, `migrated`? bool (M6: a run converted from a legacy `history.jsonl` by `app.session.migrate --events`) | guest main / migrate |
 | `input` | `input_id` str, `kind` in `task`/`follow_up`/`steer`/`ui_response`, `text` str, `dedupe` in `new`/`duplicate`/`late`, `question_id`? str, `answer`? str | inbox |
 | `clock` | `kind` in `host_hello`/`host_heartbeat`/`turn_clock`/`idle_timer`/`question_deadline`/`wall_clock`/`resumed` or any `grace_*`, `at` int ms, `ref`? str (M5: with `question_deadline`, the question whose deadline passed) | coordinator |
 | `turn_start` | `turn_id` str, `type` in `regular`/`compaction`, `includes_through_seq` int `>= 0`, `model` str, `params` dict, `request_hash` str, `preamble_hash` str, `workspace_tree_id` str or null | coordinator |

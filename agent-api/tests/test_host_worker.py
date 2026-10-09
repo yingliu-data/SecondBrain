@@ -193,6 +193,9 @@ async def test_guest_death_fails_the_task_with_error_and_done(session):
     sse = await drain(sink)
     assert result["outcome"] == "failed" and "exited before settling" in result["answer"]
     assert any(s.startswith("event: error") for s in sse) and sse[-1] == DONE
+    # M6: the host's failure is in the host log (no history.jsonl projection)
+    assert any(h["type"] == "workflow" and h["body"].get("kind") == "completed"
+               and h["body"].get("outcome") == "failed" for h in w.sync.read_host())
     await w.close()
 
 

@@ -116,6 +116,8 @@ REQUIRED_BODY: dict[str, dict[str, tuple]] = {
 }
 
 OPTIONAL_BODY: dict[str, dict[str, tuple]] = {
+    # M6: a run converted from a legacy history.jsonl (app.session.migrate --events)
+    "session_start": {"migrated": BOOL},
     "input": {"question_id": STR, "answer": STR},
     "llm_response": {"response_id": OPT_STR},
     # M4: `attempt` = the gateway POST of an mcp call (0 = the first);

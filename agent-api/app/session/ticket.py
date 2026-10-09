@@ -2,7 +2,8 @@
 
 One ticket per operation (``chat.turn``, ``llm.chat_completion``, ``tool.X``).
 Tickets are append-only: ``start()`` writes the open record, ``finish()``
-rewrites it atomically with the final state / summary / manifest.
+rewrites it atomically with the final state / summary / manifest. The
+ticket file is the record (M6: no trace.jsonl rows any more).
 """
 from __future__ import annotations
 
@@ -53,7 +54,6 @@ class Ticket:
         path = session.tickets / f"{ticket_id}.json"
         atomic_write_json(path, record)
         session.update_meta(last_ticket_id=ticket_id)
-        session.append_trace(f"{operation}.start", ticket_id=ticket_id)
         return cls(session, ticket_id, path, record)
 
     def finish(
@@ -77,8 +77,3 @@ class Ticket:
         if manifest is not None:
             self.record["manifest"] = manifest.to_dict()
         atomic_write_json(self.path, self.record)
-        self.session.append_trace(
-            f"{self.record['operation']}.{state}",
-            {"summary": summary} if summary else None,
-            ticket_id=self.ticket_id,
-        )
