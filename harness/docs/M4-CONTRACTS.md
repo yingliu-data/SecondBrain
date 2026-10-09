@@ -107,6 +107,39 @@ after resume). A held call does not count toward `max_concurrent` (§6). The hel
 call lives in gateway memory (one replica; a gateway restart loses it → the
 call's result is an error). All of it is one operation, one `call_id`.
 
+### 3.3 Long calls survive a park (forwarder-held calls)
+
+A snapshot resets the guest's vsock connections, so an MCP call cannot stay
+open in the guest across a park. The **forwarder** owns the call instead:
+
+- Every guest `tools/call` carries `X-SB-Call: <call_id>` (the forwarder keeps
+  this header; it is not an identity header). The forwarder runs the gateway
+  request in its own thread, independent of the guest's connection, and keeps
+  the response in a per-session table `{call_id: running | done(status, body)}`
+  until the guest has received it (or the session ends).
+- If the guest's connection drops (park, snapshot, link loss), the gateway
+  request keeps running and its response is stored.
+- The guest re-attaches by re-sending the **same** request with
+  `X-SB-Call` and `X-SB-Reattach: 1`: a running call is joined (the response
+  arrives when it completes), a done one is answered at once. An unknown
+  `call_id` on a re-attach (agent-api restarted, table lost) → HTTP 410 and the
+  guest records the op `lost` — the call is **never re-executed**.
+  A first send (no `X-SB-Reattach`) with a `call_id` already in the table is a
+  re-attach too (idempotent by call_id).
+- Guest park rule: an in-flight mcp op is treated like a host-originated op —
+  park does not wait for it or kill it. On park the guest closes its :5011
+  connections without cancelling; after resume it re-attaches every mcp op that
+  is still open (op timer keeps running across the park; the op timeout is
+  enforced by the guest as before, and an expired op re-attach is skipped and
+  recorded `timeout`).
+- An input-required result (§3.2) is the response of that request: the
+  forwarder hands it over like any other; the re-send carrying
+  `sb/input_response` is a new request with the same `X-SB-Call` and
+  `X-SB-Reattach` absent — the forwarder replaces the table entry.
+- Death resume (M3 §4) keeps its rule: open calls become `op_state{lost}`
+  (the new guest process does not re-attach); the forwarder discards their
+  entries when the worker records `lost`.
+
 ## 4. Hello tool entries (worker → guest)
 
 `GET /internal/tools` returns `{"tools": [entry...]}`; each entry goes into
