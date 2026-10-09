@@ -3,7 +3,7 @@ import contextlib
 import logging
 
 from fastapi import APIRouter, Request, Depends
-from flows.activities import SessionConfig, SessionRef, TaskSignal
+from flows.activities import SessionRef, TaskSignal
 from flows.client import signal_answer, signal_task
 from flows.session_workflow import AnswerSignal
 from fastapi.responses import StreamingResponse
@@ -11,6 +11,7 @@ from app.auth.middleware import verify
 from app.agent.loop import run_agent_loop, SSE_HEADERS
 from app.config import AGENT_ENGINE, HARNESS_KEEPALIVE_S, MAX_INPUT
 from app.host import temporal
+from app.host.activities import bind_workflow
 from app.host.stream import DONE, KEEPALIVE, sse, tokens
 from app.host.worker import Workers, new_input_id
 from app.session.dir_store import DirStore
@@ -221,35 +222,36 @@ async def _workflow_turn(tenant: Tenant, session_id: str, message: str, input_id
     session = sessions.get_or_create(tenant.user, tenant.name, session_id)
     set_current_context(session, tenant.user, tenant.name, session_id)
     worker = workers.get_or_create(session, tenant, _registry)
-    entry = tenant.workflow_entry()
-    if worker.answer_wait_s is None:
-        worker.answer_wait_s = SessionConfig.from_tenant(entry).answer_wait_s
+    config = bind_workflow(worker, tenant)
     ref = SessionRef(user=tenant.user, tenant=tenant.name, session_id=session_id)
+    no_question = [sse("error", {"class": "fatal", "message": "no question is waiting"}), DONE]
 
     if answer_to:
         st = await temporal.status(ref)
         task_id = (st.current_input_id if st is not None else None) or worker.current_input_id
         if task_id is None:
-            for item in tokens("No question is waiting for this answer.") + [
-                    sse("error", {"class": "fatal", "message": "no question is waiting"}), DONE]:
+            for item in tokens("No question is waiting for this answer.") + no_question:
                 yield item
             return
-        sink = worker.attach(task_id)
-        if st is not None and st.state == "parked" and st.question_id == answer_to:
-            await signal_answer(temporal.client, ref, AnswerSignal(question_id=answer_to,
-                                                                   text=message))
-        elif not worker.answer(answer_to, message, input_id):
-            worker.detach(sink)
-            for item in [sse("error", {"class": "fatal", "message": "no question is waiting"}),
-                         DONE]:
+        if st is not None and st.state == "parked" and st.question_id != answer_to:
+            # the workflow holds the parked task and ignores this answer:
+            # a ui_response to the worker would wake the guest behind its back
+            for item in no_question:
                 yield item
             return
-    else:
-        sink = worker.attach(input_id)
-        if not worker.replay_to(sink, input_id):      # a settled input: its answer again
-            await signal_task(temporal.client, ref, TaskSignal(input_id=input_id, text=message),
-                              task_queue=temporal.task_queue, config=SessionConfig.from_tenant(entry))
+    sink = worker.attach(task_id if answer_to else input_id)
     try:
+        if answer_to:
+            if st is not None and st.state == "parked":
+                await signal_answer(temporal.client, ref, AnswerSignal(question_id=answer_to,
+                                                                       text=message))
+            elif not worker.answer(answer_to, message, input_id):
+                for item in no_question:
+                    yield item
+                return
+        elif not worker.replay_to(sink, input_id):      # a settled input: its answer again
+            await signal_task(temporal.client, ref, TaskSignal(input_id=input_id, text=message),
+                              task_queue=temporal.task_queue, config=config)
         while True:
             try:
                 item = await asyncio.wait_for(sink.get(), timeout=HARNESS_KEEPALIVE_S)

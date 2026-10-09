@@ -243,9 +243,12 @@ class Worker:
         for call in self.device_calls.open_for(self.session_key):
             # PLAN.md 8: an open device call is re-emitted to the stream that attaches
             q.put_nowait(sse("tool_call", call))
-        for question in self.open_questions():
-            # M5 §3: so is an open question (the phone gets it on reconnect)
-            q.put_nowait(sse("question", question))
+        current = self.current_input_id
+        if input_id is None or current is None or input_id == current:
+            # M5 §3: so is an open question (the phone gets it on reconnect);
+            # not to the stream of an input queued behind the asking task
+            for question in self.open_questions():
+                q.put_nowait(sse("question", question))
         return q
 
     def detach(self, q: asyncio.Queue) -> None:
@@ -945,7 +948,8 @@ class Worker:
         except Exception as e:      # e.g. the unix socket path is too long
             logger.exception("session %s: host plumbing failed", self.session_key)
             self._fail(input_id, "failed", f"The agent sandbox failed: {e}", input_id_scope=input_id)
-            self._end_stream(input_id)
+            if not self.workflow_driven:    # the workflow path: deliver sends error + done
+                self._end_stream(input_id)
             raise GuestError(f"host plumbing failed: {e}") from e
 
         cur = self._current

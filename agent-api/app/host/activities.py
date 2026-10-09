@@ -56,6 +56,15 @@ def ticket_id_for(ref: SessionRef, input_id: str, settled_seq: int | None) -> st
     return derive_id(ref.user, ref.tenant, f"{ref.session_id}/{input_id}", 1, "ticket")
 
 
+def bind_workflow(w: Worker, tenant) -> SessionConfig:
+    """The tenant's SessionConfig; puts `w` on the workflow path (hello
+    limit answer_wait_s, deliver ends the streams) if it is not yet."""
+    config = SessionConfig.from_tenant(tenant.workflow_entry())
+    if w.answer_wait_s is None:
+        w.answer_wait_s = config.answer_wait_s
+    return config
+
+
 def _floor_seq(details: Any) -> int:
     """The previous attempt's last heartbeat {last_seq} (a floor only: the
     SDK throttles heartbeats, M0 spike)."""
@@ -87,8 +96,7 @@ class HostActivities:
             raise ApplicationError(f"unknown tenant {ref.user}/{ref.tenant}", non_retryable=True)
         session = self.sessions.get_or_create(ref.user, ref.tenant, ref.session_id)
         w = self.workers.get_or_create(session, tenant, self.registry)
-        if w.answer_wait_s is None:     # the workflow path (hello limit, deliver ends streams)
-            w.answer_wait_s = SessionConfig.from_tenant(tenant.workflow_entry()).answer_wait_s
+        bind_workflow(w, tenant)
         return w
 
     @staticmethod
@@ -106,7 +114,11 @@ class HostActivities:
         """abort{reason} to the guest, then wait (bounded) for that input's
         act() to finish: the guest writes the settle itself."""
         task = w.task_for(input_id)
-        if not w.abort(reason) or task is None:
+        # abort{} is not input-scoped (the guest settles whatever it runs and
+        # exits): only while this input's act() is the running one
+        if task is None or task.done() or w.current_input_id != input_id:
+            return
+        if not w.abort(reason):
             return
         try:
             await asyncio.wait_for(asyncio.shield(task), timeout=self.abort_wait_s)
@@ -134,8 +146,14 @@ class HostActivities:
             if inp.resume and inp.question_id:
                 # a parked guest is restored, ui_response first; a retry
                 # resends the same input_id and the guest dedupes it
-                w.answer(inp.question_id, inp.answer or "",
-                         answer_input_id(inp.input_id, inp.question_id))
+                sent = w.answer(inp.question_id, inp.answer or "",
+                                answer_input_id(inp.input_id, inp.question_id))
+                if not sent and inp.input_id not in w.sync.settled:
+                    # no guest holds the parked task: start_task would run
+                    # it again from scratch in a fresh run (a second turn)
+                    raise ApplicationError(
+                        f"no guest to resume input {inp.input_id} (question {inp.question_id})",
+                        non_retryable=True)
             # a running act() for this input is re-attached, a settled one
             # replays its stored settle: never a second turn
             w.start_task({"input_id": inp.input_id, "text": inp.text, "kind": inp.kind})

@@ -57,6 +57,7 @@ async def start(activities: list, tenants_doc: dict | None = None, *,
     _worker = build_worker(connected, task_queue=queue, activities=activities, **worker_kwargs)
     _worker_task = asyncio.get_running_loop().create_task(_worker.run(),
                                                           name=f"temporal-worker:{queue}")
+    _worker_task.add_done_callback(_worker_exited)
     client, task_queue = connected, queue
     logger.info("Temporal worker on %s (%s)", queue, connected.namespace)
     if tenants_doc is not None:
@@ -66,6 +67,18 @@ async def start(activities: list, tenants_doc: dict | None = None, *,
         except Exception as e:  # noqa: BLE001 - schedules never block startup
             logger.error("ensure_schedules failed: %r", e)
     return True
+
+
+def _worker_exited(t: asyncio.Task) -> None:
+    """A worker that dies on its own (namespace missing, poll failure)
+    would leave /chat signalling workflows no one runs: back to the direct
+    path. stop() clears _worker_task first, so its shutdown is not this."""
+    global client, _worker, _worker_task
+    if t is not _worker_task:
+        return
+    e = None if t.cancelled() else t.exception()
+    logger.error("Temporal worker exited (%r), direct path from now on", e)
+    client, _worker, _worker_task = None, None, None
 
 
 async def stop() -> None:
