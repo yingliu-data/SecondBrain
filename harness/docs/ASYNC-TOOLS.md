@@ -83,10 +83,14 @@ the `--llm-url` path against a local OpenAI-compatible double) in
 
 ### On the server (vLLM, Qwen3-14B)
 
+vLLM is `secondbrain-llm:8080` on the compose `llm_internal` network (no
+published port) and serves the model as `qwen3-14b`. Run the bench from a
+container on that network; the exact command is in `RUNBOOK-M6.md` §4:
+
 ```
 cd harness
 uv run python -m bench.async_tools \
-    --llm-url http://127.0.0.1:8000 --model Qwen/Qwen3-14B \
+    --llm-url http://secondbrain-llm:8080 --model qwen3-14b \
     --runs 3 --out /tmp/async-bench-$(date +%F).json
 ```
 
@@ -115,8 +119,8 @@ totals over `--runs 3`.
 
 | Date | vLLM / model | Mode | Passed | Turns | Prompt tok | Completion tok | Tool calls | Placeholders | Wall s |
 |---|---|---|---|---|---|---|---|---|---|
-| | Qwen/Qwen3-14B | off | /27 | | | | | 0 | |
-| | Qwen/Qwen3-14B | on | /27 | | | | | | |
+| | qwen3-14b | off | /27 | | | | | 0 | |
+| | qwen3-14b | on | /27 | | | | | | |
 
 Per-task notes (failures, answers that ignored a `[pending]` result, extra
 turns):

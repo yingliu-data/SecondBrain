@@ -327,8 +327,9 @@ Contracts: docs/M4-CONTRACTS.md (sections 3.1-3.3 and 4). What the guest does:
 ## M5 as built (questions park the task, escalation via abort)
 
 - **Limit**: `answer_wait_s` (int ≥ 0, default 0) joins `hello.config.limits`
-  (part of `config_hash`). The worker sends the tenant's value only on the
-  Temporal path; 0 keeps the M1–M4 behaviour (deny, three → escalated; an
+  (part of `config_hash`). The worker sends the tenant's value on both
+  paths (the direct driver handles a question park like the workflow); 0
+  keeps the M1–M4 behaviour (deny, three → escalated; an
   input-required op is cancelled).
 - **Deadline with `answer_wait_s > 0`** (`Coordinator._question_expired`):
   `clock{question_deadline}`, the deadline timer is dropped, the question is

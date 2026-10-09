@@ -1,6 +1,6 @@
 # M2 runbook: context, compaction and streaming on the server
 
-Follows `RUNBOOK-M1.md` (a VM boots, a session runs on `engine: harness`).
+Follows `RUNBOOK-M1.md` (a VM boots, a session runs on the harness engine).
 This one verifies the three M2 exit criteria of PLAN.md section 13 against
 the vLLM 0.11 container (`secondbrain-llm`, `vllm/vllm-openai:v0.11.0`,
 `--enable-auto-tool-choice --tool-call-parser=hermes --reasoning-parser=qwen3`).
@@ -9,9 +9,9 @@ What M2 changed on the host (`agent-api/app/host/`):
 
 | Piece | Change |
 |---|---|
-| `worker.py` | hello carries `params.stream` (from `LLM_STREAM`, default true) and `limits.context_window_tokens` / `reserve_tokens` / `token_budget` (from `HARNESS_CONTEXT_WINDOW_TOKENS` 32768, `HARNESS_RESERVE_TOKENS` 4096, `HARNESS_TOKEN_BUDGET` 0); the proxy gets the session key and the budget when its constructor takes them |
+| `worker.py` | hello carries `params.stream` (from `LLM_STREAM`, default true) and `limits.context_window_tokens` / `reserve_tokens` (from `HARNESS_CONTEXT_WINDOW_TOKENS` 32768, `HARNESS_RESERVE_TOKENS` 4096); the token budget (`HARNESS_TOKEN_BUDGET`, 0 = none) is the LLM proxy's per-session knob, not a hello limit |
 | `stream.py` | live `delta{kind: content}` fragments are `token` events verbatim; `reasoning` and `tool_call` deltas are dropped; a turn that streamed is not re-emitted at `llm_response`, and vice versa |
-| `state_sync.py` | a guest `memory{scope: session}` event derived from a compaction turn is projected to `{session}/memory/compaction-<seq>.md` through `MemoryStore`, hash-checked against the event; every `memory` event is traced |
+| `state_sync.py` | a guest `memory{scope: session}` event derived from a compaction turn is projected to `{session}/memory/compaction-<seq>.md` through `MemoryStore`, hash-checked against the event (the event log is the trace: `logs/trace.jsonl` is no longer written since M6) |
 | `sides.py`, `skills/remember` | `remember` returns `sha256` of the written file, `forget` returns `sha256: ""`; Sides logs a `memory` host event `{scope, op, slug, sha256, call_id}` |
 
 The guest side (streamed provider, token estimate, compaction turn) is in
@@ -19,9 +19,42 @@ The guest side (streamed provider, token estimate, compaction turn) is in
 
 Every command below assumes the compose stack is up with the local LLM
 profile (`docker compose --profile local-llm up -d`) and runs from the repo
-root. `$API_SECRET_KEY` is agent-api's bearer; `$SESSION` names a session dir
+root. `$SESSION` names a session dir
 `agent-api/data/sessions/{user}/{tenant}_{session_id}` (inside the container:
 `/root/agent-api/data/sessions/...`).
+
+Helpers. Neither agent-api nor vLLM publishes a host port, the agent-api
+image (`python:3.12-slim`) has no `curl`, and `/api/v1/chat` wants Bearer +
+`X-Timestamp` + `X-Signature` (HMAC-SHA256 of timestamp + body,
+`app/auth/middleware.py`), so both go through Python inside the agent-api
+container:
+
+```sh
+llm() {   # llm PATH [JSON]: GET or POST to the vLLM server, the response streamed
+  docker compose exec -T agent-api python - "$@" <<'EOF'
+import sys, urllib.request
+data = sys.argv[2].encode() if len(sys.argv) > 2 else None
+req = urllib.request.Request("http://secondbrain-llm:8080" + sys.argv[1], data=data,
+                             headers={"Content-Type": "application/json"})
+with urllib.request.urlopen(req, timeout=300) as r:
+    for line in r:
+        sys.stdout.write(line.decode()); sys.stdout.flush()
+EOF
+}
+chat() {  # chat '<json body>': POST /api/v1/chat as the default tenant, the SSE stream
+  docker compose exec -T agent-api python - "$1" <<'EOF'
+import hashlib, hmac, os, sys, time, urllib.request
+key, body, ts = os.environ["API_SECRET_KEY"], sys.argv[1].encode(), str(int(time.time()))
+sig = hmac.new(key.encode(), ts.encode() + body, hashlib.sha256).hexdigest()
+req = urllib.request.Request("http://localhost:8000/api/v1/chat", data=body, headers={
+    "Authorization": f"Bearer {key}", "X-Timestamp": ts, "X-Signature": sig,
+    "Content-Type": "application/json"})
+with urllib.request.urlopen(req) as r:
+    for line in r:
+        sys.stdout.write(line.decode()); sys.stdout.flush()
+EOF
+}
+```
 
 ## 1. Prefix-cache hits from turn 2
 
@@ -50,8 +83,7 @@ are deprecated since 0.9.2 (removal planned for 0.12) and only appear with
 `prefix_cache` and use whichever pair the build prints.
 
 ```sh
-scrape() { docker compose exec -T agent-api curl -s http://secondbrain-llm:8080/metrics \
-           | grep -E '^vllm:prefix_cache_(queries|hits)_total' ; }
+scrape() { llm /metrics | grep -E '^vllm:prefix_cache_(queries|hits)_total' ; }
 scrape
 # vllm:prefix_cache_queries_total{model_name="qwen3-14b"} 18342.0
 # vllm:prefix_cache_hits_total{model_name="qwen3-14b"} 11776.0
@@ -67,14 +99,10 @@ the session's.
 ```sh
 read Q0 H0 < <(scrape | awk '{printf "%s ", $2} END {print ""}')
 # turn 1
-curl -sN -X POST localhost:8000/chat -H "Authorization: Bearer $API_SECRET_KEY" \
-     -H 'Content-Type: application/json' \
-     -d '{"session_id": "m2-cache", "message": "List the files in my workspace.", "input_id": "i-1"}' >/dev/null
+chat '{"session_id": "m2-cache", "message": "List the files in my workspace.", "input_id": "i-1"}' >/dev/null
 read Q1 H1 < <(scrape | awk '{printf "%s ", $2} END {print ""}')
 # turn 2 (same session, new input_id)
-curl -sN -X POST localhost:8000/chat -H "Authorization: Bearer $API_SECRET_KEY" \
-     -H 'Content-Type: application/json' \
-     -d '{"session_id": "m2-cache", "message": "And how big is the largest one?", "input_id": "i-2"}' >/dev/null
+chat '{"session_id": "m2-cache", "message": "And how big is the largest one?", "input_id": "i-2"}' >/dev/null
 read Q2 H2 < <(scrape | awk '{printf "%s ", $2} END {print ""}')
 python3 -c "q1,h1,q2,h2=$Q1-$Q0,$H1-$H0,$Q2-$Q1,$H2-$H1; print(f'turn1 {h1}/{q1}={h1/q1:.2f}  turn2 {h2}/{q2}={h2/q2:.2f}')"
 ```
@@ -93,10 +121,9 @@ in the chat-completions response when prefix caching is on; a direct
 request repeated twice shows it:
 
 ```sh
-docker compose exec -T agent-api sh -c 'for i in 1 2; do curl -s http://secondbrain-llm:8080/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d "{\"model\":\"qwen3-14b\",\"messages\":[{\"role\":\"system\",\"content\":\"$(head -c 4000 /dev/zero | tr \"\\0\" a)\"},{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":4}" \
-  | python3 -c "import sys,json; print(json.load(sys.stdin)[\"usage\"])"; done'
+BODY=$(python3 -c 'import json; print(json.dumps({"model": "qwen3-14b", "max_tokens": 4,
+  "messages": [{"role": "system", "content": "a" * 4000}, {"role": "user", "content": "hi"}]}))')
+for i in 1 2; do llm /v1/chat/completions "$BODY" | python3 -c "import sys,json; print(json.load(sys.stdin)['usage'])"; done
 # second line: 'prompt_tokens_details': {'cached_tokens': N} with N close to prompt_tokens
 ```
 
@@ -104,7 +131,7 @@ If turn 2 shows no hits: (1) the system block differs between turns -
 diff `turn_start.request_hash` is expected to change (the preamble does)
 but the first `system` message in two consecutive proxy requests must be
 byte-identical; capture them with `LLM_PROXY_DEBUG`-free means: the fold's
-`committed_prefix` of the session (`state.to_canonical()["committed_prefix"]`)
+`committed_prefix` of the session (`state.committed_prefix`, as in the replay script of §2)
 is what was sent; (2) the tool list changed between turns - `session_start.tools`
 is fixed, but a `max_tools` final turn is sent **without** tools and
 therefore with a different chat-template prefix: that turn alone misses;
@@ -122,22 +149,21 @@ from the summary. The host projects the summary to
 `{session}/memory/compaction-<seq>.md` and warns in the agent-api log if the
 event's sha256 differs from the summary text.
 
-In M2 the guest still exits at settle and the host boots a fresh guest per
-task (`HARNESS_STOP_AT_SETTLE=true`, one run `events/rNNNN/` per task), so a
-prefix spans the turns of **one task**; a session-long prefix across tasks
-is M3's resumable VM. "40 turns" is therefore 40 model turns inside one
-task: raise `HARNESS_MAX_TURNS`, lower the window so the compaction fires
-on a real but short session, and give the model a task that needs many tool
-calls.
+Since M3 one long-lived guest serves the whole session
+(`HARNESS_STOP_AT_SETTLE` defaults to `false`: one run `events/r0001/` per
+session, parked and resumed across idle periods), so the prefix spans tasks.
+The M2 recipe below still makes the 40 turns inside one task, the quickest
+way to force a compaction: raise `HARNESS_MAX_TURNS` (per task, default 12),
+lower the window so the compaction fires on a real but short session, and
+give the model a task that needs many tool calls. The three variables are
+read at import (`app/config.py`): put them in the agent-api service's
+`environment:` and `docker compose up -d agent-api`.
 
 ```sh
-# on the agent-api service (compose environment or `docker compose run -e ...`)
-HARNESS_MAX_TURNS=40 HARNESS_CONTEXT_WINDOW_TOKENS=8192 HARNESS_RESERVE_TOKENS=4096 \
-  # compaction fires when the estimate passes 4096 tokens
-curl -sN -X POST localhost:8000/chat -H "Authorization: Bearer $API_SECRET_KEY" \
-     -H 'Content-Type: application/json' \
-     -d '{"session_id": "m2-compact", "input_id": "c-1",
-          "message": "Create files n01.txt ... n30.txt in the workspace, one bash call per file, each containing its own number, then cat them all and tell me the sum."}'
+# agent-api environment: HARNESS_MAX_TURNS=40 HARNESS_CONTEXT_WINDOW_TOKENS=8192 HARNESS_RESERVE_TOKENS=4096
+# (compaction fires when the estimate passes 4096 tokens)
+chat '{"session_id": "m2-compact", "input_id": "c-1",
+       "message": "Create files n01.txt ... n30.txt in the workspace, one bash call per file, each containing its own number, then cat them all and tell me the sum."}'
 ```
 
 What to look at (`S=agent-api/data/sessions/<user>/<tenant>_m2-compact`):
@@ -147,18 +173,21 @@ ls $S/memory/                       # compaction-<seq>.md (+ MEMORY.md index)
 grep -h '"type":"compaction"' $S/events/r0001/*.jsonl | python3 -m json.tool | head
 grep -h '"type":"memory"' $S/events/r0001/*.jsonl
 grep -h '"type":"turn_start"' $S/events/r0001/*.jsonl | grep -c '"type":"compaction"'
-grep -h '"event": "memory"' $S/logs/trace.jsonl
+jq -c 'select(.type=="memory") | .body' $S/events/host-*.jsonl   # remember/forget host events (none for a compaction)
 docker compose logs agent-api | grep -i 'memory .* sha256'   # must be empty: hash matched
 ```
 
 Replay: `protocol.fold.replay(events)` validates the log, verifies the
 checkpoints and folds it once; an empty problem list and a state whose
 `committed_prefix` starts with the summary message is the exit criterion.
-There is no CLI module yet (`python3 -m protocol.replay` is M6); run the
-function over the run's segments:
+Since M6 the CLI does the first half
+(`docker compose exec agent-api python -m protocol.replay verify data/sessions/<user>/<tenant>_m2-compact`
+-> `verified 1 target(s): 1 ok, 0 failed`; `replay` instead of `verify`
+prints turns, settle and `state_hash` per run). For the compaction fields,
+run the function over the run's segments:
 
 ```sh
-cd harness && python3 - "$S" <<'EOF'
+PYTHONPATH=harness python3 - "$S" <<'EOF'
 import glob, json, sys
 from protocol.fold import replay, state_hash
 run = sorted(glob.glob(sys.argv[1] + "/events/r*"))[-1]
@@ -208,8 +237,8 @@ concatenate to valid JSON. Verify the raw stream first, then the guest.
 ### 3a. The raw stream from vLLM
 
 ```sh
-docker compose exec -T agent-api curl -sN http://secondbrain-llm:8080/v1/chat/completions \
-  -H 'Content-Type: application/json' -d '{
+cat > /tmp/req.json <<'EOF'
+{
   "model": "qwen3-14b", "stream": true, "stream_options": {"include_usage": true},
   "messages": [{"role": "user", "content": "What is the weather in Paris right now? Use the tool."}],
   "tools": [{"type": "function", "function": {"name": "get_weather",
@@ -218,7 +247,9 @@ docker compose exec -T agent-api curl -sN http://secondbrain-llm:8080/v1/chat/co
                             "unit": {"type": "string", "enum": ["c", "f"]}},
                             "required": ["city"]}}}],
   "tool_choice": "auto", "max_tokens": 200,
-  "chat_template_kwargs": {"enable_thinking": false}}'
+  "chat_template_kwargs": {"enable_thinking": false}}
+EOF
+llm /v1/chat/completions "$(cat /tmp/req.json)"
 ```
 
 A good stream looks like this (one `data:` line per chunk; the first
@@ -239,8 +270,7 @@ Check the assembly mechanically: concatenate the `arguments` fragments per
 `index` and parse them.
 
 ```sh
-docker compose exec -T agent-api curl -sN http://secondbrain-llm:8080/v1/chat/completions \
-  -H 'Content-Type: application/json' -d @/tmp/req.json |   # the body above, saved to a file
+llm /v1/chat/completions "$(cat /tmp/req.json)" |
 python3 -c '
 import json, sys
 calls = {}
@@ -277,7 +307,7 @@ if every run prints a parsed dict and `finish_reason: tool_calls`.
   the coordinator's validate step logging malformed JSON arguments for a
   built-in, followed by the one repair turn (`tool_call` with an error
   `tool_result` "arguments are not valid JSON") and, if the second attempt
-  fails too, `settle{failed}`; in `events/`, an `llm_response` whose
+  fails too, `settle{failed}`; in `events/r0001/`, an `llm_response` whose
   `message.tool_calls[].function.arguments` does not `json.loads`.
 - streamed `content` that interleaves with reasoning: with
   `--reasoning-parser=qwen3` and `enable_thinking: false` there must be no
@@ -322,7 +352,6 @@ branch of the exit criterion.
 | `LLM_STREAM` | `true` | worker -> `hello.config.params.stream` |
 | `HARNESS_CONTEXT_WINDOW_TOKENS` | `32768` (match `--max-model-len`) | worker -> `limits.context_window_tokens` |
 | `HARNESS_RESERVE_TOKENS` | `4096` | worker -> `limits.reserve_tokens` |
-| `HARNESS_TOKEN_BUDGET` | `0` (none) | worker -> `limits.token_budget` and the proxy's per-session budget (402 when exceeded) |
+| `HARNESS_TOKEN_BUDGET` | `0` (none) | the LLM proxy's per-session budget (402 when exceeded); not a hello limit |
 
-Until `app/config.py` defines them the worker reads them with these
-defaults (`app.host.worker.cfg`), so an unset key is never an import error.
+All four are defined in `app/config.py` with these defaults.

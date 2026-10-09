@@ -81,7 +81,7 @@ IMG=~/data/SecondBrain/vm
 truncate -s 256M $S/vm/workspace.img && mkfs.ext4 -F -q $S/vm/workspace.img
 
 # a stand-in for the host's :5000 listener, so the guest's connect() lands somewhere
-( socat -v UNIX-LISTEN:$S/ipc/v.sock_5000,fork - 2>&1 | tee $S/control.log ) &
+( socat -d -d -v UNIX-LISTEN:$S/ipc/v.sock_5000,fork - 2>&1 | tee $S/control.log ) &
 
 firecracker --api-sock $S/vm/firecracker.sock --id smoke \
             --log-path $S/vm/firecracker.log --level Info &
@@ -97,10 +97,16 @@ api /actions          '{"action_type": "InstanceStart"}'
 ```
 
 Expected on the terminal (ttyS0): the kernel log, then
-`harness-init: starting guest harness (vsock -> CID 2)`, then in
-`$S/control.log` the guest's first line on :5000 (its handshake ack, see
-`docs/PROTOCOL.md`); with nobody sending `hello` the guest waits and
-reconnects with backoff. Stop it:
+`harness-init: starting guest harness (idle-wait, then vsock -> CID 2)`.
+The guest starts in `--idle-wait vsock` (since M3: the base-snapshot point):
+it polls :5000 every 50 ms, silently, and once connected sends nothing until
+the host sends its first line. So `$S/control.log` shows socat's
+`accepting connection` line and no data; without `/dev/vdb` mounted yet
+(the guest mounts it with `--mount-workspace /dev/vdb` only after
+idle-wait) that is the whole boot check. Typing any line into socat ends
+idle-wait (`guest.main INFO idle-wait over: the host answered on :5000` on
+the console); with no `hello` after it the guest exits after 30 s
+(`no hello within 30s`, exit 3) and init reboots the VM. Stop it:
 
 ```sh
 api /actions '{"action_type": "SendCtrlAltDel"}'    # init: sync, umount, reboot -> firecracker exits
@@ -147,24 +153,32 @@ Expected: `lo` only, every connect `Network is unreachable`, DNS fails, and
 
 ### 6a. The host's local test path (no VM) - works on any machine
 
-`HARNESS_SANDBOX=local` runs the guest as a subprocess
-(`python -m guest.main --connect unix:{session_dir}/ipc ...`) against the same
-`{session_dir}/ipc/v.sock_{port}` listeners. Use it to separate "the loop"
-from "the VM":
+`HARNESS_SANDBOX=local` (the default) runs the guest as a subprocess
+(`python -m guest.main --connect unix:{session_dir}/ipc --log-dir
+{session_dir}/guest --workspace {session_dir}/vm/workspace`) against the same
+`{session_dir}/ipc/v.sock_{port}` listeners. `{session_dir}/vm/workspace` is
+the guest's private workspace (the analogue of `vm/workspace.img`); the
+host's `{session_dir}/workspace` is written only by the bulk server. Use it
+to separate "the loop" from "the VM". Every tenant runs the harness engine
+(there is no `AGENT_ENGINE` any more), and `/api/v1/chat` wants Bearer +
+`X-Timestamp` + `X-Signature` (HMAC-SHA256 of timestamp + body with the
+key, `app/auth/middleware.py`):
 
 ```sh
 cd agent-api
-AGENT_ENGINE=harness HARNESS_SANDBOX=local API_SECRET_KEY=... LLM_URL=http://localhost:8080 \
+HARNESS_SANDBOX=local API_SECRET_KEY=... LLM_URL=http://localhost:8080 \
   uv run uvicorn app.main:app --port 8000
-curl -N -X POST localhost:8000/chat -H "Authorization: Bearer $API_SECRET_KEY" \
-     -H 'Content-Type: application/json' \
-     -d '{"session_id": "smoke1", "message": "What is in my workspace?", "input_id": "i-1"}'
+chat() { ts=$(date +%s)
+  sig=$(printf '%s%s' "$ts" "$1" | openssl dgst -sha256 -hmac "$API_SECRET_KEY" -r | cut -d' ' -f1)
+  curl -sN -X POST localhost:8000/api/v1/chat -H "Authorization: Bearer $API_SECRET_KEY" \
+       -H "X-Timestamp: $ts" -H "X-Signature: $sig" -H 'Content-Type: application/json' -d "$1"; }
+chat '{"session_id": "smoke1", "message": "What is in my workspace?", "input_id": "i-1"}'
 ```
 
 ### 6b. The same session in the VM
 
 ```sh
-AGENT_ENGINE=harness HARNESS_SANDBOX=firecracker \
+HARNESS_SANDBOX=firecracker \
 HARNESS_FIRECRACKER_BIN=/usr/local/bin/firecracker \
 HARNESS_KERNEL=$HOME/data/SecondBrain/vm/vmlinux \
 HARNESS_ROOTFS=$HOME/data/SecondBrain/vm/rootfs.ext4 \
@@ -172,7 +186,7 @@ HARNESS_WORKSPACE_TEMPLATE=$HOME/data/SecondBrain/vm/workspace-template.img \
 API_SECRET_KEY=... LLM_URL=http://localhost:8080 uv run uvicorn app.main:app --port 8000
 ```
 
-Then the same `curl`. What to look at per session directory
+Then the same `chat`. What to look at per session directory
 `data/sessions/{user}/{tenant}_{session}/`:
 
 | Path | Content |
@@ -180,19 +194,29 @@ Then the same `curl`. What to look at per session directory
 | `vm/console.log` | kernel + init + guest stderr (ttyS0) |
 | `vm/firecracker.log`, `vm/metrics.json` | Firecracker's own log and metrics |
 | `vm/workspace.img` | the session's `/workspace` (`debugfs -R ls` to peek without mounting) |
-| `ipc/v.sock`, `ipc/v.sock_5000`, `ipc/v.sock_5010` | the vsock uds and the host listeners |
-| `events/*.jsonl` | the canonical log (state sync) |
+| `ipc/v.sock`, `ipc/v.sock_5000`, `_5001`, `_5010`, `_5011` | the vsock uds and the host listeners (control, bulk, LLM proxy, MCP gateway forwarder) |
+| `events/r0001/000001.jsonl` | the canonical log (state sync), one `rNNNN/` per fresh guest |
+| `events/host-000001.jsonl` | the host log (`vm`, `workflow`, `usage`, `side_call`, ... records) |
 
 Every `HARNESS_*` variable the sandbox reads: `HARNESS_FIRECRACKER_BIN`,
 `HARNESS_KERNEL`, `HARNESS_ROOTFS`, `HARNESS_VM_VCPUS` (2), `HARNESS_VM_MEM_MIB`
 (2048), `HARNESS_WORKSPACE_MIB` (1024, when `mkfs.ext4` creates the image),
 `HARNESS_WORKSPACE_TEMPLATE` (copied sparsely when there is no `mkfs.ext4`),
 `HARNESS_BOOT_ARGS`, `HARNESS_GUEST_CID` (else derived per session),
-`HARNESS_FIRECRACKER_LOG_LEVEL` (Warning).
+`HARNESS_FIRECRACKER_LOG_LEVEL` (Warning); since M3 also `HARNESS_VM_CACHE`
+(`/var/lib/secondbrain/vm`), `HARNESS_IMAGE_VERSION`,
+`HARNESS_FIRECRACKER_VERSION`.
 
-## 7. docker-compose and Dockerfile changes (proposed; not applied by this milestone)
+## 7. docker-compose and Dockerfile changes (proposed at M1)
 
-`docker-compose.yml`, service `agent-api` - add:
+What `docker-compose.yml` has today (M3 and later): `/dev/kvm` and
+`/dev/vhost-vsock` under `devices:`, and `~/data/SecondBrain/vm` mounted
+**read-write** at `/var/lib/secondbrain/vm` (the `HARNESS_VM_CACHE` default,
+read-write so `build-base` can write `base/`; RUNBOOK-M3 §0 has the
+`HARNESS_*` paths under that mount). There is no `AGENT_ENGINE`. The image
+is built from the repo root (`agent-api/Dockerfile` copies
+`harness/protocol` and `harness/guest` to `/root/harness`, the
+`HARNESS_GUEST_ROOT`). The M1 proposal, kept for the record:
 
 ```yaml
     devices:
@@ -200,7 +224,6 @@ Every `HARNESS_*` variable the sandbox reads: `HARNESS_FIRECRACKER_BIN`,
       - /dev/vhost-vsock:/dev/vhost-vsock
     environment:
       # ... existing ...
-      - AGENT_ENGINE=legacy                      # flip per tenant via tenants.json `engine`
       - HARNESS_SANDBOX=firecracker
       - HARNESS_FIRECRACKER_BIN=/usr/local/bin/firecracker
       - HARNESS_KERNEL=/vm/vmlinux
@@ -212,13 +235,16 @@ Every `HARNESS_*` variable the sandbox reads: `HARNESS_FIRECRACKER_BIN`,
       - /usr/local/bin/firecracker:/usr/local/bin/firecracker:ro   # or bake it into the image, below
 ```
 
-The `vm/` cache volume is read-only to the container: per-session files
-(`workspace.img`, sockets, logs) live in the session directory on the
-existing `data/` volume, never in the cache. Firecracker needs no extra
+The proposal had the `vm/` cache read-only; it became read-write in M3 for
+`build-base`. Per-session files (`workspace.img`, sockets, logs, session
+snapshots) still live in the session directory on the `data/` volume, never
+in the cache. Firecracker needs no extra
 capabilities beyond the two device nodes (it is a plain process; the jailer,
 when it comes, needs `CAP_SYS_ADMIN` or a privileged sidecar - M3/OpenShell).
 
-`agent-api/Dockerfile` - two optional additions:
+`agent-api/Dockerfile` - two optional additions (the base image,
+`python:3.12-slim`, has no `curl`: install it in the same `RUN` or download
+in a build stage):
 
 ```dockerfile
 # e2fsprogs: lets the sandbox create workspace.img with mkfs.ext4 instead of
@@ -235,10 +261,9 @@ RUN curl -fL -o /tmp/fc.tgz https://github.com/firecracker-microvm/firecracker/r
  && rm -rf /tmp/fc.tgz /tmp/release-*
 ```
 
-`agent-api/Dockerfile` must also `COPY ../harness ./harness` (or the CI
-workflow must build with the repo root as context) for `HARNESS_GUEST_ROOT`
-and the local sandbox; that is the other half's change, noted here so the
-two land together.
+(Done since: compose and CI build with the repo root as context, and the
+Dockerfile copies `harness/protocol` and `harness/guest` for
+`HARNESS_GUEST_ROOT` and the local sandbox.)
 
 Session directories inside the container are
 `/root/agent-api/data/sessions/{user}/{tenant}_{session}` - short enough for
@@ -252,10 +277,10 @@ sandbox manager already switches to paths relative to Firecracker's cwd
 - [ ] `make image && make check` green on the server; `firecracker --version` prints the pinned version.
 - [ ] Step 4: a VM boots by hand, the guest connects to `v.sock_5000`, `SendCtrlAltDel` ends the process cleanly (`firecracker.log` shows the reset, no SIGKILL needed).
 - [ ] Step 5: the no-TAP VM cannot reach the network (`lo` only, connects fail, no DNS); output recorded.
-- [ ] The owner's phone runs a **calendar query** (device side) and a **web search** (host side) through a Firecracker VM on `engine: harness` for the default tenant.
-- [ ] A redelivered `POST /chat` with the same `input_id` runs once (one turn in `events/`, the second request attaches).
+- [ ] The owner's phone runs a **calendar query** (device side) and a **web search** (host side) through a Firecracker VM for the default tenant (every tenant runs the harness engine since M6).
+- [ ] A redelivered `POST /api/v1/chat` with the same `input_id` runs once (one turn in `events/r0001/`, the second request attaches).
 - [ ] The three goldens are reproduced live by the fake-host end-to-end test (`harness/tests`).
-- [ ] Existing agent-api tests green under both engines (`uv run pytest` with `AGENT_ENGINE=legacy` and `=harness`).
+- [ ] agent-api tests green (`cd agent-api && uv sync && uv run pytest`; one engine since M6).
 - [ ] `stop()` timing: VM gone within `stop_grace_s` (5 s) on the CtrlAltDel path; note the measured boot-to-`ready` time as the M3 baseline (< 200 ms is the snapshot target, not the rootfs-boot target).
 
 ## 9. Open questions for the server run
@@ -269,10 +294,11 @@ sandbox manager already switches to paths relative to Firecracker's cwd
    `3..2^31`. If two concurrent sessions ever collide, `PUT /vsock` fails with
    `EADDRINUSE`; the worker could then retry with `guest_cid + 1`. Decide
    whether to keep the hash or move to a host-wide counter in the worker.
-3. **Stop semantics vs M3**: today the init script reboots the VM when the
-   guest exits, and `HARNESS_STOP_AT_SETTLE=true` stops it after each task.
-   A VM that spans a session (D11/D18) needs the init to restart the guest or
-   idle instead; that is an M3 change to `harness-init`.
+3. **Stop semantics vs M3** (resolved in M3): the guest outlives a settle
+   and takes the next task; after a park it returns to idle-wait
+   (`guest/main.py`). `HARNESS_STOP_AT_SETTLE` defaults to `false`; the idle
+   timer (`HARNESS_SESSION_IDLE_S`) parks, snapshots and destroys the VM.
+   Init still reboots the VM when the guest process exits.
 4. **Console log growth**: `vm/console.log` is appended for the session's
    lifetime; decide a cap or rotation with the state-sync retention.
 5. **Kernel pin**: `v1.15/vmlinux-6.1.155` is the newest tag-named CI
