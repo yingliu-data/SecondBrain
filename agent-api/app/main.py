@@ -62,7 +62,7 @@ for _name, _cfg in tenant_registry.mcp_server_configs().items():
 
 # Inject dependencies into routes
 chat.set_dependencies(registry, llm)
-# harness Workers: on the workflow path (answer_wait_s) while Temporal runs
+# harness Workers: the tenant's answer_wait_s (a question park, either path)
 from app.host.activities import worker_config
 chat.workers.config_for = worker_config
 guest.set_dependencies(registry, llm)

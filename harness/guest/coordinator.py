@@ -99,9 +99,9 @@ M3 (docs/M3-CONTRACTS.md sections 3–5, docs/GUEST.md "M3"):
     Parking = every timer paused (its remaining time kept), checkpoint
     {through_seq, state_hash, prev_hash} + parked{checkpoint_seq, reason},
     a bounded wait until the host acked parked, transport.park() (close the
-    link, back to idle-wait). The next ("link", "up") resumes: timers re-armed
-    with what they had left, a deferred turn starts. Nothing is emitted on
-    resume.
+    link, back to idle-wait). The next ("link", "up") resumes:
+    clock{resumed, at} first (it ends the parked stretch on the log), timers
+    re-armed with what they had left, a deferred turn starts.
   - checkpoint chain: prev_hash = hash_value(session_start event) for the
     first, the previous checkpoint's state_hash after (fold.verify_checkpoints).
   - restore(events) before run(): the log the host returned on :5001 after a
@@ -114,7 +114,8 @@ M3 (docs/M3-CONTRACTS.md sections 3–5, docs/GUEST.md "M3"):
     no tool calls, otherwise a new turn (a turn whose response never came is
     first recorded as error{transient}). No second session_start. When the
     returned log ends with `parked` (a fresh process after the host stopped a
-    parked guest), nothing is lost: side calls and questions wait again.
+    parked guest), nothing is lost: side calls and questions wait again, and
+    run() emits clock{resumed} first (before clock{host_hello}).
   - settle: with a workspace, settle.manifest = guest.bulk.settle_manifest
     (changed files and the manifest put on :5001 when there is a bulk client).
   - run() may be called again after a settle: each call handles one task
@@ -166,13 +167,13 @@ M5 (docs/M5-CONTRACTS.md section 4, docs/GUEST.md "M5"):
     (_park_next_waiting). answer_wait_s == 0: the deny path above.
   - park: parked.wall_used_ms = the task's wall clock used so far (from the
     paused wall timer). restore: the wall clock used = the last park's
-    wall_used_ms + the guest-clock time since the first guest-side clock
-    event after it (or after the task's start, without a park).
+    wall_used_ms + the guest-clock time since its clock{resumed} (or after
+    the task's start, without a park).
   - question deadlines are log-derived: clock{question_deadline, ref} names
     the expired question, parked.at is the guest clock at the park. restore
     puts each question's due time (question.deadline) on a guest-clock axis
-    without the parked stretches (parked.at -> the first guest-side clock
-    event after it), as the live timers pause while parked; restoring a
+    without the parked stretches (parked.at -> the clock{resumed} after it),
+    as the live timers pause while parked; restoring a
     parked log re-arms each question not yet due with what it had left and
     sends the due ones through _question_expired, oldest first (no new park
     when the log's park is on one of them).
@@ -210,6 +211,7 @@ PARK_ACK_WAIT_S = 60.0            # how long a park waits for the host's ack of 
 LOST_CONTENT = "error: operation lost (VM restarted)"
 PAUSED_ON_PARK = ("wall_clock", "question_deadline", "op_timeout", "idle_timer")
 HOST_CLOCK_KINDS = ("host_hello", "host_heartbeat")   # clock events in host time, not the guest's
+RESUMED = "resumed"               # clock kind written first on every wake from a park (ends its stretch)
 PARK_QUESTION = "question"        # M5: parked.reason of a park on an unanswered question
 ESCALATED = "escalated"           # M5: the abort reason that settles escalated
 
@@ -1531,6 +1533,7 @@ class Coordinator:
 
     def _unpark(self) -> None:
         self.parked = False
+        self.emit("clock", {"kind": RESUMED, "at": self.clock.now_ms()})
         self.log("resumed after park", level="info")
         self._resume_timers()
         self._reattach_mcp()
@@ -1551,12 +1554,15 @@ class Coordinator:
         calls: dict[str, dict] = {}                 # call_id -> tool_call body
         last_guard_policy = None
         # wall clock used by the task: what the last park recorded, plus the
-        # guest-clock time since the first guest-side clock event after it (or
-        # after the task's start; nothing is logged on resume)
+        # guest-clock time since the clock{resumed} after it (or after the
+        # task's start)
         wall_used_ms, live_since = 0, None
         # question due times on the "live" axis: guest-clock ms minus the parked
-        # stretches before (a stretch runs from parked.at to the first
-        # guest-side clock event after it, as for the wall clock above)
+        # stretches before (a stretch runs from parked.at to the clock{resumed}
+        # after it, as for the wall clock above). Every wake writes clock{resumed}
+        # first, so it is the first guest-side clock event after the park; a log
+        # written before clock{resumed} existed ends the stretch at whatever
+        # guest-side clock event comes first (the fallback the same code gives).
         paused_ms, park_at, guest_at, park_question = 0, None, None, None
         for ev in events:
             etype, body = ev["type"], ev["body"]
@@ -1664,7 +1670,7 @@ class Coordinator:
         max_tools = _limit(self.limits, "max_tools", None)
         self._final_turn = bool(self.task_input_id is not None and max_tools
                                 and self._ops_this_task() >= max_tools)
-        after_park = events[-1]["type"] == "parked"
+        after_park = events[-1]["type"] == "parked"   # still in its stretch: no clock{resumed} yet
         self._restored = {"after_park": after_park, "wall_used_ms": wall_used_ms,
                           "live_since": live_since, "park_question": park_question,
                           "live_ms": park_at - paused_ms if after_park and park_at is not None else None}
@@ -1687,6 +1693,8 @@ class Coordinator:
     def _resume_restored(self, restored: dict) -> None:
         """After restore(): record the host's time, settle what the dead guest
         left open and wake the task (module doc, M3)."""
+        if restored.get("after_park"):            # a wake from a park: its stretch ends here
+            self.emit("clock", {"kind": RESUMED, "at": self.clock.now_ms()})
         at = getattr(self.cfg, "at", None)
         if is_int(at, 1):
             self.emit("clock", {"kind": "host_hello", "at": at})

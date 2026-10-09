@@ -34,7 +34,7 @@ strings. Times (`at`, `deadline`) are int milliseconds since the epoch.
 |---|---|---|
 | `session_start` | `user` str, `tenant` str, `workflow_run_id` str, `config_hash` str, `system_hash` str, `tools` list of `{name: str, side: guest/host/device/mcp, pin: str or null}` (unique names, `pin` key required), `harness_version` str, `image_version` str, `resumed` bool | guest main |
 | `input` | `input_id` str, `kind` in `task`/`follow_up`/`steer`/`ui_response`, `text` str, `dedupe` in `new`/`duplicate`/`late`, `question_id`? str, `answer`? str | inbox |
-| `clock` | `kind` in `host_hello`/`host_heartbeat`/`turn_clock`/`idle_timer`/`question_deadline`/`wall_clock` or any `grace_*`, `at` int ms, `ref`? str (M5: with `question_deadline`, the question whose deadline passed) | coordinator |
+| `clock` | `kind` in `host_hello`/`host_heartbeat`/`turn_clock`/`idle_timer`/`question_deadline`/`wall_clock`/`resumed` or any `grace_*`, `at` int ms, `ref`? str (M5: with `question_deadline`, the question whose deadline passed) | coordinator |
 | `turn_start` | `turn_id` str, `type` in `regular`/`compaction`, `includes_through_seq` int `>= 0`, `model` str, `params` dict, `request_hash` str, `preamble_hash` str, `workspace_tree_id` str or null | coordinator |
 | `llm_response` | `turn_id` str, `message` dict (the assistant message verbatim), `finish_reason` str, `usage` dict, `response_id`? str or null | provider |
 | `tool_call` | `turn_id` str, `call_id` str (vLLM's, verbatim), `name` str, `side` in `guest`/`host`/`device`/`mcp`, `args` dict, `state` == `"RUNNING"` | submit |
@@ -58,8 +58,12 @@ strings. Times (`at`, `deadline`) are int milliseconds since the epoch.
 - `checkpoint` + `parked` are written back to back when the guest parks:
   `checkpoint.through_seq` is the seq before the checkpoint, `state_hash` the
   fold through it, `prev_hash` the chain (see the fold rules below);
-  `parked.checkpoint_seq` is that checkpoint's seq. Nothing is written on a
-  park resume. Note the fold keeps `parked_at` until the next `settle`.
+  `parked.checkpoint_seq` is that checkpoint's seq. A wake from a park writes
+  `clock{kind: "resumed", at}` (the guest clock) before anything else: on the
+  same process's link-up after `parked`, and when a fresh process resumes a
+  log ending with `parked` (before its `clock{host_hello}`). It ends the
+  parked stretch (M5 notes). Note the fold keeps `parked_at` until the next
+  `settle`; `resumed` does not clear it (it only sets `clock_at`).
 - After a death resume: `clock{host_hello}` (from the resume hello's `at`),
   `error{transient, retry: true, ref: turn_id}` for a turn whose response was
   lost, `op_state{lost}` + `tool_result{content: "error: operation lost (VM
@@ -108,17 +112,21 @@ strings. Times (`at`, `deadline`) are int milliseconds since the epoch.
 - `parked.wall_used_ms` (every park during a task with a wall limit): the
   wall clock the task had used, from the paused wall timer. A fresh process
   restoring the log takes the last park's value plus the guest-clock time
-  since the first guest-side clock event after that park (the resume itself
-  writes nothing).
+  since that park's `clock{resumed}`.
 - `parked.at` (every park): the guest clock at the park. Question deadlines
   are log-derived from it: a question is due at its `deadline` plus every
   parked stretch after it was asked (a stretch runs from `parked.at` to the
-  first guest-side clock event after that park, as for the wall clock; a
-  log ending with `parked` is still in its stretch), because question timers
+  `clock{resumed}` after that park, as for the wall clock; a log ending with
+  `parked` is still in its stretch), because question timers
   pause while parked. A fresh process restoring a parked log treats a
   question as expired when a `clock{question_deadline, ref}` names it or its
   due time is at or before the last park; one expired only by its due time
   gets its `clock{question_deadline, ref}` on restore, before the expiry.
+- Fallback for logs written before `clock{resumed}` existed: a stretch ends
+  at the first guest-side clock event (not `host_hello`/`host_heartbeat`)
+  after the park. Every wake now writes `resumed` first, so it is that event
+  and one rule serves both; an old log with two parks and no guest clock
+  between them still counts the first stretch as live.
 - The fold does not check `parked.question_id` against `open_questions`.
 
 ## Log rules (`validate_log`)

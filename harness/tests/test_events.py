@@ -223,7 +223,8 @@ def test_tool_call_state_must_be_running():
 
 def test_clock_kind_fixed_set_plus_grace_prefix():
     for kind in ("host_hello", "host_heartbeat", "turn_clock", "grace_tool",
-                 "grace_park", "idle_timer", "question_deadline", "wall_clock"):
+                 "grace_park", "idle_timer", "question_deadline", "wall_clock",
+                 "resumed"):
         assert validate_event(ev(1, "clock", {"kind": kind, "at": 1})) == []
     msgs = validate_event(ev(1, "clock", {"kind": "lunch", "at": 1}))
     assert len(msgs) == 1 and msgs[0].startswith("body.kind: 'lunch' not in") and msgs[0].endswith("or grace_*")

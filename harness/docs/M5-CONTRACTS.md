@@ -10,9 +10,12 @@ activity contract below — change them only additively.
 
 `TEMPORAL_ADDRESS` set (compose: `temporal:7233`, namespace
 `TEMPORAL_NAMESPACE`, default `secondbrain`) **and** the tenant runs on
-`engine: harness` → `POST /chat` goes through the session workflow. Unset → the
-M1–M4 direct path (`Worker.act`) stays, unchanged, so tests and a Temporal-less
-box keep working. agent-api depends on `flows` (editable path dep `../flows`)
+`engine: harness` → `POST /chat` goes through the session workflow. Unset (or
+the Temporal worker exited: agent-api falls back) → the direct path
+(`Worker.act`), so tests and a Temporal-less box keep working. Both drivers
+run the same task API and handle a question park the same way (§4), so a
+Worker behaves the same whichever path created it: every harness Worker gets
+the tenant's `answer_wait_s`. agent-api depends on `flows` (editable path dep `../flows`)
 and starts the Temporal worker on its own loop at startup (D22,
 `flows.worker.build_worker(client, activities=[...real bodies...])`), and calls
 `flows.schedules.ensure_schedules` with the loaded tenants doc.
@@ -52,7 +55,7 @@ Host events `workflow{kind: task_signal | activity_start | heartbeat | completed
 ## 4. Guest: questions park the task (D12)
 
 New hello limit `answer_wait_s` (int, default 0; the worker sends the
-tenant's `answer_wait_s` only on the Temporal path). On a question deadline
+tenant's `answer_wait_s` on either path). On a question deadline
 (`clock{question_deadline}`):
 
 - `answer_wait_s > 0` → no deny: the guest **parks itself** with
@@ -60,7 +63,13 @@ tenant's `answer_wait_s` only on the Temporal path). On a question deadline
   key `question_id`), using the M3 park path (checkpoint, wait acked, idle).
   The question stays open in the state. The worker sees the acked `parked`
   with reason `question`, snapshots (adopt path), and `run_task` returns
-  `parked` + `question_id`.
+  `parked` + `question_id`. The direct path (`Worker.act`) drives the same
+  park: the input's stream stays open, it waits up to `answer_wait_s` for
+  `POST /chat {answer_to}` (→ `ui_response`, the guest wakes and continues;
+  an `answer_to` for another question gets the no-question error), and on
+  expiry sends `abort{reason: "escalated"}` (host event
+  `workflow{kind: answer_timeout}`) so the guest writes the escalated settle;
+  the stream then ends with `error{outcome}` + `done`, as at `deliver`.
 - `answer_wait_s == 0` → today's behaviour (deny unanswered, three → escalated).
 
 After resume a `ui_response` for that question is accepted as usual (input

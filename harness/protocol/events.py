@@ -160,7 +160,7 @@ ENUMS: dict[str, dict[str, frozenset]] = {
 # clock.kind: a fixed set plus the open `grace_*` family (PLAN.md section 5).
 CLOCK_KINDS = frozenset({
     "host_hello", "host_heartbeat", "turn_clock", "idle_timer",
-    "question_deadline", "wall_clock",
+    "question_deadline", "wall_clock", "resumed",
 })
 CLOCK_KIND_PREFIXES = ("grace_",)
 

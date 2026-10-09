@@ -79,14 +79,14 @@ class Harness:
     """One test's app: tenant `harn` (engine harness), DirStore, Workers on
     LocalSandbox, the Temporal worker on its own task queue."""
 
-    def __init__(self, env, tmp_path, upstream, monkeypatch):
+    def __init__(self, env, tmp_path, upstream, monkeypatch, answer_wait_s=ANSWER_WAIT_S):
         from app.routes import chat, sessions
         self.env = env
         self.upstream = upstream
         self.session_id = "s-" + uuid.uuid4().hex[:8]
         self.ref = SessionRef(user="harn", tenant="harn", session_id=self.session_id)
         doc = {"tenants": [{"name": "harn", "api_key": "harn-key", "engine": "harness",
-                            "answer_wait_s": ANSWER_WAIT_S, "wall_clock_s": 120}]}
+                            "answer_wait_s": answer_wait_s, "wall_clock_s": 120}]}
         path = tmp_path / "tenants.json"
         path.write_text(json.dumps(doc))
         self.tenants = TenantRegistry(path, "test-default-key")
@@ -169,7 +169,7 @@ class Harness:
 
     async def close(self):
         try:
-            st = await self.status()
+            st = await self.status() if self.env is not None else None
             if st is not None:
                 if st.state == "running":
                     await self.wait_state("idle", 30)
@@ -441,3 +441,90 @@ async def test_example_tenants_load_with_m5_keys():
     from app.tenants import Tenant
     default = Tenant(**{**doc["tenants"][0], "api_key": "x"})
     assert default.answer_wait_s == 86400 and default.schedules[0]["prompt"] == "Morning brief"
+
+
+# --------------------------------------------------------------------------- #
+# the direct path (no Temporal) handles a question park like the workflow
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def direct(tmp_path, users_root, upstream, monkeypatch):
+    harness = Harness(None, tmp_path, upstream, monkeypatch, answer_wait_s=4)
+    yield harness
+    await harness.close()
+
+
+async def _direct_question_answered(d, monkeypatch, input_id):
+    monkeypatch.setattr("app.host.worker.HARNESS_QUESTION_TIMEOUT_S", 1)
+    d.upstream.responses = [tool_call("call_q", "question", {"text": "Which colour?",
+                                                            "options": ["red", "blue"]}),
+                            {"content": "You picked blue"}]
+    assert not temporal.enabled()
+    first = asyncio.ensure_future(d.chat(message="ask me", input_id=input_id))
+    w = await wait_until(lambda: d.worker is not None and d.worker.question_park is not None
+                         and d.worker, 30, "question park")
+    assert w.answer_wait_s == 4 and w.last_hello["config"]["limits"]["answer_wait_s"] == 4
+    qid = w.question_park["question_id"]
+    assert w.question_park["input_id"] == input_id and w.vm_state == "parked"
+    assert not first.done()                      # the stream stays open while parked
+    second = await d.chat(message="blue", answer_to=qid, input_id=input_id + "_a")
+    body = await asyncio.wait_for(first, 60)
+    for b in (body, second):
+        assert sse_events(b)[-1] == ("done", {})
+        assert not any(e == "error" for e, _ in sse_events(b))
+        assert "You picked blue" in token_text(b)
+    assert any(e == "question" and dd["question_id"] == qid for e, dd in sse_events(body))
+    assert w.sync.settled[input_id]["outcome"] == "done"
+    assert d.upstream.requests[1]["messages"][-1]["content"] == "blue"
+    assert not d.host_events("answer_timeout")
+
+
+async def test_direct_path_question_parks_then_answer_resumes(direct, monkeypatch):
+    await _direct_question_answered(direct, monkeypatch, "in_dq1")
+
+
+async def test_direct_path_answer_wait_escalates(direct, monkeypatch):
+    monkeypatch.setattr("app.host.worker.HARNESS_QUESTION_TIMEOUT_S", 1)
+    direct.upstream.responses = [tool_call("call_q", "question", {"text": "Still there?"}),
+                                 {"content": "never"}]
+    t0 = time.monotonic()
+    body = await asyncio.wait_for(direct.chat(message="ask", input_id="in_dq2"), 90)
+    assert time.monotonic() - t0 >= 4             # waited answer_wait_s
+    events = sse_events(body)
+    assert events[-1] == ("done", {})
+    assert any(e == "error" and d["outcome"] == "escalated" for e, d in events)
+    w = direct.worker
+    # the guest wrote the settle itself after wake + abort{escalated}
+    assert w.sync.settled["in_dq2"]["outcome"] == "escalated"
+    assert [b["question_id"] for b in direct.host_events("answer_timeout")]
+    assert [b["reason"] for b in direct.host_events("abort")] == ["escalated"]
+    assert len(direct.upstream.requests) == 1
+
+
+async def test_worker_made_under_temporal_keeps_working_on_the_direct_path(direct, monkeypatch):
+    """The Worker is created while Temporal runs, then the Temporal worker
+    exits (_worker_exited: client None): the direct path drives it."""
+    monkeypatch.setattr(temporal, "client", object())
+    assert temporal.enabled()
+    tenant = direct.tenants.get_by_name("harn")
+    w = direct.workers.get_or_create(tenant, direct.session_id, direct.registry)
+    monkeypatch.setattr(temporal, "client", None)
+    await _direct_question_answered(direct, monkeypatch, "in_dq3")
+    assert direct.worker is w
+
+
+async def test_direct_answer_to_another_question_while_parked_is_refused(direct, monkeypatch):
+    monkeypatch.setattr("app.host.worker.HARNESS_QUESTION_TIMEOUT_S", 1)
+    direct.upstream.responses = [tool_call("call_q", "question", {"text": "Which?"}),
+                                 {"content": "ok"}]
+    first = asyncio.ensure_future(direct.chat(message="ask", input_id="in_dq4"))
+    w = await wait_until(lambda: direct.worker is not None
+                         and direct.worker.question_park is not None and direct.worker,
+                         30, "question park")
+    body = await direct.chat(message="x", answer_to="question_other", input_id="in_dq4_x")
+    assert ("error", {"class": "fatal",
+                      "message": "No question is waiting for this answer."}) in sse_events(body)
+    assert w.vm_state == "parked" and w.question_park is not None
+    qid = w.question_park["question_id"]
+    await direct.chat(message="fine", answer_to=qid, input_id="in_dq4_a")
+    assert sse_events(await asyncio.wait_for(first, 60))[-1] == ("done", {})

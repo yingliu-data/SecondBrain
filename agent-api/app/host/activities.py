@@ -39,8 +39,7 @@ from protocol.canonical import derive_key_id
 from protocol.events import ENUMS
 
 from app.config import HARNESS_ABORT_WAIT_S
-from app.host import temporal
-from app.host.worker import Worker, task_error, task_ok
+from app.host.worker import Worker, end_error, task_ok
 from app.util.ipc import atomic_write_json
 
 logger = logging.getLogger("host.activities")
@@ -68,11 +67,11 @@ def session_config(tenant) -> SessionConfig:
 
 
 def worker_config(tenant) -> dict:
-    """Workers.config_for (main.py): while Temporal runs, a new Worker is on
-    the workflow path, built with the config's answer_wait_s (hello limit;
-    deliver ends the streams); else the direct path's defaults. A live
-    Worker keeps its config until it is closed."""
-    return {"answer_wait_s": session_config(tenant).answer_wait_s} if temporal.enabled() else {}
+    """Workers.config_for (main.py): a new harness Worker gets the tenant's
+    answer_wait_s (hello limit) on either path: the workflow's answer timer
+    and the direct path's act() both handle a question park, so a Worker
+    created while Temporal ran keeps working after it falls back."""
+    return {"answer_wait_s": session_config(tenant).answer_wait_s}
 
 
 def _floor_seq(details: Any) -> int:
@@ -213,10 +212,7 @@ class HostActivities:
             "answer": settle.get("answer", ""), "question_id": inp.question_id,
             "manifest": settle.get("manifest", {}), "usage": settle.get("usage", {}),
         })
-        error = None
-        if inp.outcome != "done":
-            error = task_error(act) or f"The task ended: {inp.outcome}."
-        w.finish_input(iid, error, outcome=inp.outcome)
+        w.finish_input(iid, end_error(act, inp.outcome), outcome=inp.outcome)
         if first:
             await asyncio.to_thread(w.sync.host_event, "workflow", {
                 "kind": "delivered", "input_id": iid, "outcome": inp.outcome,

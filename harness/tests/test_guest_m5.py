@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import time
 
+import pytest
+
 from guest.config import from_hello
 from protocol.events import UNANSWERED, validate_event
 from protocol.fold import state_hash, verify_checkpoints
@@ -46,6 +48,11 @@ def park_on_question(scn):
     assert scn.clock.fire(QUESTION_S) == 1
     parked = scn.wait_event("parked")
     return q, parked
+
+
+def clock_kinds(scn):
+    """The events so far, a clock event as its kind."""
+    return [e["body"]["kind"] if e["type"] == "clock" else e["type"] for e in scn.events]
 
 
 def check(events):
@@ -115,7 +122,8 @@ def test_deadline_parks_with_question_id_then_answer_after_resume_completes():
     assert result["outcome"] == "done" and result["answer"] == "You chose a."
     assert scn.bodies("tool_result")[0] == {"call_id": "q1", "content": "a"}
     assert scn.types()[types.index("parked") + 1:] == [
-        "input", "op_state", "tool_result", "wake", "clock", "turn_start", "llm_response", "settle"]
+        "clock", "input", "op_state", "tool_result", "wake", "clock", "turn_start", "llm_response", "settle"]
+    assert scn.bodies("clock")[-2]["kind"] == "resumed"            # the wake, before anything else
     assert len(scn.provider.requests) == 2                         # the model was woken
     state = check(scn.events)
     assert state_hash(state) == state_hash(scn.state)
@@ -157,8 +165,8 @@ def test_fresh_process_resume_then_answer_completes_and_wall_clock_skips_the_par
     b.clock.ms = a.clock.ms + 3_600_000 * 20                   # parked for 20 hours
     b.coord.restore(log)
     b.start()
-    b.wait_for(lambda: b.events)
-    assert [e["type"] for e in b.events] == ["clock"]          # host_hello only
+    b.wait_for(lambda: len(b.events) >= 2)
+    assert clock_kinds(b) == ["resumed", "host_hello"]         # the wake, then the host's time
     assert b.coord._waiting == {q["question_id"]}
     assert b.clock.pending(QUESTION_S) == []                   # parked on it: no deadline timer
     wall = [h.delay_s for h in b.clock.pending()]
@@ -171,11 +179,27 @@ def test_fresh_process_resume_then_answer_completes_and_wall_clock_skips_the_par
     assert state_hash(state) == state_hash(b.state)
 
 
-def test_parked_records_the_wall_clock_used_and_restore_reads_it():
+def without_resumed(scn):
+    """Make `scn` write logs as a guest before clock{resumed} did (the wake
+    writes nothing): restore must still read them (the fallback rule)."""
+    emit = scn.coord.emit
+
+    def old_emit(type, body):
+        if type == "clock" and body.get("kind") == "resumed":
+            return None
+        return emit(type, body)
+    scn.coord.emit = old_emit
+
+
+@pytest.mark.parametrize("old_log", [False, True])
+def test_parked_records_the_wall_clock_used_and_restore_reads_it(old_log):
     """parked.wall_used_ms is the task's wall clock up to the park; a fresh
-    process restoring after a resume adds only the guest time since the first
-    guest clock event after that park."""
+    process restoring after a resume adds only the guest time since the
+    clock{resumed} after that park (an old log without it: since the first
+    guest clock event after the park)."""
     a = Scenario(cfg=m5_cfg(*DEVICE), script=[q_call(), tool_calls([("c_dev", "calendar", {})])])
+    if old_log:
+        without_resumed(a)
     a.task("ask")
     a.start()
     a.wait_event("question")
@@ -196,6 +220,51 @@ def test_parked_records_the_wall_clock_used_and_restore_reads_it():
     b.wait_event("settle")
     delays = [h.delay_s for h in b.clock.handles if h.delay_s > QUESTION_S]
     assert WALL_S - 41 < delays[0] <= WALL_S - 40             # 30 s before the park + 10 s after
+    assert ("resumed" in [c["kind"] for c in a.bodies("clock")]) is not old_log
+    check(log + b.events)
+
+
+def test_two_parks_without_a_guest_clock_between_count_neither_stretch():
+    """park, wake for a ui_response, park again at once: the only guest clock
+    event between the parks is the wake's clock{resumed}. A fresh process
+    re-arms the open question with the time it had left (both parked stretches
+    excluded) and its wall clock excludes both stretches too."""
+    a = Scenario(cfg=m5_cfg(), script=[two_questions_round()])
+    a.task("ask twice")
+    a.start()
+    a.wait_event("question", 2)
+    q1, q2 = (b["question_id"] for b in a.bodies("question"))
+    a.clock.advance(20_000)                                    # 20 s live
+    a.control("park", {"reason": "idle"})
+    first = a.wait_event("parked")
+    a.clock.advance(3_600_000)                                 # parked for an hour
+    a.inbound.put(("link", "up"))
+    answer(a, q1, "a")
+    a.control("park", {"reason": "idle"})
+    second = a.wait_event("parked", 2)
+    assert 3_600_000 <= second["body"]["at"] - first["body"]["at"] < 3_601_000
+    between = [e for e in a.events if first["seq"] < e["seq"] < second["seq"]]
+    assert [e["body"]["kind"] for e in between if e["type"] == "clock"] == ["resumed"]
+    assert between[0]["type"] == "clock" and between[0]["body"]["kind"] == "resumed"   # the wake first
+    assert 0 <= between[0]["body"]["at"] - first["body"]["at"] - 3_600_000 < 1_000
+    assert abs(second["body"]["wall_used_ms"] - first["body"]["wall_used_ms"]) < 1_000
+    log = list(a.events)
+    b = Scenario(cfg=m5_cfg(resume=True), script=[text("b it is")])
+    b.clock.ms = a.clock.ms + 3_600_000 * 5                    # parked again for five hours
+    b.coord.restore(log)
+    assert set(b.coord._questions) == {q2}
+    b.start()
+    b.wait_for(lambda: len(b.events) >= 2)
+    assert clock_kinds(b) == ["resumed", "host_hello"]
+    left = [h.delay_s for h in b.clock.pending() if h.delay_s < QUESTION_S]
+    assert len(left) == 1 and QUESTION_S - 21 < left[0] < QUESTION_S - 19   # 25 s of 45 s, not expired
+    wall = [h.delay_s for h in b.clock.pending() if h.delay_s > QUESTION_S]
+    assert len(wall) == 1 and WALL_S - 21 < wall[0] < WALL_S - 19           # 20 s used, no parked hour
+    assert b.coord._waiting == set() and "parked" not in b.types()
+    answer(b, q2, "b")
+    assert b.run()["answer"] == "b it is"
+    state = check(log + b.events)
+    assert state_hash(state) == state_hash(b.state)
 
 
 def test_two_questions_past_their_deadline_park_one_after_the_other():
@@ -251,8 +320,8 @@ def test_restore_puts_every_expired_question_in_waiting_and_parks_on_each_in_tur
     b.clock.ms = a.clock.ms + 3_600_000
     b.coord.restore(log)
     b.start()
-    b.wait_for(lambda: b.events)
-    assert b.types() == ["clock"]                                # host_hello only
+    b.wait_for(lambda: len(b.events) >= 2)
+    assert clock_kinds(b) == ["resumed", "host_hello"]           # nothing else
     assert b.coord._waiting == {q1, q2} and not b.coord._question_park_pending
     assert b.clock.pending(QUESTION_S) == [] and len(b.clock.pending()) == 1   # the wall clock only
     answer(b, q1, "first")
@@ -359,8 +428,8 @@ def test_restore_ignores_a_question_closed_by_an_earlier_tasks_timeout():
     b.coord.restore(log)
     assert stale not in b.coord._questions
     b.start()
-    b.wait_for(lambda: b.events)
-    assert b.types() == ["clock"]                                # host_hello only
+    b.wait_for(lambda: len(b.events) >= 2)
+    assert clock_kinds(b) == ["resumed", "host_hello"]           # nothing else
     assert b.coord._waiting == set() and not b.coord._question_park_pending
 
 

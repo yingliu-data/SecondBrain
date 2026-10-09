@@ -222,8 +222,8 @@ def test_restore_after_parked_keeps_waiting_for_the_host():
     b = Scenario(cfg=make_cfg(DEVICE, resume=True), script=[text("fine")])
     b.coord.restore(log)
     b.start()
-    b.wait_for(lambda: b.events)                       # clock{host_hello} only
-    assert [e["type"] for e in b.events] == ["clock"]
+    b.wait_for(lambda: len(b.events) >= 2)             # clock{resumed}, clock{host_hello} only
+    assert [(e["type"], e["body"]["kind"]) for e in b.events] == [("clock", "resumed"), ("clock", "host_hello")]
     b.control("side_result", {"call_id": "c_dev", "side": "device", "content": "ok", "ok": True})
     assert b.run()["answer"] == "fine"
     assert "lost" not in [e["body"]["state"] for e in b.events if e["type"] == "op_state"]

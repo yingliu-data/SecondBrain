@@ -212,7 +212,11 @@ async def _harness_turn(tenant: Tenant, session_id: str, message: str, input_id:
     session = worker.session
     set_current_context(session, tenant.user, tenant.name, session_id)
     if answer_to:
-        async for item in _answer_stream(worker, worker.current_input_id, answer_to,
+        qp = worker.question_park
+        # parked on another question: a ui_response would wake the guest
+        # behind act()'s answer wait (as on the workflow path)
+        task_id = worker.current_input_id if qp is None or qp["question_id"] == answer_to else None
+        async for item in _answer_stream(worker, task_id, answer_to,
                                          message, input_id):
             yield item
         return

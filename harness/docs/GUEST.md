@@ -214,8 +214,9 @@ Contracts: docs/M3-CONTRACTS.md. What the guest does, and the refinements:
   session_start event)`, then the previous checkpoint's `state_hash`),
   `parked{checkpoint_seq, reason}`, wait (≤ 60 s) for the host's ack of
   `parked`, `Transport.park()` (close, back to idle-wait). The next
-  `("link", "up")` resumes: timers re-armed with what they had left, a
-  deferred turn starts (nothing is emitted for the resume itself). A second
+  `("link", "up")` resumes: `clock{resumed, at}` first (the guest clock at
+  the wake; it ends the parked stretch on the log), timers re-armed with what
+  they had left, a deferred turn starts. A second
   `park` while parking is ignored. LocalSandbox's SIGSTOP/SIGCONT works on the same
   path (the stopped process resumes polling and reconnects).
 - **Death resume**: a fresh process gets `hello{resume: true}`; its transport
@@ -237,7 +238,8 @@ Contracts: docs/M3-CONTRACTS.md. What the guest does, and the refinements:
   turn otherwise. The wall clock gets what the task had left. No second
   `session_start`. A returned log whose last event is `parked` (a fresh
   process after the host stopped a parked guest) loses nothing: side calls and questions wait
-  again with fresh timeouts. The usage correction restarts at 1.0.
+  again with fresh timeouts, and `run()` emits `clock{resumed, at}` first
+  (before `clock{host_hello}`): a wake from a park always writes it. The usage correction restarts at 1.0.
 - **Bulk** (`guest/bulk.py`, :5001, one transfer per connection): `BulkClient
   (connector, session_id, port).put(kind, path, data, sha256=None)` /
   `.get_log(after_seq)`
@@ -342,8 +344,12 @@ Contracts: docs/M4-CONTRACTS.md (sections 3.1-3.3 and 4). What the guest does:
   fresh process — question deadlines are log-derived (`restore`): each open
   question's due time is its `question.deadline` on a "live" guest-clock axis
   that leaves out every parked stretch (from `parked.at`, written on every
-  park, to the first guest-side clock event after it; the log's last park is
-  still in its stretch). Question deadlines pause while parked (as live:
+  park, to the `clock{resumed}` the wake after it writes first; the log's last
+  park is still in its stretch). A log written before `clock{resumed}` existed
+  ends a stretch at the first guest-side clock event after the park (the same
+  rule, as `resumed` is always that event now); two parks with no guest clock
+  between them would lose the first stretch there, which is why every wake
+  writes `resumed`. Question deadlines pause while parked (as live:
   `question_deadline` is in `PAUSED_ON_PARK`), so the parked hours never
   count. `_resume_restored` then re-arms every question that is not yet due
   with the time it had left at the park, and sends every question that is
@@ -358,9 +364,9 @@ Contracts: docs/M4-CONTRACTS.md (sections 3.1-3.3 and 4). What the guest does:
   before. Every park during a
   task records `parked.wall_used_ms` (the wall limit minus what the paused
   wall timer had left); the restored wall clock is the last park's value plus
-  the guest-clock time since the first guest-side clock event after it (not
-  `host_hello`/`host_heartbeat`, which carry host time), never the parked
-  hours. A `ui_response` then works as before; if another question is still
+  the guest-clock time since its `clock{resumed}` (for an older log, the first
+  guest-side clock event after it; never `host_hello`/`host_heartbeat`, which
+  carry host time), never the parked hours. A `ui_response` then works as before; if another question is still
   past its deadline the task parks again on it (`_park_next_waiting`).
 - **Abort** (`_abort`): reason `escalated` → `settle{escalated, answer: ""}`;
   any other → `settle{aborted, answer: ""}`; `settle.reason`

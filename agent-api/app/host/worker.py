@@ -38,11 +38,13 @@ M3 (harness/docs/M3-CONTRACTS.md): one long-lived guest per session.
 
 M5 (harness/docs/M5-CONTRACTS.md): two drivers over one task API. The
 Temporal activities (activities.py) are one; act() is the other, in-process
-(the direct path). `answer_wait_s` (construction config, Workers.config_for)
-set = the workflow path: hello limits carry it, the guest parks itself on a question deadline
-(parked{reason: question, question_id}), the worker adopts the park and
-records `question_park` on the parked state; the task's wall clock stops
-while it waits.
+(the direct path). `answer_wait_s` (construction config, Workers.config_for:
+the tenant's, on either path) > 0: hello limits carry it, the guest parks
+itself on a question deadline (parked{reason: question, question_id}), the
+worker adopts the park and records `question_park` on the parked state; the
+task's wall clock stops while it waits. Both drivers handle that park the
+same way: wait up to answer_wait_s for the answer (the workflow's timer;
+act()'s _drive), else wake + abort{escalated} so the guest settles it.
   .ensure_ready()               boot / wake the guest (prepare_vm)
   .start_task(task_input)       the task of an input, worker-owned (a retry
                                 re-attaches to it by input_id); task_input may
@@ -237,7 +239,8 @@ class Worker:
         # the session's gateway entries from the first successful fetch:
         # pins are fixed per session, a resume hello reuses them
         self.gateway_entries: list[dict] | None = None
-        # M5: the workflow path (None = direct path, M1-M4 behaviour unchanged)
+        # M5: > 0 = a question deadline parks the task, the driver waits this
+        # long for the answer (None/0 = the guest denies, M1-M4 behaviour)
         self.answer_wait_s = answer_wait_s
         self._changed = asyncio.Event()             # replaced (and set) on every change
         # none | booting | running | parking | parked; the session snapshot
@@ -588,7 +591,7 @@ class Worker:
             "reserve_tokens": HARNESS_RESERVE_TOKENS,
             # M3: running guest ops get this long after `park`, then killed
             "park_grace_s": self.park_grace_s,
-            # M5: > 0 = a question deadline parks the task (workflow path only)
+            # M5: > 0 = a question deadline parks the task (either driver)
             **({"answer_wait_s": int(self.answer_wait_s)} if self.answer_wait_s is not None else {}),
         }
 
@@ -1020,10 +1023,11 @@ class Worker:
     # ------------------------------------------------------------ act
     async def act(self, task_input: dict) -> dict:
         """The direct path: an in-process driver over the task API (the
-        workflow's activities are the other one): start_task, its result,
-        finish_input. A redelivered input (an input_id already seen) is
-        sent again anyway - the guest dedupes - and shares the running
-        task; one that already settled gets its answer replayed, no guest."""
+        workflow's activities are the other one): start_task, its result
+        (a question park waits for the answer, _drive), finish_input. A
+        redelivered input (an input_id already seen) is sent again anyway -
+        the guest dedupes - and shares the running task; one that already
+        settled gets its answer replayed, no guest."""
         input_id = task_input["input_id"]
         task = self._acts.get(input_id)
         if task is not None and not task.done():
@@ -1035,9 +1039,32 @@ class Worker:
         if body is not None:
             return self._settled_again(input_id, body)
         task = self.start_task(task_input)
-        # before shield's own callback: the streams end before act() returns
-        task.add_done_callback(lambda t: self.finish_input(input_id, task_error(t)))
-        return await asyncio.shield(task)
+        # before the waiters' callbacks: the streams end before act() returns
+        task.add_done_callback(lambda t: self.finish_input(
+            input_id, end_error(t, task_outcome(t)), outcome=task_outcome(t)))
+        return await self._drive(input_id, task)
+
+    async def _drive(self, input_id: str, task: asyncio.Task) -> dict:
+        """`task`'s result, as the session workflow drives it (M5 §4): at a
+        question park the stream stays open (the question went out) and the
+        answer is awaited up to answer_wait_s (POST /chat answer_to ->
+        answer() wakes the guest, the task runs on); none in time -> abort
+        {escalated}: the guest is woken and writes the escalated settle."""
+        while True:
+            res = await self._wait(task, input_id=input_id)
+            if res.get("outcome") != "parked":
+                return res
+            park = self.question_park
+            left = float(self.answer_wait_s or 0)
+            while self.question_park == park and not task.done() and left > 0:
+                t0 = time.monotonic()
+                await _first(task, self._changed, timeout=left)
+                left -= time.monotonic() - t0
+            if self.question_park == park and not task.done():
+                self.sync.host_event("workflow", {"kind": "answer_timeout", "input_id": input_id,
+                                                  "question_id": res.get("question_id")})
+                self.abort("escalated")
+                return await asyncio.shield(task)
 
     async def _task(self, task_input: dict) -> dict:
         """start_task's task: _act, with the task's heartbeat beside it."""
@@ -1152,7 +1179,7 @@ class Worker:
         on_heartbeat listeners (the run_task activity's Temporal heartbeat,
         also while the task is queued); while it runs, the guest heartbeat
         (a parked guest gets none, the host event says parked; none at all
-        while parked on a question: the workflow holds that task)."""
+        while parked on a question: its driver's answer wait holds it)."""
         while True:
             await asyncio.sleep(self.heartbeat_s)
             for beat in list(self._beats.get(input_id, ())):
@@ -1385,6 +1412,20 @@ def task_error(t: asyncio.Future | None) -> str | None:
     return t.result().get("host_error")
 
 
+def task_outcome(t: asyncio.Future) -> str:
+    """A finished task's outcome: its result's, else failed."""
+    return (t.result().get("outcome") or "failed") if task_ok(t) else "failed"
+
+
+def end_error(t: asyncio.Future | None, outcome: str) -> str | None:
+    """The SSE error that ends an input's stream (finish_input), on either
+    driver: the host failure, else for a non-done outcome its name."""
+    error = task_error(t)
+    if error is None and outcome != "done":
+        error = f"The task ended: {outcome}."
+    return error
+
+
 async def _first(fut: asyncio.Future, evt: asyncio.Event, timeout: float | None = None) -> None:
     """Return when `fut` is done, `evt` is set or `timeout` passed (never cancels `fut`)."""
     waiter = asyncio.ensure_future(evt.wait())
@@ -1399,8 +1440,7 @@ class Workers:
 
     `sessions` (the DirStore) opens a new Worker's session directory;
     `config_for(tenant)` gives a new Worker's construction config on top of
-    `worker_kwargs` (main.py: the workflow path's answer_wait_s while
-    Temporal runs)."""
+    `worker_kwargs` (main.py: the tenant's answer_wait_s)."""
 
     def __init__(self, sandbox_factory=make_sandbox, *, sessions=None,
                  config_for: Callable[[object], dict] | None = None, **worker_kwargs) -> None:
