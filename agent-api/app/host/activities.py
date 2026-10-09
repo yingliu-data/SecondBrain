@@ -33,19 +33,13 @@ from typing import Any
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
-from flows.activities import (Deliver, ParkVM, PrepareVM, RunResult, RunTask,
-                              SessionConfig, SessionRef)
+from flows.activities import Deliver, ParkVM, PrepareVM, RunResult, RunTask, SessionRef
 from protocol.canonical import derive_key_id
-from protocol.events import ENUMS
 
-from app.config import HARNESS_ABORT_WAIT_S
-from app.host.worker import Worker, end_error, task_ok
+from app.host.worker import Worker, end_error, settle_outcome, task_ok
 from app.util.ipc import atomic_write_json
 
 logger = logging.getLogger("host.activities")
-
-# the guest's settle outcomes RunResult passes through (anything else: failed)
-SETTLE_OUTCOMES = ENUMS["settle"]["outcome"]
 
 
 def answer_input_id(input_id: str, question_id: str) -> str:
@@ -61,19 +55,6 @@ def ticket_id_for(ref: SessionRef, input_id: str) -> str:
     return derive_key_id("ticket", ref.user, ref.tenant, ref.session_id, input_id)
 
 
-def session_config(tenant) -> SessionConfig:
-    """The tenant's SessionConfig (the task signal's config)."""
-    return SessionConfig.from_tenant(tenant.workflow_entry())
-
-
-def worker_config(tenant) -> dict:
-    """Workers.config_for (main.py): a new harness Worker gets the tenant's
-    answer_wait_s (hello limit) on either path: the workflow's answer timer
-    and the direct path's act() both handle a question park, so a Worker
-    created while Temporal ran keeps working after it falls back."""
-    return {"answer_wait_s": session_config(tenant).answer_wait_s}
-
-
 def _floor_seq(details: Any) -> int:
     """The previous attempt's last heartbeat {last_seq} (a floor only: the
     SDK throttles heartbeats, M0 spike)."""
@@ -85,12 +66,10 @@ def _floor_seq(details: Any) -> int:
 
 
 class HostActivities:
-    def __init__(self, workers, tenants, registry, *,
-                 abort_wait_s: float = HARNESS_ABORT_WAIT_S) -> None:
+    def __init__(self, workers, tenants, registry) -> None:
         self.workers = workers          # app.host.worker.Workers (over the DirStore)
         self.tenants = tenants          # TenantRegistry (get_by_name)
         self.registry = registry        # SkillRegistry
-        self.abort_wait_s = abort_wait_s
 
     def activities(self) -> list:
         return [self.prepare_vm, self.run_task, self.park_vm, self.deliver]
@@ -107,27 +86,6 @@ class HostActivities:
         await asyncio.to_thread(w.sync.host_event, "workflow", {
             "kind": "activity_start", "activity": name, "input_id": input_id,
             "attempt": activity.info().attempt, **extra})
-
-    async def _abort_and_wait(self, w: Worker, input_id: str, reason: str, *,
-                              reattach: bool = False) -> None:
-        """abort{reason} to the guest, then wait (bounded) for that input's
-        task: the guest writes the settle itself. abort{} is not
-        input-scoped (the guest settles whatever it runs): only while this
-        input's task is the running one. reattach: a parked guest whose task
-        this process does not hold (a restarted agent-api) is woken by the
-        abort and the task re-attached (the guest dedupes it)."""
-        task = w.task_for(input_id)
-        if reattach and task is None and w.vm_state == "parked":
-            if w.abort(reason) == "no_guest":
-                return
-            task = w.start_task({"input_id": input_id, "text": ""})
-        elif (task is None or task.done() or w.current_input_id != input_id
-              or w.abort(reason) == "no_guest"):
-            return
-        try:
-            await asyncio.wait_for(asyncio.shield(task), timeout=self.abort_wait_s)
-        except Exception as e:  # noqa: BLE001 - timeout or the task's own failure
-            logger.warning("session %s: no settle after abort{%s}: %r", w.session_key, reason, e)
 
     # ------------------------------------------------------------ activities
     @activity.defn(name="prepare_vm")
@@ -173,7 +131,7 @@ class HostActivities:
             # a workflow abort or the activity's timeout; not our own
             # shutdown (the retry on the next worker re-attaches)
             if not activity.is_worker_shutdown():
-                await self._abort_and_wait(w, inp.input_id, "aborted")
+                await w.abort_and_wait(inp.input_id, "aborted")
             raise
         finally:
             off()
@@ -181,7 +139,7 @@ class HostActivities:
         if outcome == "parked":
             return RunResult(outcome="parked", question_id=res.get("question_id"),
                              last_seq=w.sync.last_seq)
-        return RunResult(outcome=outcome if outcome in SETTLE_OUTCOMES else "failed",
+        return RunResult(outcome=settle_outcome(outcome),
                          question_id=inp.question_id, last_seq=w.sync.last_seq)
 
     @activity.defn(name="park_vm")
@@ -200,7 +158,9 @@ class HostActivities:
         if iid not in w.sync.settled and inp.outcome in ("escalated", "aborted"):
             # no guest settle (the answer timer, an abort while parked): wake
             # the guest and let it settle the task itself (M5 §4)
-            await self._abort_and_wait(w, iid, inp.outcome, reattach=True)
+            await w.abort_and_wait(iid, inp.outcome, reattach=True,
+                                   question_id=inp.question_id if inp.outcome == "escalated"
+                                   else None)
         act = w.task_for(iid)
         settle = w.sync.settled.get(iid) or (act.result() if act is not None and task_ok(act)
                                              else {})     # else: the host's own failure result

@@ -341,31 +341,24 @@ Contracts: docs/M4-CONTRACTS.md (sections 3.1-3.3 and 4). What the guest does:
   and parks as asked if the question is answered before the park happens. An
   input-required mcp op stays suspended.
 - **Resume**: same process — timers resume, the parked-on question has none;
-  fresh process — question deadlines are log-derived (`restore`): each open
-  question's due time is its `question.deadline` on a "live" guest-clock axis
-  that leaves out every parked stretch (from `parked.at`, written on every
-  park, to the `clock{resumed}` the wake after it writes first; the log's last
-  park is still in its stretch). A log written before `clock{resumed}` existed
-  ends a stretch at the first guest-side clock event after the park (the same
-  rule, as `resumed` is always that event now); two parks with no guest clock
-  between them would lose the first stretch there, which is why every wake
-  writes `resumed`. Question deadlines pause while parked (as live:
-  `question_deadline` is in `PAUSED_ON_PARK`), so the parked hours never
-  count. `_resume_restored` then re-arms every question that is not yet due
-  with the time it had left at the park, and sends every question that is
-  due (named by a logged `clock{question_deadline, ref}`, or due at or
-  before the park — that one first gets its `clock{question_deadline, ref}`)
-  through `_question_expired`, oldest first: with `answer_wait_s > 0` they
-  all join `_waiting` (no new park when the log's park is on one of them —
-  the host resumed it for that answer); with 0 they are denied. A question
-  with no deadline (`question_timeout_s` 0 with UI) is not re-armed; an
-  mcp input request's `expires_in_s` is honoured through `deadline`, except
-  with `question_timeout_s` 0 and UI, where it is treated as no deadline, as
-  before. Every park during a
+  fresh process — question deadlines come from the park (`restore`):
+  `parked.question_left_ms` holds what each open question's deadline had
+  left when its timer paused (0 for one already past it, in `_waiting`).
+  Question deadlines pause while parked (as live: `question_deadline` is in
+  `PAUSED_ON_PARK`), so the parked hours never count. `_resume_after_park`
+  re-arms every listed question with what it had left (`_arm_question(qid,
+  delay_s)`), and sends every question that is due (named by a logged
+  `clock{question_deadline, ref}`, or 0 left — that one first gets its
+  `clock{question_deadline, ref}`) through `_question_expired`, oldest
+  first: with `answer_wait_s > 0` they all join `_waiting` (no new park when
+  the log's park is on one of them — the host resumed it for that answer);
+  with 0 they are denied. A question the park did not list had no deadline
+  and is not re-armed (an mcp input request's `expires_in_s` is a deadline
+  like any other, also with `question_timeout_s` 0 and UI). Every park during a
   task records `parked.wall_used_ms` (the wall limit minus what the paused
   wall timer had left); the restored wall clock is the last park's value plus
-  the guest-clock time since its `clock{resumed}` (for an older log, the first
-  guest-side clock event after it; never `host_hello`/`host_heartbeat`, which
+  the guest-clock time since its `clock{resumed}` (the only event that ends a
+  parked stretch; never `host_hello`/`host_heartbeat`, which
   carry host time), never the parked hours. A `ui_response` then works as before; if another question is still
   past its deadline the task parks again on it (`_park_next_waiting`).
 - **Abort** (`_abort`): reason `escalated` → `settle{escalated, answer: ""}`;

@@ -79,7 +79,7 @@ def test_answer_wait_s_is_a_hello_limit_in_the_config_hash():
         raise AssertionError("a negative answer_wait_s must be rejected")
 
 
-def test_parked_question_id_and_wall_used_ms_are_optional_body_keys():
+def test_parked_question_id_wall_used_ms_and_question_left_ms_are_optional_body_keys():
     ok = {"session_id": "s", "seq": 3, "ts": "t", "schema": 1, "type": "parked",
           "body": {"checkpoint_seq": 2, "reason": "question", "question_id": "q-x"}}
     assert validate_event(ok) == []
@@ -88,8 +88,8 @@ def test_parked_question_id_and_wall_used_ms_are_optional_body_keys():
     assert validate_event(dict(ok, body={**ok["body"], "wall_used_ms": 0})) == []
     assert validate_event(dict(ok, body={**ok["body"], "wall_used_ms": -1}))
     assert validate_event(dict(ok, body={**ok["body"], "wall_used_ms": "1"}))
-    assert validate_event(dict(ok, body={**ok["body"], "at": 5})) == []
-    assert validate_event(dict(ok, body={**ok["body"], "at": "5"}))
+    assert validate_event(dict(ok, body={**ok["body"], "question_left_ms": {"q-x": 0}})) == []
+    assert validate_event(dict(ok, body={**ok["body"], "question_left_ms": [0]}))
     clock = dict(ok, type="clock", body={"kind": "question_deadline", "at": 5, "ref": "q-x"})
     assert validate_event(clock) == []
     assert validate_event(dict(clock, body={**clock["body"], "ref": 1}))
@@ -107,8 +107,7 @@ def test_deadline_parks_with_question_id_then_answer_after_resume_completes():
     deadline = scn.bodies("clock")[-1]
     assert deadline == {"kind": "question_deadline", "at": deadline["at"], "ref": qid}
     assert parked["body"] == {"checkpoint_seq": parked["seq"] - 1, "reason": "question", "question_id": qid,
-                              "wall_used_ms": parked["body"]["wall_used_ms"], "at": parked["body"]["at"]}
-    assert parked["body"]["at"] > deadline["at"]                    # the guest clock at the park
+                              "wall_used_ms": parked["body"]["wall_used_ms"], "question_left_ms": {qid: 0}}
     assert "guard_decision" not in types[i:] and scn.state.denied_questions == 0
     assert scn.state.open_questions[qid]["answered"] is False      # the question stays open
     assert scn.transport.parks == 1 and scn.coord.parked
@@ -156,6 +155,29 @@ def test_zero_timeout_without_ui_parks_at_once():
     check(scn.events)
 
 
+def test_restore_of_a_zero_timeout_park_waits_on_that_question():
+    """A zero timeout without UI parks with no clock{question_deadline}; the
+    park lists the question with 0 left, so a fresh process expires it the
+    normal way (logging the deadline) and waits on it without a new park."""
+    a = Scenario(cfg=m5_cfg(question_timeout_s=0, ui_attached=False), script=[q_call()])
+    a.task("ask")
+    a.start()
+    parked = a.wait_event("parked")["body"]
+    qid = parked["question_id"]
+    assert parked["question_left_ms"] == {qid: 0}
+    log = list(a.events)
+    b = Scenario(cfg=m5_cfg(question_timeout_s=0, ui_attached=False, resume=True), script=[text("b then")])
+    b.clock.ms = a.clock.ms + 3_600_000
+    b.coord.restore(log)
+    b.start()
+    b.wait_for(lambda: len(b.events) >= 3)
+    assert clock_kinds(b) == ["resumed", "host_hello", "question_deadline"]
+    assert b.coord._waiting == {qid} and not b.coord._question_park_pending
+    answer(b, qid, "b")
+    assert b.run()["answer"] == "b then"
+    check(log + b.events)
+
+
 def test_fresh_process_resume_then_answer_completes_and_wall_clock_skips_the_park():
     a = Scenario(cfg=m5_cfg(), script=[q_call()])
     a.task("ask")
@@ -179,27 +201,11 @@ def test_fresh_process_resume_then_answer_completes_and_wall_clock_skips_the_par
     assert state_hash(state) == state_hash(b.state)
 
 
-def without_resumed(scn):
-    """Make `scn` write logs as a guest before clock{resumed} did (the wake
-    writes nothing): restore must still read them (the fallback rule)."""
-    emit = scn.coord.emit
-
-    def old_emit(type, body):
-        if type == "clock" and body.get("kind") == "resumed":
-            return None
-        return emit(type, body)
-    scn.coord.emit = old_emit
-
-
-@pytest.mark.parametrize("old_log", [False, True])
-def test_parked_records_the_wall_clock_used_and_restore_reads_it(old_log):
+def test_parked_records_the_wall_clock_used_and_restore_reads_it():
     """parked.wall_used_ms is the task's wall clock up to the park; a fresh
     process restoring after a resume adds only the guest time since the
-    clock{resumed} after that park (an old log without it: since the first
-    guest clock event after the park)."""
+    clock{resumed} after that park."""
     a = Scenario(cfg=m5_cfg(*DEVICE), script=[q_call(), tool_calls([("c_dev", "calendar", {})])])
-    if old_log:
-        without_resumed(a)
     a.task("ask")
     a.start()
     a.wait_event("question")
@@ -220,7 +226,6 @@ def test_parked_records_the_wall_clock_used_and_restore_reads_it(old_log):
     b.wait_event("settle")
     delays = [h.delay_s for h in b.clock.handles if h.delay_s > QUESTION_S]
     assert WALL_S - 41 < delays[0] <= WALL_S - 40             # 30 s before the park + 10 s after
-    assert ("resumed" in [c["kind"] for c in a.bodies("clock")]) is not old_log
     check(log + b.events)
 
 
@@ -242,11 +247,12 @@ def test_two_parks_without_a_guest_clock_between_count_neither_stretch():
     answer(a, q1, "a")
     a.control("park", {"reason": "idle"})
     second = a.wait_event("parked", 2)
-    assert 3_600_000 <= second["body"]["at"] - first["body"]["at"] < 3_601_000
+    left = [p["body"]["question_left_ms"][q2] for p in (first, second)]
+    assert QUESTION_S * 1000 - 21_000 < left[0] < QUESTION_S * 1000 - 19_000
+    assert abs(left[1] - left[0]) < 1_000                      # the parked hour did not count
     between = [e for e in a.events if first["seq"] < e["seq"] < second["seq"]]
     assert [e["body"]["kind"] for e in between if e["type"] == "clock"] == ["resumed"]
     assert between[0]["type"] == "clock" and between[0]["body"]["kind"] == "resumed"   # the wake first
-    assert 0 <= between[0]["body"]["at"] - first["body"]["at"] - 3_600_000 < 1_000
     assert abs(second["body"]["wall_used_ms"] - first["body"]["wall_used_ms"]) < 1_000
     log = list(a.events)
     b = Scenario(cfg=m5_cfg(resume=True), script=[text("b it is")])

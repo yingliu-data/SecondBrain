@@ -43,9 +43,6 @@ registry = SkillRegistry()
 
 # Inject dependencies into routes
 chat.set_registry(registry)
-# harness Workers: the tenant's answer_wait_s (a question park, either path)
-from app.host.activities import worker_config
-chat.workers.config_for = worker_config
 guest.set_tenant(tenant_registry.guest())
 skills.set_registry(registry)
 sessions.set_sessions(chat.sessions)

@@ -128,8 +128,9 @@ OPTIONAL_BODY: dict[str, dict[str, tuple]] = {
     "error": {"ref": STR},
     # M5: the question a `parked{reason: "question"}` waits on (D12), the
     # task's wall clock used up to the park (ms; absent when no task runs),
-    # and the guest clock at the park (ms; restore derives question deadlines)
-    "parked": {"question_id": STR, "wall_used_ms": INT, "at": INT},
+    # and what each open question's deadline had left ({question_id: ms},
+    # 0 = due; restore re-arms them)
+    "parked": {"question_id": STR, "wall_used_ms": INT, "question_left_ms": DICT},
     # M5: clock{question_deadline} names the question whose deadline passed
     "clock": {"ref": STR},
 }
@@ -179,7 +180,7 @@ MIN_INT: dict[str, dict[str, int]] = {
     "op_state": {"duration_ms": 0, "attempt": 0},
     "bulk": {"bytes": 0},
     "checkpoint": {"through_seq": 1},
-    "parked": {"checkpoint_seq": 1, "wall_used_ms": 0, "at": 0},
+    "parked": {"checkpoint_seq": 1, "wall_used_ms": 0},
 }
 
 # list keys whose items must all be str. {type: (key, ...)}

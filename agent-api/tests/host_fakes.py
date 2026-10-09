@@ -24,6 +24,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from protocol.allowlist import effective_tools
+from protocol.canonical import hash_value
+from protocol.fold import fold, state_hash
 from guest.bulk import BulkClient
 from guest.transport import UnixConnector
 from protocol.messages import ack, encode, parse
@@ -182,12 +184,21 @@ class FakeGuest:
                 self._tasks.put(None)
 
     # ---------------------------------------------------------------- park
+    def _checkpoint_body(self) -> dict:
+        """A real checkpoint of this run's log so far (the log return
+        included): its folded state's hash, chained to the previous
+        checkpoint (the first: to session_start), so the log verifies."""
+        run = [*(self.returned or []), *self.events]
+        prev = [e["body"]["state_hash"] for e in run if e["type"] == "checkpoint"]
+        head = hash_value(run[0]) if run and run[0]["type"] == "session_start" else HASH
+        return {"through_seq": self.seq, "state_hash": state_hash(fold(run)),
+                "prev_hash": prev[-1] if prev else head}
+
     def _do_park(self) -> None:
         """M3-CONTRACTS §3: checkpoint, parked, wait acked, close, idle-wait;
         on restore reconnect and handshake. Keeps every in-memory counter."""
         reason, self._park_req = self._park_req, None
-        cp = self.emit("checkpoint", {"through_seq": self.seq, "state_hash": HASH,
-                                      "prev_hash": HASH})
+        cp = self.emit("checkpoint", self._checkpoint_body())
         p = self.emit("parked", {"checkpoint_seq": cp["seq"], "reason": reason})
         self.wait_acked(p["seq"])
         self._suspending = True
@@ -528,12 +539,17 @@ class FakeRegistry:
 
 class FakeTenant:
     def __init__(self, name="t", user="u", system_prompt=None,
-                 local_skills=None, max_tools=None, max_tokens=None, exclude_builtins=()):
+                 local_skills=None, max_tools=None, max_tokens=None, exclude_builtins=(),
+                 answer_wait_s=0):
         self.name, self.user = name, user
         self.exclude_builtins = list(exclude_builtins)
         self.system_prompt = system_prompt
         self.local_skills = local_skills
         self.max_tools, self.max_tokens = max_tools, max_tokens
+        self.answer_wait_s = answer_wait_s    # 0: the guest denies a question deadline
+
+    def workflow_entry(self):
+        return {"name": self.name, "user": self.user, "answer_wait_s": self.answer_wait_s}
 
     def allowed_skill_names(self):
         return None if self.local_skills is None else set(self.local_skills)

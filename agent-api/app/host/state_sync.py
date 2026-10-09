@@ -105,12 +105,14 @@ def _runs(events_dir: Path) -> list[int]:
     return sorted(int(p.name[1:]) for p in Path(events_dir).glob(_RUN_GLOB) if p.is_dir())
 
 
-def _append_line(path: Path, obj: dict) -> None:
+def _append_line(path: Path, obj: dict) -> int:
+    """Append `obj` as one durable line; the file's inode."""
     line = json.dumps(obj, separators=(",", ":"), ensure_ascii=False) + "\n"
     with path.open("a", encoding="utf-8") as f:
         f.write(line)
         f.flush()
         os.fsync(f.fileno())
+        return os.fstat(f.fileno()).st_ino
 
 
 def count_host_events(events_dir: Path, segment_events: int = HARNESS_SEGMENT_EVENTS) -> int:
@@ -125,16 +127,14 @@ def count_host_events(events_dir: Path, segment_events: int = HARNESS_SEGMENT_EV
 
 def append_host_event(events_dir: Path, hseq: int, session_id: str | None, type: str,
                       body: dict, segment_events: int = HARNESS_SEGMENT_EVENTS
-                      ) -> tuple[Path, dict]:
-    """Write host event `hseq` to its segment: (the segment, the record).
-    The caller is the session's one host-log writer (it owns the hseq
-    counter)."""
+                      ) -> tuple[Path, int, dict]:
+    """Write host event `hseq` to its segment (events_dir exists): (the
+    segment, its inode, the record). The caller is the session's one
+    host-log writer (it owns the hseq counter)."""
     n = (hseq - 1) // segment_events + 1
     rec = {"ts": utcnow_iso(), "hseq": hseq, "session_id": session_id, "type": type, "body": body}
-    Path(events_dir).mkdir(parents=True, exist_ok=True)
     path = Path(events_dir) / _segment_name(n, "host-")
-    _append_line(path, rec)
-    return path, rec
+    return path, _append_line(path, rec), rec
 
 
 class HostLog:
@@ -149,14 +149,12 @@ class HostLog:
         self.events_dir = Path(events_dir)
         self.segment_events = max(1, int(segment_events))
         self._lock = threading.Lock()
-        self._count: int | None = None
+        self._count = 0
         self._last: tuple[Path, int] | None = None     # the segment last written, its inode
 
     def _stale(self) -> bool:
-        if self._count is None:
-            return True
         if self._last is None:
-            return False
+            return True
         path, ino = self._last
         try:
             return path.stat().st_ino != ino
@@ -166,11 +164,12 @@ class HostLog:
     def append(self, session_id: str | None, type: str, body: dict) -> dict:
         with self._lock:
             if self._stale():
+                self.events_dir.mkdir(parents=True, exist_ok=True)
                 self._count = count_host_events(self.events_dir, self.segment_events)
             self._count += 1
-            path, rec = append_host_event(self.events_dir, self._count, session_id, type, body,
-                                          self.segment_events)
-            self._last = (path, path.stat().st_ino)
+            path, ino, rec = append_host_event(self.events_dir, self._count, session_id, type,
+                                               body, self.segment_events)
+            self._last = (path, ino)
             return rec
 
 

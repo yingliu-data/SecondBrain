@@ -12,9 +12,8 @@ from fastapi.responses import StreamingResponse
 from app.auth.middleware import verify
 from app.config import HARNESS_KEEPALIVE_S, MAX_INPUT, SESSION_BACKEND
 from app.host import temporal
-from app.host.activities import session_config
 from app.host.stream import KEEPALIVE, SSE_HEADERS, fatal_items, tokens
-from app.host.worker import Workers, new_input_id
+from app.host.worker import Workers, new_input_id, session_config
 from app.session.dir_store import DirStore
 from app.session.factory import create_session_store
 from app.session.ids import session_key
@@ -111,9 +110,11 @@ async def _answer_stream(worker, task_id: str | None, answer_to: str, message: s
     """An answer to question `answer_to` as ui_response to the worker's
     live or parked guest (a parked one is restored first, M3), then the
     stream of `task_id`, the task it belongs to; NO_QUESTION when there is
-    no such task or no guest takes it."""
+    no such task, no guest takes it, or the guest is parked on another
+    question (Worker.answer refuses it)."""
     sink = worker.attach(task_id) if task_id is not None else None
-    if sink is None or worker.answer(answer_to, message, input_id) == "no_guest":
+    if sink is None or worker.answer(answer_to, message, input_id) in ("no_guest",
+                                                                       "other_question"):
         if sink is not None:
             worker.detach(sink)
         async for item in _error_stream(NO_QUESTION):
@@ -138,16 +139,12 @@ async def _harness_turn(tenant: Tenant, session_id: str, message: str, input_id:
     set_current_context(session, tenant.user, tenant.name, session_id)
     if answer_to:
         await worker.settle_park()      # a question park in progress ends first
-        qp = worker.question_park
-        # parked on another question: a ui_response would wake the guest
-        # behind act()'s answer wait (as on the workflow path)
-        task_id = worker.current_input_id if qp is None or qp["question_id"] == answer_to else None
-        async for item in _answer_stream(worker, task_id, answer_to,
+        async for item in _answer_stream(worker, worker.current_input_id, answer_to,
                                          message, input_id):
             yield item
         return
 
-    async with session_queue.run(session_key(tenant.user, tenant.name, session_id)):
+    async with session_queue.run(session_key(tenant.user, tenant.name, session_id)) as slot:
         ticket = await asyncio.to_thread(Ticket.start, session, "chat.turn",
                                          inputs={"message": message, "input_id": input_id})
         sink = worker.attach(input_id)
@@ -167,8 +164,23 @@ async def _harness_turn(tenant: Tenant, session_id: str, message: str, input_id:
                 logger.warning(f"ticket finish failed: {e}")
 
         task.add_done_callback(_finish)
-        async for item in _drain(worker, sink, task):
-            yield item
+        unparked = asyncio.ensure_future(_slot_unless_parked(worker, input_id, task, slot))
+        try:
+            async for item in _drain(worker, sink, task):
+                yield item
+        finally:
+            unparked.cancel()
+
+
+async def _slot_unless_parked(worker, input_id: str, task: asyncio.Future, slot) -> None:
+    """Give the global slot back while the input is parked on a question (a
+    wait of up to answer_wait_s, not work), take it again when it resumes;
+    the session lock still orders the session."""
+    async for parked in worker.parked_states(input_id, task):
+        if parked:
+            slot.release()
+        else:
+            await slot.acquire()
 
 
 async def _workflow_turn(tenant: Tenant, session_id: str, message: str, input_id: str,
@@ -194,9 +206,10 @@ async def _workflow_turn(tenant: Tenant, session_id: str, message: str, input_id
 
     await worker.settle_park()          # a question park in progress ends first
     qp = worker.question_park
-    if qp is not None and qp["question_id"] == answer_to:
-        # this process's worker is parked on that question: no status query
-        task_id, parked = qp["input_id"], True
+    if qp is not None:
+        # this process's worker holds the park: on that question the
+        # workflow takes the answer, on another Worker.answer refuses it
+        task_id, parked = qp["input_id"], qp["question_id"] == answer_to
     else:
         st = await temporal.status(ref)
         task_id = (st.current_input_id if st is not None else None) or worker.current_input_id

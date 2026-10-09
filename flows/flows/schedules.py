@@ -146,7 +146,8 @@ def _fingerprint(entry: ScheduleEntry, task_queue: str) -> str:
     return hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
 
 
-def _schedule_for(entry: ScheduleEntry, task_queue: str) -> Schedule:
+def _schedule_for(entry: ScheduleEntry, task_queue: str, fingerprint: str) -> Schedule:
+    """The schedule for `entry`; `fingerprint` (``_fingerprint``) goes in its memo."""
     session = SessionRef(user=entry.user, tenant=entry.tenant, session_id=entry.session)
     return Schedule(
         action=ScheduleActionStartWorkflow(
@@ -157,7 +158,7 @@ def _schedule_for(entry: ScheduleEntry, task_queue: str) -> Schedule:
             id=entry.schedule_id,
             task_queue=task_queue,
             execution_timeout=timedelta(seconds=entry.config.tick_timeout_s),
-            memo={FINGERPRINT_MEMO: _fingerprint(entry, task_queue)},
+            memo={FINGERPRINT_MEMO: fingerprint},
         ),
         spec=ScheduleSpec(cron_expressions=[entry.cron], time_zone_name=entry.tz),
         policy=POLICY,
@@ -212,8 +213,8 @@ async def ensure_schedules(
     existing = {s.id async for s in await client.list_schedules()}
 
     async def _upsert(sid: str, entry: ScheduleEntry) -> tuple[str, str]:
-        schedule = _schedule_for(entry, task_queue)
-        fingerprint = schedule.action.memo[FINGERPRINT_MEMO]
+        fingerprint = _fingerprint(entry, task_queue)
+        schedule = _schedule_for(entry, task_queue, fingerprint)
         if sid not in existing:
             try:
                 await client.create_schedule(sid, schedule)

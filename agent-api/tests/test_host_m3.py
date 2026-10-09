@@ -382,7 +382,7 @@ async def test_death_mid_call_resumes_from_base_with_log_return_and_lost_call(se
     assert not dc.is_open("call_d") and dc.resolve("call_d", "late") is False
     assert any(b.get("state") == "lost" for b in host(w, "side_call"))
     assert w.send_control("side_result", {"call_id": "call_d", "side": "device",
-                                          "content": "late", "ok": True}) == "sent"
+                                          "content": "late", "ok": True}) == "dropped"
     assert {"kind": "side_result", "call_id": "call_d", "side": "device",
             "dedupe": "late"} in host(w, "input")
     assert any(b.get("kind") == "resume" and b["reason"] == "guest_died"

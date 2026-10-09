@@ -38,13 +38,14 @@ M3 (harness/docs/M3-CONTRACTS.md): one long-lived guest per session.
 
 M5 (harness/docs/M5-CONTRACTS.md): two drivers over one task API. The
 Temporal activities (activities.py) are one; act() is the other, in-process
-(the direct path). `answer_wait_s` (construction config, Workers.config_for:
-the tenant's, on either path) > 0: hello limits carry it, the guest parks
+(the direct path). `answer_wait_s` (the tenant's, session_config, on either
+path) > 0: hello limits carry it, the guest parks
 itself on a question deadline (parked{reason: question, question_id}), the
 worker adopts the park and records `question_park` on the parked state; the
 task's wall clock stops while it waits. Both drivers handle that park the
 same way: wait up to answer_wait_s for the answer (the workflow's timer;
-act()'s _drive), else wake + abort{escalated} so the guest settles it.
+act()'s _drive), else abort_and_wait(escalated): wake + abort so the guest
+settles it, bounded by abort_wait_s.
   .ensure_ready()               boot / wake the guest (prepare_vm)
   .start_task(task_input)       the task of an input, worker-owned (a retry
                                 re-attaches to it by input_id); task_input may
@@ -74,13 +75,15 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Callable, NamedTuple
+from typing import Callable
 
+from flows.activities import SessionConfig
 from protocol.allowlist import effective_tools
+from protocol.events import ENUMS
 from protocol.messages import Outbox, ProtocolError, ack, control_message
 
 from app.config import (
-    HARNESS_CONTEXT_WINDOW_TOKENS, HARNESS_GUEST_ROOT, HARNESS_HEARTBEAT_S,
+    HARNESS_ABORT_WAIT_S, HARNESS_CONTEXT_WINDOW_TOKENS, HARNESS_GUEST_ROOT, HARNESS_HEARTBEAT_S,
     HARNESS_HELLO_TIMEOUT_S, HARNESS_HOST_TOOL_TIMEOUT_S, HARNESS_MAX_RESUMES,
     HARNESS_MAX_TURNS, HARNESS_PARK_GRACE_S, HARNESS_PARK_TIMEOUT_S, HARNESS_PORTS, HARNESS_QUESTION_TIMEOUT_S,
     HARNESS_RESERVE_TOKENS, HARNESS_SANDBOX, HARNESS_SESSION_IDLE_S,
@@ -105,34 +108,23 @@ from app.util.ipc import atomic_write_json
 logger = logging.getLogger("host.worker")
 
 HARNESS_VERSION = "0.0.3"
+# the guest's settle outcomes (anything else a task returns counts as failed)
+SETTLE_OUTCOMES = ENUMS["settle"]["outcome"]
 
 
-class ControlPolicy(NamedTuple):
-    """How one control type is handled outside a plain send."""
-    while_parked: str       # "hold": kept unnumbered, the guest wakes for it; "drop"
-    carried: bool           # unacked at a death resume: numbered again after the new hello
-    wake_order: int         # held controls are sent at the wake lowest first
-
-
-# M3-CONTRACTS §3.5: the wake sends held controls `ui_response` first
-CONTROL_POLICY: dict[str, ControlPolicy] = {
-    "hello": ControlPolicy("hold", False, 1),
-    "heartbeat": ControlPolicy("drop", False, 1),
-    "park": ControlPolicy("drop", False, 1),
-    "ui_response": ControlPolicy("hold", True, 0),
-    "task": ControlPolicy("hold", True, 1),
-    "follow_up": ControlPolicy("hold", True, 1),
-    "steer": ControlPolicy("hold", True, 1),
-    "side_result": ControlPolicy("hold", True, 1),
-    "abort": ControlPolicy("hold", True, 1),
-}
-_DEFAULT_POLICY = ControlPolicy("hold", True, 1)
+# How a control type is handled outside a plain send (every other type is
+# held while parked, the guest wakes for it, and carried over a death resume):
+DROPPED_WHILE_PARKED = frozenset({"heartbeat", "park"})
+# unacked at a death resume: NOT numbered again after the new hello
+NOT_CARRIED = frozenset({"hello", "heartbeat", "park"})
 # M5: the only controls that wake a guest parked on a question (send_control)
 QUESTION_PARK_WAKERS = ("ui_response", "abort")
 
 
-def control_policy(type: str) -> ControlPolicy:
-    return CONTROL_POLICY.get(type, _DEFAULT_POLICY)
+def wake_order(item: tuple[str, dict]) -> bool:
+    """Sort key of the held controls a wake sends: `ui_response` first
+    (M3-CONTRACTS §3.5), the rest in the order they were held."""
+    return item[0] != "ui_response"
 
 
 class GuestError(RuntimeError):
@@ -165,6 +157,12 @@ def strip_current_time(prompt: str) -> str:
     return "\n".join(out)
 
 
+def session_config(tenant) -> SessionConfig:
+    """The tenant's SessionConfig (the task signal's config; a Worker's
+    answer_wait_s on either path)."""
+    return SessionConfig.from_tenant(tenant.workflow_entry())
+
+
 def make_sandbox() -> Sandbox:
     if HARNESS_SANDBOX == "firecracker":
         from app.host.sandbox.firecracker import FirecrackerSandbox  # type: ignore
@@ -186,7 +184,7 @@ class Worker:
                  park_grace_s: float = HARNESS_PARK_GRACE_S,
                  gateway_url: str = MCP_GATEWAY_URL,
                  gateway_tools_timeout_s: float = MCP_GATEWAY_TOOLS_TIMEOUT_S,
-                 answer_wait_s: int | None = None) -> None:
+                 abort_wait_s: float = HARNESS_ABORT_WAIT_S) -> None:
         self.session = session
         self.tenant = tenant
         self.registry = registry
@@ -206,6 +204,7 @@ class Worker:
         self.park_grace_s = park_grace_s
         self.gateway_url = gateway_url
         self.gateway_tools_timeout_s = gateway_tools_timeout_s
+        self.abort_wait_s = abort_wait_s
 
         meta = session.read_meta()
         self.session_id: str = meta.get("session_id") or session.root.name
@@ -227,9 +226,8 @@ class Worker:
         self._stop_accept = threading.Event()
         self._accept_thread: threading.Thread | None = None
         self._task_lock = asyncio.Lock()
-        self._current: tuple[str, asyncio.Future] | None = None  # input_id, its settle
-        # the running task's wall clock (its input's, else wall_clock_s): hello limits
-        self.task_wall_clock_s: float = wall_clock_s
+        # the running task: input_id, its settle, its wall clock (hello limits)
+        self._current: tuple[str, asyncio.Future, float] | None = None
         self.last_hello: dict | None = None
         self.closed = False
         # M3: park, resume, idle, death
@@ -241,9 +239,10 @@ class Worker:
         # the session's gateway entries from the first successful fetch:
         # pins are fixed per session, a resume hello reuses them
         self.gateway_entries: list[dict] | None = None
-        # M5: > 0 = a question deadline parks the task, the driver waits this
-        # long for the answer (None/0 = the guest denies, M1-M4 behaviour)
-        self.answer_wait_s = answer_wait_s
+        # M5: the tenant's (either path); > 0 = a question deadline parks the
+        # task, the driver waits this long for the answer (0 = the guest
+        # denies, M1-M4 behaviour)
+        self.answer_wait_s = session_config(tenant).answer_wait_s
         self._changed = asyncio.Event()             # replaced (and set) on every change
         # none | booting | running | parking | parked; the session snapshot
         # itself is the sandbox's business (has_snapshot / restore)
@@ -359,6 +358,11 @@ class Worker:
     def current_input_id(self) -> str | None:
         return self._current[0] if self._current_future() is not None else None
 
+    @property
+    def task_wall_clock_s(self) -> float:
+        """The running task's wall clock (its input's), else wall_clock_s."""
+        return self._current[2] if self._current_future() is not None else self.wall_clock_s
+
     def open_questions(self) -> list[dict]:
         """Unanswered questions of the current run whose call has no result
         yet, as the SSE `question` payload."""
@@ -417,20 +421,42 @@ class Worker:
         timer bounds that wait)."""
         left = None if wall_clock_s is None else wall_clock_s + 5
         while True:
-            evt, qp = self._changed, self.question_park
-            if qp is not None and input_id is not None and qp["input_id"] == input_id:
+            if aw.done():               # first: a task can end while still parked
+                return aw.result()
+            qp = self.question_park
+            if input_id is not None and self.parked_on(input_id):
                 return {"input_id": input_id, "outcome": "parked",
                         "question_id": qp["question_id"]}
-            if aw.done():
-                return aw.result()
             if qp is not None or left is None:
-                await _first(aw, evt)
+                await _first(aw, self._changed)
                 continue
-            t0 = time.monotonic()
-            await _first(aw, evt, timeout=left)
-            left -= time.monotonic() - t0
+            left = await self._until(lambda: self.question_park is not None, aw, left)
             if not aw.done() and left <= 0 and self.question_park is None:
                 raise asyncio.TimeoutError
+
+    async def _until(self, done: Callable[[], bool], aw: asyncio.Future,
+                     timeout: float | None = None) -> float:
+        """Wait until `done()` holds (checked on every change, _pulse), `aw`
+        is done or `timeout` (None: no limit) ran out; the time left."""
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while not done() and not aw.done():
+            left = None if deadline is None else deadline - time.monotonic()
+            if left is not None and left <= 0:
+                return 0.0
+            await _first(aw, self._changed, timeout=left)
+        return float("inf") if deadline is None else max(0.0, deadline - time.monotonic())
+
+    def parked_on(self, input_id: str) -> bool:
+        """The guest is parked on a question of `input_id`."""
+        qp = self.question_park
+        return qp is not None and qp["input_id"] == input_id
+
+    async def parked_states(self, input_id: str, aw: asyncio.Future):
+        """parked_on(input_id) now and at every change of it, until `aw` is done."""
+        while not aw.done():
+            parked = self.parked_on(input_id)
+            yield parked
+            await self._until(lambda: self.parked_on(input_id) != parked, aw)
 
     def on_heartbeat(self, input_id: str, beat: Callable[[], None]) -> Callable[[], None]:
         """Call `beat()` on every heartbeat tick of `input_id`'s task (from
@@ -466,10 +492,14 @@ class Worker:
 
     def answer(self, question_id: str, text: str, input_id: str) -> str:
         """ui_response{question_id, answer} to the guest (a parked one is
-        restored first, ui_response first); send_control's status."""
+        restored first, ui_response first); send_control's status, or
+        "other_question" (nothing sent) while the guest is parked on another
+        question: a ui_response would wake it behind the answer wait."""
         self._ensure_plumbing()
-        if self.question_park is not None and self.question_park["question_id"] == question_id:
-            self.question_park = None
+        qp = self.question_park
+        if qp is not None and qp["question_id"] != question_id:
+            return "other_question"
+        self.question_park = None
         status = self.send_control("ui_response", {"input_id": input_id,
                                                    "question_id": question_id, "answer": text})
         self.sync.host_event("workflow", {"kind": "answer_signal", "input_id": input_id,
@@ -486,6 +516,32 @@ class Worker:
             self.sync.host_event("workflow", {"kind": "abort", "reason": reason,
                                               "input_id": self.current_input_id})
         return status
+
+    async def abort_and_wait(self, input_id: str, reason: str, *,
+                             question_id: str | None = None, reattach: bool = False) -> None:
+        """The one escalation step of both drivers: abort{reason} to the
+        guest, then wait (abort_wait_s at most) for that input's task: the
+        guest writes the settle itself. `question_id`: the answer wait of that
+        question ran out (host event workflow{answer_timeout}). abort{} is
+        not input-scoped (the guest settles whatever it runs): only while
+        this input's task is the running one. reattach: a parked guest whose
+        task this process does not hold (a restarted agent-api) is woken by
+        the abort and the task re-attached (the guest dedupes it)."""
+        task = self.task_for(input_id)
+        orphan = reattach and task is None and self.vm_state == "parked"
+        if not orphan and (task is None or task.done() or self.current_input_id != input_id):
+            return
+        if question_id is not None:
+            self.sync.host_event("workflow", {"kind": "answer_timeout", "input_id": input_id,
+                                              "question_id": question_id})
+        if self.abort(reason) == "no_guest":
+            return
+        if orphan:
+            task = self.start_task({"input_id": input_id, "text": ""})
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=self.abort_wait_s)
+        except Exception as e:  # noqa: BLE001 - timeout or the task's own failure
+            logger.warning("session %s: no settle after abort{%s}: %r", self.session_key, reason, e)
 
     def finish_input(self, input_id: str, error: str | None = None, **extra) -> None:
         """The one terminal step of an input's streams: `error` (if any, with
@@ -603,7 +659,7 @@ class Worker:
             # M3: running guest ops get this long after `park`, then killed
             "park_grace_s": self.park_grace_s,
             # M5: > 0 = a question deadline parks the task (either driver)
-            **({"answer_wait_s": int(self.answer_wait_s)} if self.answer_wait_s is not None else {}),
+            "answer_wait_s": int(self.answer_wait_s),
         }
 
     def build_hello(self, resume: bool = False) -> dict:
@@ -638,30 +694,31 @@ class Worker:
 
     # ------------------------------------------------------------ control
     def send_control(self, type: str, body: dict) -> str:
-        """The one way a control reaches the guest (CONTROL_POLICY). Returns
+        """The one way a control reaches the guest. Returns
           "sent"      numbered (next cseq) and kept until acked; sent now if
                       the link is up, else with the resend on the next link
                       (a stream drop between restore and reconnect is not a
-                      lost guest). Also a `side_result` for a call the guest
-                      declared lost: dropped, logged `input{dedupe: late}`
-                      (PLAN.md 5)
-          "held"      the guest is parked: a `hold` control is kept
-                      unnumbered, the guest wakes (restore) and the wake
-                      numbers the held controls by wake_order; a `drop` one
-                      (heartbeat, park) is dropped. Parked on a question,
-                      only `ui_response` and `abort` wake it (the driver's
-                      answer wait holds the task; a woken guest would not
-                      park again): the others wait for that wake
+                      lost guest)
+          "held"      the guest is parked: kept unnumbered, the guest wakes
+                      (restore) and the wake numbers the held controls
+                      `ui_response` first. Parked on a question, only
+                      `ui_response` and `abort` wake it (the driver's answer
+                      wait holds the task; a woken guest would not park
+                      again): the others wait for that wake
+          "dropped"   not sent at all: a `side_result` for a call the guest
+                      declared lost (logged `input{dedupe: late}`, PLAN.md
+                      5), or a heartbeat / park to a parked guest
           "no_guest"  no guest run can take it (never booted, or gone)"""
         if type == "side_result" and body.get("call_id") in self._lost_calls:
             self.sync.host_event("input", {"kind": "side_result", "call_id": body.get("call_id"),
                                            "side": body.get("side"), "dedupe": "late"})
-            return "sent"
+            return "dropped"
         if self.vm_state == "parked":
-            if control_policy(type).while_parked == "hold":
-                self._deferred.append((type, body))
-                if self.question_park is None or type in QUESTION_PARK_WAKERS:
-                    self._request_wake()
+            if type in DROPPED_WHILE_PARKED:
+                return "dropped"
+            self._deferred.append((type, body))
+            if self.question_park is None or type in QUESTION_PARK_WAKERS:
+                self._request_wake()
             return "held"
         if self._outbox is None or self.vm_state == "none":
             return "no_guest"
@@ -675,9 +732,8 @@ class Worker:
             self._channel.send(msg)
 
     def _send_held(self, items: list[tuple[str, dict]]) -> None:
-        """Number and send held controls by wake_order (`ui_response` first,
-        M3-CONTRACTS §3.5)."""
-        for t, b in sorted(items, key=lambda tb: control_policy(tb[0]).wake_order):
+        """Number and send held controls, `ui_response` first (wake_order)."""
+        for t, b in sorted(items, key=wake_order):
             self.send_control(t, b)
 
     # ------------------------------------------------------------ plumbing
@@ -845,7 +901,7 @@ class Worker:
             highest = 0
             if self._outbox is not None:
                 carried = [(m["type"], m["body"]) for m in self._outbox.pending
-                           if control_policy(m["type"]).carried]
+                           if m["type"] not in NOT_CARRIED]
                 highest = self._outbox.highest_sent
             self._outbox = Outbox(self.session_id, "cseq")
             self._outbox.resume_from(highest)
@@ -1084,16 +1140,15 @@ class Worker:
             if res.get("outcome") != "parked":
                 return res
             park = self.question_park
-            left = float(self.answer_wait_s or 0)
-            while self.question_park == park and not task.done() and left > 0:
-                t0 = time.monotonic()
-                await _first(task, self._changed, timeout=left)
-                left -= time.monotonic() - t0
+            await self._until(lambda: self.question_park != park, task,
+                              float(self.answer_wait_s))
             if self.question_park == park and not task.done():
-                self.sync.host_event("workflow", {"kind": "answer_timeout", "input_id": input_id,
-                                                  "question_id": res.get("question_id")})
-                self.abort("escalated")
-                return await asyncio.shield(task)
+                await self.abort_and_wait(input_id, "escalated",
+                                          question_id=res.get("question_id"))
+                if task.done():
+                    return task.result()
+                return self._fail(input_id, "escalated",
+                                  f"No settle within {self.abort_wait_s:g}s of abort{{escalated}}.")
 
     async def _task(self, task_input: dict) -> dict:
         """start_task's task: _act, with the task's heartbeat beside it."""
@@ -1121,16 +1176,13 @@ class Worker:
             if body is not None:
                 return self._settled_again(input_id, body)
             fut = self._loop.create_future()
-            self._current = (input_id, fut)
-            self.task_wall_clock_s = task_input.get("wall_clock_s") or self.wall_clock_s
+            self._current = (input_id, fut, task_input.get("wall_clock_s") or self.wall_clock_s)
             try:
                 result = await self._run(task_input, fut)
             except BaseException as e:
                 if not fut.done():
                     fut.set_exception(e)
                 raise
-            finally:
-                self.task_wall_clock_s = self.wall_clock_s
             if not fut.done():
                 fut.set_result(result)
             return result
@@ -1435,9 +1487,15 @@ def task_error(t: asyncio.Future | None) -> str | None:
     return t.result().get("host_error")
 
 
+def settle_outcome(outcome) -> str:
+    """`outcome` when it is a settle outcome (ENUMS), else failed: how both
+    drivers normalise a task's outcome (act()'s streams, RunResult)."""
+    return outcome if outcome in SETTLE_OUTCOMES else "failed"
+
+
 def task_outcome(t: asyncio.Future) -> str:
     """A finished task's outcome: its result's, else failed."""
-    return (t.result().get("outcome") or "failed") if task_ok(t) else "failed"
+    return settle_outcome(t.result().get("outcome")) if task_ok(t) else "failed"
 
 
 def end_error(t: asyncio.Future | None, outcome: str) -> str | None:
@@ -1460,28 +1518,24 @@ async def _first(fut: asyncio.Future, evt: asyncio.Event, timeout: float | None 
 class Workers:
     """One Worker per running session, by session_key(user, tenant, session_id).
 
-    `sessions` (the DirStore) opens a new Worker's session directory;
-    `config_for(tenant)` gives a new Worker's construction config on top of
-    `worker_kwargs` (main.py: the tenant's answer_wait_s)."""
+    `sessions` (the DirStore) opens a new Worker's session directory; every
+    new Worker gets `worker_kwargs` (its tenant's config it reads itself)."""
 
-    def __init__(self, sandbox_factory=make_sandbox, *, sessions=None,
-                 config_for: Callable[[object], dict] | None = None, **worker_kwargs) -> None:
+    def __init__(self, sandbox_factory=make_sandbox, *, sessions=None, **worker_kwargs) -> None:
         self._workers: dict[str, Worker] = {}
         self.sandbox_factory = sandbox_factory
         self.sessions = sessions
-        self.config_for = config_for or (lambda tenant: {})
         self.worker_kwargs = worker_kwargs
 
     def get_or_create(self, tenant, session_id: str, registry) -> Worker:
         """The session's live Worker, looked up by key; only a new one opens
-        the session directory and reads config_for(tenant). A live Worker
+        the session directory and reads the tenant's config. A live Worker
         keeps its config until it is closed."""
         key = session_key(tenant.user, tenant.name, session_id)
         w = self._workers.get(key)
         if w is None or w.closed:
             session = self.sessions.get_or_create(tenant.user, tenant.name, session_id)
-            w = Worker(session, tenant, registry, self.sandbox_factory(),
-                       **{**self.worker_kwargs, **self.config_for(tenant)})
+            w = Worker(session, tenant, registry, self.sandbox_factory(), **self.worker_kwargs)
             self._workers[key] = w
         return w
 

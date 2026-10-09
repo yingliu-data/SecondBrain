@@ -43,7 +43,7 @@ strings. Times (`at`, `deadline`) are int milliseconds since the epoch.
 | `tool_result` | `call_id` str, `content` str (verbatim, truncated at `spill_threshold`), `spill_ref`? str or null, `rewrite`? str or null (after_tool output), `late`? bool | ops / hooks |
 | `wake` | `reason` in `input`/`tool_result`/`grace`/`idle`/`question`, `result_ids` list of str, `input_ids` list of str | coordinator |
 | `question` | `question_id` str, `call_id` str, `text` str, `options` list of str, `deadline` int ms `>= 0` | tools |
-| `parked` | `checkpoint_seq` int `>= 1`, `reason` str, `question_id`? str (M5: with `reason: "question"`, the open question the task waits on), `wall_used_ms`? int `>= 0` (M5: the task's wall clock used up to the park; absent when no task runs or no wall limit is set), `at`? int ms (M5: the guest clock at the park) | coordinator |
+| `parked` | `checkpoint_seq` int `>= 1`, `reason` str, `question_id`? str (M5: with `reason: "question"`, the open question the task waits on), `wall_used_ms`? int `>= 0` (M5: the task's wall clock used up to the park; absent when no task runs or no wall limit is set), `question_left_ms`? object (M5: `{question_id: ms}`, what each open question's deadline had left at the park, 0 = past it; absent when no question has one) | coordinator |
 | `compaction` | `range` `[from_seq, to_seq]` two ints with `1 <= from <= to`, `summary_turn_id` str, `tokens_before` int `>= 0`, `tokens_after` int `>= 0` | coordinator |
 | `memory` | `scope` in `user`/`session`, `op` in `write`/`remove`, `slug` str, `sha256` str, `derived_from` str (a call_id or a compaction `summary_turn_id`) | host |
 | `bulk` | `kind` in `spill`/`workspace`, `path` str, `sha256` str, `bytes` int `>= 0` | ops |
@@ -113,20 +113,15 @@ strings. Times (`at`, `deadline`) are int milliseconds since the epoch.
   wall clock the task had used, from the paused wall timer. A fresh process
   restoring the log takes the last park's value plus the guest-clock time
   since that park's `clock{resumed}`.
-- `parked.at` (every park): the guest clock at the park. Question deadlines
-  are log-derived from it: a question is due at its `deadline` plus every
-  parked stretch after it was asked (a stretch runs from `parked.at` to the
-  `clock{resumed}` after that park, as for the wall clock; a log ending with
-  `parked` is still in its stretch), because question timers
-  pause while parked. A fresh process restoring a parked log treats a
-  question as expired when a `clock{question_deadline, ref}` names it or its
-  due time is at or before the last park; one expired only by its due time
-  gets its `clock{question_deadline, ref}` on restore, before the expiry.
-- Fallback for logs written before `clock{resumed}` existed: a stretch ends
-  at the first guest-side clock event (not `host_hello`/`host_heartbeat`)
-  after the park. Every wake now writes `resumed` first, so it is that event
-  and one rule serves both; an old log with two parks and no guest clock
-  between them still counts the first stretch as live.
+- `parked.question_left_ms` (every park with an open question that has a
+  deadline): what each one's deadline had left, from the paused timers
+  (question timers pause while parked, so the parked stretch never counts);
+  0 for a question already past it (waiting on its answer). A fresh process
+  restoring a parked log re-arms each listed question with what it had left
+  and treats a question as expired when a `clock{question_deadline, ref}`
+  names it or it had 0 left; one expired only by the 0 gets its
+  `clock{question_deadline, ref}` on restore, before the expiry. A question
+  the park does not list had no deadline.
 - The fold does not check `parked.question_id` against `open_questions`.
 
 ## Log rules (`validate_log`)

@@ -289,6 +289,7 @@ def test_tool_derived_memory_is_traced_not_projected(session):
     assert sync.state.session_memory == {"tz": "a" * 64}
 
 
+@pytest.mark.no_log_verify("a memory event derived from a plain turn: invalid on purpose")
 def test_memory_derived_from_a_regular_turn_is_not_projected(session, caplog):
     sync = StateSync(session)
     for e in text_task():

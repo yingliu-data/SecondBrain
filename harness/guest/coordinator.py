@@ -169,14 +169,13 @@ M5 (docs/M5-CONTRACTS.md section 4, docs/GUEST.md "M5"):
     paused wall timer). restore: the wall clock used = the last park's
     wall_used_ms + the guest-clock time since its clock{resumed} (or after
     the task's start, without a park).
-  - question deadlines are log-derived: clock{question_deadline, ref} names
-    the expired question, parked.at is the guest clock at the park. restore
-    puts each question's due time (question.deadline) on a guest-clock axis
-    without the parked stretches (parked.at -> the clock{resumed} after it),
-    as the live timers pause while parked; restoring a
-    parked log re-arms each question not yet due with what it had left and
-    sends the due ones through _question_expired, oldest first (no new park
-    when the log's park is on one of them).
+  - question deadlines: parked.question_left_ms = what each open question's
+    deadline had left at the park (from the paused timers; 0 for one already
+    past it), as the live timers pause while parked. Restoring a parked log
+    re-arms each question with what it had left and sends the due ones (0
+    left, or a logged clock{question_deadline, ref}) through
+    _question_expired, oldest first (no new park when the log's park is on
+    one of them).
   - abort{reason}: "escalated" -> settle{escalated}; any other reason ->
     settle{aborted}; answer "", settle.reason "abort", detail the reason.
 """
@@ -428,10 +427,13 @@ class Coordinator:
             timeout_s = min(timeout_s, expires) if timeout_s > 0 else expires
         return timeout_s
 
-    def _arm_question(self, qid: str) -> None:
-        timeout_s = self._questions[qid]["timeout_s"]
-        if timeout_s > 0:
-            self._arm("question_deadline", f"question:{qid}", float(timeout_s))
+    def _arm_question(self, qid: str, delay_s: float | None = None) -> None:
+        """Arm a question's deadline: its full timeout, or `delay_s` (what it
+        had left at a park, on restore); none when that is 0."""
+        if delay_s is None:
+            delay_s = self._questions[qid]["timeout_s"]
+        if delay_s > 0:
+            self._arm("question_deadline", f"question:{qid}", float(delay_s))
 
     def _cancel(self, token: str) -> None:
         self._paused.pop(token, None)
@@ -628,8 +630,11 @@ class Coordinator:
         self._waiting.discard(qid)
         return self._questions.pop(qid, None)
 
+    def _question_seq(self, qid: str) -> int:
+        return self.state.open_questions[qid]["seq"]
+
     def _oldest_waiting(self) -> str:
-        return min(self._waiting, key=lambda q: self.state.open_questions[q]["seq"])
+        return min(self._waiting, key=self._question_seq)
 
     def _request_question_park(self, message: str) -> None:
         """M5: park on the oldest question past its deadline at the loop's
@@ -1284,7 +1289,7 @@ class Coordinator:
         self.emit("question", {"question_id": qid, "call_id": call_id, "text": text,
                                "options": options, "deadline": deadline})
         self._questions[qid] = {"call_id": call_id, "kind": kind, "name": name,
-                                "args": args, "side": side, "timeout_s": timeout_s}
+                                "args": args, "side": side, "timeout_s": timeout_s, "expired": False}
         if timeout_s <= 0 and not ui_attached:
             self._question_expired(qid)
             return
@@ -1515,9 +1520,15 @@ class Coordinator:
         prev = self._last_checkpoint_hash or hash_value(self._session_start)
         cp = self.emit("checkpoint", {"through_seq": self.state.last_seq,
                                       "state_hash": state_hash(self.state), "prev_hash": prev})
-        body = {"checkpoint_seq": cp["seq"], "reason": reason, "at": self.clock.now_ms()}
+        body = {"checkpoint_seq": cp["seq"], "reason": reason}
         if question is not None:
             body["question_id"] = question
+        # what each open question had left (restore re-arms it); 0 = due
+        left = {qid: 0 for qid in self._waiting}
+        left.update((token.split(":", 1)[1], int(round(remaining * 1000)))
+                    for token, (kind, remaining) in self._paused.items() if kind == "question_deadline")
+        if left:
+            body["question_left_ms"] = left
         wall, paused = _limit(self.limits, "wall_clock_s", None), self._paused.get("wall")
         if wall and paused is not None:          # the task's wall clock used so far (restore reads it)
             body["wall_used_ms"] = max(0, int(round((float(wall) - paused[1]) * 1000)))
@@ -1554,16 +1565,10 @@ class Coordinator:
         calls: dict[str, dict] = {}                 # call_id -> tool_call body
         last_guard_policy = None
         # wall clock used by the task: what the last park recorded, plus the
-        # guest-clock time since the clock{resumed} after it (or after the
-        # task's start)
-        wall_used_ms, live_since = 0, None
-        # question due times on the "live" axis: guest-clock ms minus the parked
-        # stretches before (a stretch runs from parked.at to the clock{resumed}
-        # after it, as for the wall clock above). Every wake writes clock{resumed}
-        # first, so it is the first guest-side clock event after the park; a log
-        # written before clock{resumed} existed ends the stretch at whatever
-        # guest-side clock event comes first (the fallback the same code gives).
-        paused_ms, park_at, guest_at, park_question = 0, None, None, None
+        # guest-clock time since the clock{resumed} that ended its stretch (or
+        # since the task's first guest clock event, without a park)
+        wall_used_ms, live_since, in_stretch = 0, None, False
+        park_question, question_left = None, {}   # the last park's
         for ev in events:
             etype, body = ev["type"], ev["body"]
             if etype == "turn_start" and body["type"] == "regular":
@@ -1584,16 +1589,14 @@ class Coordinator:
             elif etype == "input" and body["dedupe"] == "new" and body["kind"] == "ui_response":
                 self._forget_question(body.get("question_id"))
             elif etype == "clock" and body["kind"] not in HOST_CLOCK_KINDS:
-                if live_since is None and self.task_input_id is not None:
+                in_stretch = in_stretch and body["kind"] != RESUMED
+                if live_since is None and not in_stretch and self.task_input_id is not None:
                     live_since = body["at"]
-                guest_at = body["at"]
-                if park_at is not None:
-                    paused_ms, park_at = paused_ms + max(0, body["at"] - park_at), None
                 if body["kind"] == "question_deadline" and body.get("ref") in self._questions:
                     self._questions[body["ref"]]["expired"] = True
             elif etype == "parked":
-                wall_used_ms, live_since = body.get("wall_used_ms", wall_used_ms), None
-                park_at, park_question = body.get("at", guest_at), body.get("question_id")
+                wall_used_ms, live_since, in_stretch = body.get("wall_used_ms", wall_used_ms), None, True
+                park_question, question_left = body.get("question_id"), body.get("question_left_ms", {})
             elif etype == "turn_start":
                 self.current_turn = body["turn_id"]
                 if body["type"] == "regular":
@@ -1633,8 +1636,7 @@ class Coordinator:
                 self._questions[body["question_id"]] = {
                     "call_id": body["call_id"], "kind": kind, "name": call.get("name"),
                     "args": call.get("args", {}), "side": call.get("side", "guest"),
-                    "timeout_s": self._question_timeout(),
-                    "due_ms": body["deadline"] - paused_ms, "expired": False}
+                    "timeout_s": self._question_timeout(), "expired": False}
             elif etype == "tool_result":
                 self._turn_pending.discard(body["call_id"])
                 self._side_calls.pop(body["call_id"], None)
@@ -1670,10 +1672,9 @@ class Coordinator:
         max_tools = _limit(self.limits, "max_tools", None)
         self._final_turn = bool(self.task_input_id is not None and max_tools
                                 and self._ops_this_task() >= max_tools)
-        after_park = events[-1]["type"] == "parked"   # still in its stretch: no clock{resumed} yet
-        self._restored = {"after_park": after_park, "wall_used_ms": wall_used_ms,
-                          "live_since": live_since, "park_question": park_question,
-                          "live_ms": park_at - paused_ms if after_park and park_at is not None else None}
+        self._restored = {"after_park": events[-1]["type"] == "parked",   # still in its stretch
+                          "wall_used_ms": wall_used_ms, "live_since": live_since,
+                          "park_question": park_question, "question_left_ms": question_left}
 
     def _register_preamble(self, body: dict) -> None:
         """The preamble text a regular turn used, rebuilt from the state just
@@ -1693,48 +1694,12 @@ class Coordinator:
     def _resume_restored(self, restored: dict) -> None:
         """After restore(): record the host's time, settle what the dead guest
         left open and wake the task (module doc, M3)."""
-        if restored.get("after_park"):            # a wake from a park: its stretch ends here
+        if restored["after_park"]:            # a wake from a park: its stretch ends here
             self.emit("clock", {"kind": RESUMED, "at": self.clock.now_ms()})
-        at = getattr(self.cfg, "at", None)
-        if is_int(at, 1):
-            self.emit("clock", {"kind": "host_hello", "at": at})
-        if self.task_input_id is not None:
-            self._cancel("idle")
-            wall = _limit(self.limits, "wall_clock_s", None)
-            if wall:
-                used_ms = restored["wall_used_ms"]
-                if restored["live_since"] is not None:
-                    used_ms += max(0, self.clock.now_ms() - restored["live_since"])
-                self._arm("wall_clock", "wall", max(1.0, float(wall) - used_ms / 1000.0))
-        if restored.get("after_park"):
-            # a fresh process after a park: nothing was lost; wait for the host again
-            for call_id in self._side_calls:
-                self._arm_op_timeout(call_id)
-            due = self._restored_question_deadlines(restored["live_ms"])
-            # a fresh process never re-attaches (M4-CONTRACTS 3.3): in-flight mcp calls are lost
-            lost = [cid for cid, m in self._mcp_calls.items() if m["state"] == "inflight"]
-            self._suppress_wake = True
-            try:
-                for cid in lost:
-                    self._finish_call(cid, "lost", LOST_CONTENT)
-                for qid, logged in due:     # M5: past their due time: the normal expiry path
-                    if self.settled is not None:
-                        break
-                    if logged:
-                        self._question_expired(qid)
-                    else:
-                        self._expire_question(qid)
-            finally:
-                self._suppress_wake = False
-            if restored["park_question"] in self._waiting:
-                self._question_park_pending = False   # the log's own park is that park
-            if self.task_input_id is not None and self.settled is None \
-                    and self.current_turn is None and not self._turn_pending:
-                if self._last_response_had_calls:
-                    self._after_round()
-                else:
-                    self._start_turn()
+            self._restore_clocks(restored)
+            self._resume_after_park(restored)
             return
+        self._restore_clocks(restored)
         lost_turn = self.current_turn
         if lost_turn is not None:
             self.current_turn = None
@@ -1765,25 +1730,62 @@ class Coordinator:
             return
         self._start_turn()
 
-    def _restored_question_deadlines(self, live_ms) -> list:
-        """After a restore of a parked log: re-arm each open question with the
-        time it had left at the park (a parked stretch never counts, as live),
-        and return the ones whose due time is behind, oldest first, as
-        (question_id, its expiry is already logged)."""
-        no_deadline = bool(getattr(self.cfg, "ui_attached", False)) and self._question_timeout() <= 0
-        due = []
-        for qid in sorted(self._questions, key=lambda q: self.state.open_questions[q]["seq"]):
-            q = self._questions[qid]
-            if q.get("expired"):
-                due.append((qid, True))
-            elif no_deadline:
-                continue
-            elif live_ms is None:                    # no guest clock before the park
-                self._arm_question(qid)
-            elif q["due_ms"] <= live_ms:
-                due.append((qid, False))
+    def _restore_clocks(self, restored: dict) -> None:
+        """The host's time, then the task's wall clock with what it has left."""
+        at = getattr(self.cfg, "at", None)
+        if is_int(at, 1):
+            self.emit("clock", {"kind": "host_hello", "at": at})
+        if self.task_input_id is not None:
+            self._cancel("idle")
+            wall = _limit(self.limits, "wall_clock_s", None)
+            if wall:
+                used_ms = restored["wall_used_ms"]
+                if restored["live_since"] is not None:
+                    used_ms += max(0, self.clock.now_ms() - restored["live_since"])
+                self._arm("wall_clock", "wall", max(1.0, float(wall) - used_ms / 1000.0))
+
+    def _resume_after_park(self, restored: dict) -> None:
+        """A fresh process after a park: nothing was lost; wait for the host again."""
+        for call_id in self._side_calls:
+            self._arm_op_timeout(call_id)
+        due = self._restored_question_deadlines(restored["question_left_ms"])
+        # a fresh process never re-attaches (M4-CONTRACTS 3.3): in-flight mcp calls are lost
+        lost = [cid for cid, m in self._mcp_calls.items() if m["state"] == "inflight"]
+        self._suppress_wake = True
+        try:
+            for cid in lost:
+                self._finish_call(cid, "lost", LOST_CONTENT)
+            for qid in due:             # M5: past their due time: the normal expiry path
+                if self.settled is not None:
+                    break
+                if self._questions[qid]["expired"]:
+                    self._question_expired(qid)
+                else:
+                    self._expire_question(qid)
+        finally:
+            self._suppress_wake = False
+        if restored["park_question"] in self._waiting:
+            self._question_park_pending = False   # the log's own park is that park
+        if self.task_input_id is not None and self.settled is None \
+                and self.current_turn is None and not self._turn_pending:
+            if self._last_response_had_calls:
+                self._after_round()
             else:
-                self._arm("question_deadline", f"question:{qid}", (q["due_ms"] - live_ms) / 1000.0)
+                self._start_turn()
+
+    def _restored_question_deadlines(self, left_ms: dict) -> list:
+        """After a restore of a parked log: re-arm each open question with the
+        time it had left at the park (parked.question_left_ms; a parked stretch
+        never counts, as live), and return the due ones, oldest first: its
+        expiry already logged (`expired`) or nothing left. A question the park
+        did not list had no deadline."""
+        due = []
+        for qid in sorted(self._questions, key=self._question_seq):
+            left = left_ms.get(qid)
+            if self._questions[qid]["expired"] or left == 0:
+                due.append(qid)
+            elif left is not None:
+                self._arm_question(qid, left / 1000.0)
         return due
 
     def _restored_message(self, response_seq: int) -> dict:

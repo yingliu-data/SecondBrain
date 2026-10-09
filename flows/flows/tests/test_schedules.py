@@ -114,7 +114,7 @@ async def test_ensure_schedules_create_update_trigger_delete(tenv, make_session)
         assert set(desc.schedule.action.memo) == {FINGERPRINT_MEMO}  # the only memo key
 
         # a schedule written before fingerprints (no memo) is rewritten once
-        legacy = _schedule_for(entries_from_tenants(doc)[1], tq)
+        legacy = _schedule_for(entries_from_tenants(doc)[1], tq, "")
         legacy.action.memo = None
         await client.get_schedule_handle(sid1).delete()
         await client.create_schedule(sid1, legacy)

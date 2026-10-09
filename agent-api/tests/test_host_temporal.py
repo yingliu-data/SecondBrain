@@ -32,7 +32,7 @@ from flows.client import session_handle
 
 from app.auth import middleware
 from app.host import temporal
-from app.host.activities import HostActivities, ticket_id_for, worker_config
+from app.host.activities import HostActivities, ticket_id_for
 from app.host.sandbox.local import LocalSandbox
 from app.host.sides import DeviceCalls
 from app.host.worker import Workers
@@ -95,7 +95,7 @@ class Harness:
         self.short = Path(tempfile.mkdtemp(prefix="m5", dir="/tmp"))
         self.store = DirStore(self.short)
         self.workers = Workers(sandbox_factory=lambda: LocalSandbox(GUEST_ROOT),
-                               sessions=self.store, config_for=worker_config,
+                               sessions=self.store, abort_wait_s=20,
                                device_calls=DeviceCalls(), llm_url=upstream.url,
                                hello_timeout_s=20, heartbeat_s=1, wall_clock_s=120,
                                park_grace_s=30)
@@ -105,8 +105,7 @@ class Harness:
         sessions.set_sessions(self.store)
         self.registry = FakeRegistry()
         chat.set_registry(self.registry)
-        self.acts = HostActivities(self.workers, self.tenants, self.registry,
-                                   abort_wait_s=20)
+        self.acts = HostActivities(self.workers, self.tenants, self.registry)
         app = FastAPI()
         app.include_router(chat.router)
         app.include_router(sessions.router)
@@ -550,3 +549,38 @@ async def test_direct_redelivery_while_parked_on_a_question_does_not_wake(direct
     assert sse_events(await asyncio.wait_for(first, 60))[-1] == ("done", {})
     assert (await asyncio.wait_for(again, 10))["outcome"] == "done"
     assert not direct.host_events("answer_timeout")
+
+
+async def test_direct_parked_sessions_do_not_hold_the_global_slots(tmp_path, users_root,
+                                                                  upstream, monkeypatch):
+    """SessionQueue caps the direct path at 5 running turns; a turn parked on
+    a question (up to answer_wait_s, here an hour) gives its slot back, so
+    six parked sessions never block a seventh session's chat."""
+    from app.routes import chat
+    from app.session.queue import SessionQueue
+    monkeypatch.setattr("app.host.worker.HARNESS_QUESTION_TIMEOUT_S", 1)
+    monkeypatch.setattr(chat, "session_queue", SessionQueue(5))
+    d = Harness(None, tmp_path, upstream, monkeypatch, answer_wait_s=3600)
+    n = 6
+    d.upstream.responses = [tool_call(f"call_q{i}", "question", {"text": f"Q{i}?"})
+                            for i in range(n)] + [{"content": "free to answer"}]
+    workers, parked = [], []
+    try:
+        for i in range(n):
+            sid = f"{d.session_id}-p{i}"
+            parked.append(asyncio.ensure_future(d.chat(session_id=sid, message="ask",
+                                                       input_id=f"in_p{i}")))
+            workers.append(await wait_until(
+                lambda: (w := d.workers.get(f"harn/harn_{sid}")) is not None
+                and w.parked_on(f"in_p{i}") and w, 30, f"park {i}"))
+        body = await asyncio.wait_for(d.chat(session_id=f"{d.session_id}-new",
+                                             message="hi", input_id="in_new"), 60)
+        assert sse_events(body)[-1] == ("done", {})
+        assert token_text(body).strip() == "free to answer"
+        # still parked, their streams open
+        assert all(w.parked_on(f"in_p{i}") for i, w in enumerate(workers))
+        assert not any(p.done() for p in parked)
+    finally:
+        for p in parked:
+            p.cancel()
+        await d.close()

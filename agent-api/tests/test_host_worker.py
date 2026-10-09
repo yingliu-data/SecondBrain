@@ -226,11 +226,10 @@ async def test_workers_registry_and_prompt_stripping(session):
 
     store = Store(session)
     reg = Workers(sandbox_factory=lambda: FakeSandbox([{"text": "x"}]), sessions=store,
-                  config_for=lambda tenant: {"answer_wait_s": 7},
                   device_calls=DeviceCalls(), **worker_kwargs())
-    t = FakeTenant()
+    t = FakeTenant(answer_wait_s=7)
     a = reg.get_or_create(t, "s1", FakeRegistry())
-    assert a.answer_wait_s == 7                 # config_for over worker_kwargs
+    assert a.answer_wait_s == 7                 # the tenant's (session_config)
     # found by key: the session directory is not opened again
     store.session = None
     assert reg.get_or_create(t, "s1", FakeRegistry()) is a
