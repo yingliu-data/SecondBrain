@@ -85,6 +85,9 @@ class SessionConfig:
     """How long a parked task waits for an ``answer`` (phone 24 h, guest 60 s)."""
     tick_timeout_s: int = 600
     """Execution timeout of ``ScheduleTickWorkflow`` (a schedule fire)."""
+    max_history_events: int = 10_000
+    """History length past which a run continues-as-new (between tasks, or
+    while a task is parked); the other trigger next to ``max_tasks_per_run``."""
     activities: dict[str, ActivityOptions] = field(default_factory=_default_activity_options)
     """Timeouts and retries per activity name; ``run_task.timeout_s`` is the
     default wall clock of a task (``TaskSignal.wall_clock_s`` overrides it)."""
@@ -95,16 +98,31 @@ class SessionConfig:
 
     @classmethod
     def from_tenant(cls, tenant_entry: dict[str, Any]) -> SessionConfig:
-        """Config from a ``tenants.json`` entry; missing keys keep the defaults."""
+        """Config from a ``tenants.json`` entry; missing (or null) keys keep the
+        defaults.  Reads ``wall_clock_s``, ``answer_wait_s``,
+        ``max_tasks_per_run`` and ``max_history_events``."""
         cfg = cls()
-        if "wall_clock_s" in tenant_entry:
-            cfg.activities["run_task"] = replace(
-                cfg.activities["run_task"], timeout_s=int(tenant_entry["wall_clock_s"])
-            )
-        if "answer_wait_s" in tenant_entry:
-            cfg.answer_wait_s = int(tenant_entry["answer_wait_s"])
-        if "max_tasks_per_run" in tenant_entry:
-            cfg.max_tasks_per_run = int(tenant_entry["max_tasks_per_run"])
+
+        def _int(key: str, minimum: int = 1) -> int | None:
+            value = tenant_entry.get(key)
+            if value is None:
+                return None
+            n = int(value)
+            if n < minimum:
+                raise ValueError(
+                    f"tenant {tenant_entry.get('name')!r}: {key} must be >= {minimum}, got {n}")
+            return n
+
+        if (wall := _int("wall_clock_s")) is not None:
+            cfg.activities["run_task"] = replace(cfg.activities["run_task"], timeout_s=wall)
+        # 0 = the guest never parks on a question (deny path, D12); a park
+        # that happens anyway escalates at once.
+        if (wait := _int("answer_wait_s", minimum=0)) is not None:
+            cfg.answer_wait_s = wait
+        if (n := _int("max_tasks_per_run")) is not None:
+            cfg.max_tasks_per_run = n
+        if (n := _int("max_history_events")) is not None:
+            cfg.max_history_events = n
         return cfg
 
 

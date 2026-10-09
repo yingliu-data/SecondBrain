@@ -5,6 +5,13 @@ Each tenant may carry::
     "schedules": [{"cron": "0 7 * * *", "prompt": "Morning brief", "session": "daily",
                    "tz": "Europe/London"}]
 
+``cron`` and ``prompt`` are required; ``session`` defaults to ``daily``
+(``DEFAULT_SESSION``) and ``tz`` to ``UTC``.  The fire goes to the session
+``{tenant.user or tenant.name}/{tenant.name}/{session}`` with the tenant's
+``SessionConfig.from_tenant``.  A malformed entry, or any schedule of a tenant
+on ``engine: legacy`` (Temporal drives only harness sessions), is logged and
+skipped, so one bad line never stops agent-api's startup.
+
 ``ensure_schedules`` creates or updates one Schedule per entry, id
 ``{tenant}/{session}/{index}``.  The action starts ``ScheduleTickWorkflow``
 (workflow id ``{schedule-id}-{fire-time}``, Temporal appends the fire time),
@@ -20,6 +27,7 @@ listed) are deleted.
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
@@ -41,6 +49,11 @@ from flows import TASK_QUEUE
 from flows.activities import SessionConfig, SessionRef, SignalSession, TaskSignal
 from flows.client import signal_task
 from flows.session_workflow import ScheduleTickWorkflow
+
+log = logging.getLogger(__name__)
+
+DEFAULT_SESSION = "daily"
+"""Session a schedule entry fires into when it names none."""
 
 CATCHUP_WINDOW = timedelta(seconds=10)
 """Smallest window the server accepts; a fire missed while the server was
@@ -69,16 +82,37 @@ def schedule_id(tenant: str, session: str, index: int) -> str:
 
 
 def entries_from_tenants(tenants_doc: dict[str, Any]) -> list[ScheduleEntry]:
-    """Flatten ``tenants_doc["tenants"][*]["schedules"]`` into entries."""
+    """Flatten ``tenants_doc["tenants"][*]["schedules"]`` into entries.
+
+    The index in the id is the entry's position in the tenant's list, so a
+    skipped (malformed) entry does not renumber the ones after it.
+    """
     out: list[ScheduleEntry] = []
     for tenant in tenants_doc.get("tenants", []):
-        name = tenant["name"]
+        name = tenant.get("name")
+        schedules = tenant.get("schedules") or []
+        if not schedules:
+            continue
+        if not name:
+            log.warning("schedules of a tenant without a name skipped")
+            continue
+        if tenant.get("engine") == "legacy":
+            log.warning("tenant %s: engine legacy, %d schedule(s) skipped", name, len(schedules))
+            continue
         user = tenant.get("user") or name  # agent-api's Tenant model defaults user to name
-        config = SessionConfig.from_tenant(tenant)
-        for i, s in enumerate(tenant.get("schedules", []) or []):
+        try:
+            config = SessionConfig.from_tenant(tenant)
+        except (TypeError, ValueError) as e:
+            log.warning("tenant %s: bad session config, schedules skipped: %s", name, e)
+            continue
+        for i, s in enumerate(schedules):
+            if not (isinstance(s, dict) and s.get("cron") and s.get("prompt")):
+                log.warning("tenant %s: schedule %d needs cron and prompt, skipped: %r", name, i, s)
+                continue
             out.append(ScheduleEntry(
                 tenant=name, user=user, index=i, cron=s["cron"], prompt=s["prompt"],
-                session=s["session"], tz=s.get("tz", "UTC"), config=config,
+                session=s.get("session") or DEFAULT_SESSION, tz=s.get("tz") or "UTC",
+                config=config,
             ))
     return out
 
@@ -127,7 +161,7 @@ async def ensure_schedules(
     Returns ``{schedule_id: "created" | "updated" | "deleted"}``.
     """
     if isinstance(entries, dict):
-        tenants = tenants or {t["name"] for t in entries.get("tenants", [])}
+        tenants = tenants or {t["name"] for t in entries.get("tenants", []) if t.get("name")}
         entries = entries_from_tenants(entries)
     wanted = {e.schedule_id: e for e in entries}
     existing = {s.id async for s in await client.list_schedules()}
