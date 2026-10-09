@@ -62,10 +62,12 @@ from app.config import (
     HARNESS_SPILL_THRESHOLD, HARNESS_STOP_AT_SETTLE,
     HARNESS_TOKEN_BUDGET, HARNESS_WALL_CLOCK_S, LLM_ENABLE_THINKING,
     LLM_MAX_TOKENS, LLM_MODEL, LLM_STREAM, LLM_TEMPERATURE, LLM_URL, MAX_TOOLS,
-    SYSTEM_PROMPT, TOOL_TIMEOUT,
+    MCP_GATEWAY_TOOLS_TIMEOUT_S, MCP_GATEWAY_URL, SYSTEM_PROMPT, TOOL_TIMEOUT,
 )
 from app.host.bulk_server import BulkServer
+from app.gateway.client import GatewayError, fetch_session_tools
 from app.host.endpoints import ControlChannel, Endpoints
+from app.host.gateway_forwarder import GatewayForwarder, GatewayRelay
 from app.host.llm_proxy import LLMProxy
 from app.host.sandbox import Sandbox, SandboxError
 from app.host.sides import DEVICE_CALLS, DeviceCalls, Sides
@@ -127,7 +129,9 @@ class Worker:
                  session_idle_s: float | None = HARNESS_SESSION_IDLE_S,
                  park_timeout_s: float = HARNESS_PARK_TIMEOUT_S,
                  max_resumes: int = HARNESS_MAX_RESUMES,
-                 park_grace_s: float = HARNESS_PARK_GRACE_S) -> None:
+                 park_grace_s: float = HARNESS_PARK_GRACE_S,
+                 gateway_url: str = MCP_GATEWAY_URL,
+                 gateway_tools_timeout_s: float = MCP_GATEWAY_TOOLS_TIMEOUT_S) -> None:
         self.session = session
         self.tenant = tenant
         self.registry = registry
@@ -145,6 +149,8 @@ class Worker:
         self.park_timeout_s = park_timeout_s
         self.max_resumes = max_resumes
         self.park_grace_s = park_grace_s
+        self.gateway_url = gateway_url
+        self.gateway_tools_timeout_s = gateway_tools_timeout_s
 
         meta = session.read_meta()
         self.session_id: str = meta.get("session_id") or session.root.name
@@ -171,6 +177,13 @@ class Worker:
         self.closed = False
         # M3: park, resume, idle, death
         self.bulk: BulkServer | None = None
+        # M4: the :5011 forwarder (per listener) and its worker-lived relay
+        # (held calls survive the listener closing around a park, §3.3)
+        self.gateway: GatewayForwarder | None = None
+        self.gateway_relay: GatewayRelay | None = None
+        # the session's gateway entries from the first successful fetch:
+        # pins are fixed per session, a resume hello reuses them
+        self.gateway_entries: list[dict] | None = None
         # none | booting | running | parking | parked; the session snapshot
         # itself is the sandbox's business (has_snapshot / restore)
         self.vm_state = "none"
@@ -241,10 +254,48 @@ class Worker:
 
     # ------------------------------------------------------------ hello
     def tool_entries(self) -> list[dict]:
-        """Host/device tools for hello.config.tools: the tenant's allowlist
-        applied to the registry, each host skill with its OpenAI schema
-        (keyword prefilter retired, D16). Guest built-ins are implicit."""
+        """hello.config.tools: host/device tools, then the gateway's mcp
+        entries verbatim (M4-CONTRACTS §4, fetched by load_gateway_entries).
+        Guest built-ins are implicit."""
+        return self.host_tool_entries() + list(self.gateway_entries or [])
+
+    def _host_skill_allowlist(self) -> set[str] | None:
+        """The tenant's allowed skills minus legacy MCP skills (`mcp_*`): MCP
+        goes through the gateway, never as a host tool."""
         allowed = self.tenant.allowed_skill_names()
+        if allowed is None:
+            names = getattr(self.registry, "skill_names", None)
+            if names is None:
+                return None
+            allowed = set(names())
+        return {n for n in allowed if not n.startswith("mcp_")}
+
+    async def load_gateway_entries(self) -> list[dict]:
+        """GET /internal/tools for this session (async httpx, short timeout).
+        The first successful answer is kept for the session: the gateway
+        pins it, and a resume hello reuses it even when the gateway is down
+        then. A failure is logged and the session starts without MCP tools
+        (the next boot tries again)."""
+        if self.gateway_entries is not None or not self.gateway_url:
+            return self.gateway_entries or []
+        try:
+            entries = await fetch_session_tools(self.user, self.tenant.name, self.session_id,
+                                                base_url=self.gateway_url,
+                                                timeout_s=self.gateway_tools_timeout_s)
+        except GatewayError as e:
+            logger.warning("session %s: starting without MCP tools (%s)", self.session_key, e)
+            return []
+        host = {e["name"] for e in self.host_tool_entries()}
+        self.gateway_entries = [e for e in entries if e.get("name") not in host]
+        if len(self.gateway_entries) != len(entries):
+            logger.warning("session %s: gateway tools named like host tools dropped",
+                           self.session_key)
+        return self.gateway_entries
+
+    def host_tool_entries(self) -> list[dict]:
+        """Host/device tools: the allowlist applied to the registry, each
+        host skill with its OpenAI schema (keyword prefilter retired, D16)."""
+        allowed = self._host_skill_allowlist()
         server = self.registry.get_server_tool_names(allowed)
         device = self.registry.get_device_tool_names(allowed)
         entries: list[dict] = []
@@ -317,7 +368,9 @@ class Worker:
             "async_tools": False,
             "question_timeout_s": HARNESS_QUESTION_TIMEOUT_S,
             "ui_attached": True,
-            "ports": dict(self.ports),
+            # the gateway port is the guest's default (5011, M4-CONTRACTS §4):
+            # not sent, so a pre-M4 guest does not reject the hello
+            "ports": {k: v for k, v in self.ports.items() if k != "gateway"},
             "harness_version": HARNESS_VERSION,
         }
         effective_tools(config)  # raises ValueError on a bad tool list, before anything runs
@@ -375,6 +428,11 @@ class Worker:
             self.proxy = LLMProxy(self.endpoints.listener(self.ports["llm"]), self.llm_url,
                                   self.sync.host_event, token_budget=HARNESS_TOKEN_BUDGET)
             self.proxy.start()
+            if "gateway" in self.ports:
+                self.gateway_relay = GatewayRelay(self.gateway_url, user=self.user,
+                                                  tenant=self.tenant.name,
+                                                  session=self.session_id,
+                                                  host_event=self.sync.host_event)
             if self.vm_state == "parked":
                 self._close_guest_ports()       # a restarted worker: listen at the wake
             else:
@@ -422,11 +480,17 @@ class Worker:
         self.sync.host_event("vm", body)
 
     def _close_guest_ports(self) -> None:
-        """No :5000/:5001 listener while the guest is parked: its idle-wait
-        loop must not reconnect before the snapshot (sandbox finding)."""
+        """No :5000/:5001/:5011 listener while the guest is parked: its
+        idle-wait loop must not reconnect before the snapshot (sandbox
+        finding). Held gateway calls keep running in the relay (§3.3)."""
         if self.endpoints is None:
             return
         self.endpoints.close_port(self.ports["control"])
+        if "gateway" in self.ports:
+            if self.gateway is not None:
+                self.gateway.stop(join=False)
+                self.gateway = None
+            self.endpoints.close_port(self.ports["gateway"])
         if "bulk" in self.ports:
             if self.bulk is not None:
                 self.bulk.stop(join=False)
@@ -442,6 +506,9 @@ class Worker:
             self.bulk = BulkServer(self.endpoints.reopen(self.ports["bulk"]), self.session.root,
                                    self.session_id, self.sync.read,
                                    on_put=self._on_bulk_put).start()
+        if "gateway" in self.ports and self.gateway is None and self.gateway_relay is not None:
+            self.gateway = GatewayForwarder(self.endpoints.reopen(self.ports["gateway"]),
+                                            self.gateway_relay).start()
 
     def _drop_link(self) -> None:
         if self._channel is not None:
@@ -525,6 +592,7 @@ class Worker:
             self.vm_state = "none"
             self._deferred = held + self._deferred
             raise GuestError(f"guest did not connect within {self.hello_timeout_s}s")
+        await self.load_gateway_entries()
         hello = self.build_hello(resume=resume)
         self.last_hello = hello
         self.send_control("hello", hello)
@@ -987,6 +1055,8 @@ class Worker:
         """The resumed guest gave up on a host-originated call: stop running
         it; a result that still turns up is dropped (send_control)."""
         self._lost_calls.add(call_id)
+        if self.gateway_relay is not None:
+            self.gateway_relay.discard(call_id)     # an mcp call: drop its held answer
         task = self._side_tasks.pop(call_id, None)
         if task is not None and not task.done():
             task.cancel()
@@ -1033,6 +1103,10 @@ class Worker:
             await asyncio.to_thread(self.proxy.stop)
         if self.bulk is not None:
             await asyncio.to_thread(self.bulk.stop)
+        if self.gateway is not None:
+            await asyncio.to_thread(self.gateway.stop)
+        if self.gateway_relay is not None:
+            self.gateway_relay.close()
         if self.endpoints is not None:
             self.endpoints.close()
         if self._accept_thread is not None:

@@ -2,6 +2,8 @@ import os
 
 # Must be set before any app.* import — config.py reads it at import time.
 os.environ.setdefault("API_SECRET_KEY", "test-default-key")
+# No gateway unless a test points a Worker / skill at a fake one.
+os.environ.setdefault("MCP_GATEWAY_URL", "")
 
 import json
 

@@ -2,9 +2,14 @@ from pydantic import BaseModel, field_validator
 
 
 class MCPServerConfig(BaseModel):
-    """A remote MCP server that tenants can reference by name."""
+    """A remote MCP server (gateway upstream) that tenants reference by name.
+
+    M4: agent-api only uses the name (and tool_defs_ttl_s for the legacy
+    skill's cache); url, auth_token, timeout_s and allow_private belong to the
+    mcp-gateway's gateway.json and are accepted here only so an existing
+    tenants.json keeps loading (and can be migrated)."""
     name: str
-    url: str
+    url: str = ""
     auth_token: str | None = None
     timeout_s: int = 300           # per-tool-call ceiling
     tool_defs_ttl_s: int = 300     # cached tools/list refresh interval
@@ -33,6 +38,7 @@ class Tenant(BaseModel):
     system_prompt: str | None = None      # None -> global SYSTEM_PROMPT
     local_skills: list[str] | None = None  # None -> all local skills
     mcp_servers: list[str] = []            # names from the top-level mcp_servers map
+    promoted: list[str] = []               # gateway-only (migrate_config): first-class MCP tools
     max_tools: int | None = None           # None -> config.MAX_TOOLS
     max_tokens: int | None = None          # None -> LLM default
     engine: str | None = None              # None -> config.AGENT_ENGINE; "legacy" | "harness"

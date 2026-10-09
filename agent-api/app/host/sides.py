@@ -14,7 +14,9 @@ memory?}`.
           the event) and a DeviceCalls entry that `POST /api/v1/tool-result`
           resolves; the entry lives in the registry, not the stream, so it
           survives a dropped SSE connection
-  mcp     not in M1: side_result{ok: false, content: "mcp side not available"}
+  mcp     not the host's: the guest calls the gateway itself over :5011
+          (gateway_forwarder.py); an mcp call never becomes a side_result
+          (PLAN.md 8), so handle_tool_call returns None as for guest
 
   DeviceCalls              call_id -> open call; `resolve(call_id, result)`
                            is False for an unknown or terminal id (409 at
@@ -149,14 +151,12 @@ class Sides:
     def handle_tool_call(self, event: dict) -> asyncio.Task | None:
         body = event["body"]
         side = body["side"]
-        if side == "guest":
-            return None
         if side == "host":
             coro = self._run_host(body)
         elif side == "device":
             coro = self._run_device(body)
         else:
-            coro = self._run_mcp(body)
+            return None        # guest, or mcp (the guest's own gateway call)
         task = asyncio.ensure_future(coro)
         self.tasks.add(task)
         task.add_done_callback(self.tasks.discard)
@@ -179,7 +179,8 @@ class Sides:
         started = time.monotonic()
         name, args = body["name"], body["args"]
         allowed = self.tenant.allowed_skill_names() if self.tenant is not None else None
-        set_current_context(self.session, getattr(self.tenant, "user", ""))
+        set_current_context(self.session, getattr(self.tenant, "user", ""),
+                            getattr(self.tenant, "name", ""))
         try:
             raw = await asyncio.wait_for(
                 self.registry.execute_server_tool(name, args, allowed),
@@ -225,10 +226,6 @@ class Sides:
             self.device_calls.discard(call_id)
         result = sanitize(result)
         return self._answer(body, result, not result.startswith("Error"), started)
-
-    # ------------------------------------------------------------ mcp
-    async def _run_mcp(self, body: dict) -> dict:
-        return self._answer(body, "mcp side not available", False, time.monotonic())
 
     async def cancel_all(self) -> None:
         for t in list(self.tasks):

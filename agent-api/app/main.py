@@ -6,6 +6,7 @@ from app.agent.llm import LLMProvider
 from app.auth import middleware
 from app.tenants import create_tenant_registry
 from app.routes import chat, tool_result, skills, health, sessions, guest
+from app.gateway import events as gateway_events
 
 # ── Logging ──────────────────────────────────────────────────
 logging.basicConfig(
@@ -47,21 +48,17 @@ llm = LLMProvider()
 # Give skills access to LLM (for plan_movement decomposition)
 registry.set_llm_provider(llm)
 
-# Register one proxy skill per configured MCP server. Tool lists are fetched
-# in the background after startup — a down server never blocks boot.
-from app.mcp.proxy_skill import MCPProxySkill
-from app.mcp.ssrf import validate_mcp_url
+# Legacy engine: one skill per MCP upstream named in tenants.json
+# `mcp_servers` (names only; URLs and tokens live in the gateway's
+# gateway.json). Tool lists come from the mcp-gateway in the background
+# after startup — a down gateway never blocks boot (M4-CONTRACTS §8).
+from app.gateway.upstream_skill import GatewayUpstreamSkill
 
-mcp_proxies: list[MCPProxySkill] = []
-for _cfg in tenant_registry.mcp_server_configs().values():
-    try:
-        validate_mcp_url(_cfg)
-    except ValueError as e:
-        logging.getLogger("mcp").error(f"Skipping MCP server: {e}")
-        continue
-    _proxy = MCPProxySkill(_cfg)
-    registry.register(_proxy)
-    mcp_proxies.append(_proxy)
+mcp_upstreams: list[GatewayUpstreamSkill] = []
+for _name, _cfg in tenant_registry.mcp_server_configs().items():
+    _skill = GatewayUpstreamSkill(_name, tool_defs_ttl_s=_cfg.tool_defs_ttl_s)
+    registry.register(_skill)
+    mcp_upstreams.append(_skill)
 
 # Inject dependencies into routes
 chat.set_dependencies(registry, llm)
@@ -77,6 +74,7 @@ app.include_router(skills.router)
 app.include_router(health.router)
 app.include_router(sessions.router)
 app.include_router(guest.router)
+app.include_router(gateway_events.router)   # POST /internal/gateway-events (bearer INTERNAL_TOKEN)
 
 # Start guest session cleanup task on startup
 from app.auth.guest import guest_manager
@@ -89,8 +87,8 @@ async def _start_guest_cleanup():
 @app.on_event("startup")
 async def _start_mcp_refresh():
     import asyncio
-    for proxy in mcp_proxies:
-        asyncio.create_task(proxy.start_background_refresh())
+    for skill in mcp_upstreams:
+        asyncio.create_task(skill.start_background_refresh())
 
 
 @app.on_event("shutdown")

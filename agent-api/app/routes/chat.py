@@ -74,7 +74,7 @@ async def _dir_turn(tenant: Tenant, session_id: str, message: str):
 
     async with session_queue.run(f"{tenant.user}/{tenant.name}_{session_id}"):
         ticket = Ticket.start(session, "chat.turn", inputs={"message": message})
-        set_current_context(session, tenant.user)
+        set_current_context(session, tenant.user, tenant.name, session_id)
 
         system = ContextBuilder(
             user_id=tenant.user, session=session,
@@ -129,6 +129,7 @@ async def _legacy_turn(tenant: Tenant, session_id: str, message: str):
     """sqlite/dict fallback — original behavior."""
     store_key = tenant.session_key(session_id)
     history = sessions.setdefault(store_key, [])
+    set_current_context(None, tenant.user, tenant.name, session_id)
     async for event in run_agent_loop(
         message, history, _registry, _llm,
         system_prompt=tenant.system_prompt,
@@ -157,7 +158,7 @@ async def _harness_turn(tenant: Tenant, session_id: str, message: str, input_id:
     async with queue_cm:
         ticket = Ticket.start(session, "chat.turn",
                               inputs={"message": message, "input_id": input_id})
-        set_current_context(session, tenant.user)
+        set_current_context(session, tenant.user, tenant.name, session_id)
         worker = workers.get_or_create(session, tenant, _registry)
         sink = worker.attach(input_id)
         task_input = {"input_id": input_id, "text": message, "ticket_id": ticket.ticket_id}

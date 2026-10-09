@@ -1,4 +1,4 @@
-"""Sides: host skill round trip, device relay through DeviceCalls, mcp stub."""
+"""Sides: host skill round trip, device relay through DeviceCalls, mcp is not a side."""
 import asyncio
 import json
 
@@ -86,14 +86,15 @@ async def test_device_call_resolves_through_registry_and_409_semantics():
 
 
 @pytest.mark.asyncio
-async def test_device_timeout_and_mcp_stub():
+async def test_device_timeout_and_mcp_is_not_a_side_call():
     sides, sent, _, dc = make_sides(device_timeout_s=0.05)
     await sides.handle_tool_call(call_event("c1", "get_calendar_events", "device"))
     assert sent[-1][1]["ok"] is False and "timed out" in sent[-1][1]["content"]
     assert not dc.is_open("c1")
-    await sides.handle_tool_call(call_event("c2", "wcc__draft", "mcp"))
-    assert sent[-1][1] == {"call_id": "c2", "side": "mcp", "content": "mcp side not available",
-                           "ok": False}
+    n = len(sent)
+    # M4: the guest calls the gateway itself; never a side_result
+    assert sides.handle_tool_call(call_event("c2", "wcc__draft", "mcp")) is None
+    assert len(sent) == n and not sides.tasks
 
 
 # ---------------------------------------------------------------- memory (D23)
