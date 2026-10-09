@@ -1,9 +1,7 @@
 """eventlog — what agent-api reads from a session's event log.
 
-  load_runs(session_root) -> list[list[event]]   every run, in order
-                                                 (protocol.replay.load_session)
-  trace_rows(runs) -> list[row]                  the trace viewer's rows
-  conversation(runs) -> list[{role, content}]    user text + settled answers
+  read_trace(session_root, since=, limit=) -> list[row]   the trace viewer's rows
+  trace_rows(runs) -> list[row]                           the same from runs in memory
 
 The event log is canonical; `history.jsonl` and `logs/trace.jsonl` are no
 longer written (the projections kept for one release are retired). Trace
@@ -14,8 +12,9 @@ with `ts` the event's own envelope ts. Event -> row:
   llm_response  assistant_response  {chars, turn_id, finish_reason}   (a text answer)
                 llm_response        {turn_id, finish_reason, tool_calls: [names]}
   tool_call     tool_call           {name, arguments, call_id, side}
-  op_state      op_state            {call_id, name, state} (+ duration_ms)
-  tool_result   tool_result         {name, result (2000 chars), call_id} (+ duration_ms)
+  op_state      op_state            {call_id, name, state}   (+ row duration_ms)
+  tool_result   tool_result         {name, result (2000 chars), call_id}
+                                                     (+ row duration_ms: the call's op_state's)
   question      question            {question_id, call_id, text (500 chars)}
   settle        settle              {input_id, outcome, usage}
   error         llm_error / loop_exhausted / error   {error (500 chars), class}
@@ -26,19 +25,12 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
-from protocol.replay import load_session
-
-USER_KINDS = ("task", "follow_up", "steer")
+from protocol.replay import iter_runs
 
 _ERROR_TRACE = {
     "transient": "llm_error", "overflow": "llm_error", "budget": "llm_error",
     "limit": "loop_exhausted", "protocol": "error", "fatal": "error",
 }
-
-
-def load_runs(session_root: Path | str) -> list[list[dict]]:
-    """Raises protocol.replay.ReplayError on an unreadable log."""
-    return load_session(Path(session_root))
 
 
 def parse_ts(ts) -> datetime | None:
@@ -95,11 +87,9 @@ def _run_rows(events: list[dict]) -> list[dict]:
         elif etype == "tool_result":
             call = calls.get(b.get("call_id"), {"name": "?"})
             content = b.get("content")
-            detail = {"name": call["name"], "result": content[:2000] if isinstance(content, str) else "",
-                      "call_id": b.get("call_id")}
-            if "duration_ms" in call:
-                detail["duration_ms"] = call["duration_ms"]
-            rows.append(_row(ts, "tool_result", detail, call.get("duration_ms")))
+            rows.append(_row(ts, "tool_result", {
+                "name": call["name"], "result": content[:2000] if isinstance(content, str) else "",
+                "call_id": b.get("call_id")}, call.get("duration_ms")))
         elif etype == "question":
             rows.append(_row(ts, "question", {"question_id": b.get("question_id"),
                                               "call_id": b.get("call_id"),
@@ -116,31 +106,42 @@ def _run_rows(events: list[dict]) -> list[dict]:
     return rows
 
 
+def _since(rows: list[dict], since: datetime | None) -> list[dict]:
+    """The rows whose ts is at or after `since` (all of them when None; a
+    row without a readable ts only then)."""
+    if since is None:
+        return rows
+    return [r for r in rows if (t := parse_ts(r["ts"])) is not None and t >= since]
+
+
+def _last(rows: list[dict], limit: int | None) -> list[dict]:
+    if limit is None:
+        return rows
+    return rows[-limit:] if limit > 0 else []
+
+
 def trace_rows(runs: list[list[dict]], *, since: datetime | None = None,
                limit: int | None = None) -> list[dict]:
     """The trace rows of every run, oldest first; `since` keeps rows whose
     ts is at or after it (a row without a readable ts is kept only when
     there is no `since`), `limit` the last N."""
-    rows = [r for events in runs for r in _run_rows(events)]
-    if since is not None:
-        rows = [r for r in rows if (t := parse_ts(r["ts"])) is not None and t >= since]
-    if limit is not None:
-        rows = rows[-limit:] if limit > 0 else []
-    return rows
+    return _last(_since([r for events in runs for r in _run_rows(events)], since), limit)
 
 
-def conversation(runs: list[list[dict]], *, limit: int | None = None) -> list[dict]:
-    """The conversation as the retired history.jsonl projection had it: the
-    text of every new task/follow_up/steer input and every non-empty
-    settled answer, in log order across runs."""
+def read_trace(session_root: Path | str, *, since: datetime | None = None,
+               limit: int | None = None) -> list[dict]:
+    """trace_rows of the session's log, read newest run first and stopping
+    once `limit` rows are in hand or a run reaches back before `since`; a
+    run last written before `since` is not read at all (its segments'
+    mtime). The host log is not read. Raises protocol.replay.ReplayError
+    on an unreadable log."""
     out: list[dict] = []
+    runs = iter_runs(Path(session_root), newest_first=True,
+                     modified_since=since.timestamp() if since is not None else None)
     for events in runs:
-        for ev in events:
-            etype, b = ev.get("type"), ev.get("body") or {}
-            if etype == "input" and b.get("dedupe") == "new" and b.get("kind") in USER_KINDS:
-                out.append({"role": "user", "content": b.get("text", "")})
-            elif etype == "settle" and b.get("answer"):
-                out.append({"role": "assistant", "content": b["answer"]})
-    if limit is not None:
-        out = out[-limit:] if limit > 0 else []
-    return out
+        rows = _run_rows(events)
+        kept = _since(rows, since)
+        out[:0] = kept
+        if len(kept) < len(rows) or (limit is not None and len(out) >= limit):
+            break
+    return _last(out, limit)

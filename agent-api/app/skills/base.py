@@ -72,27 +72,20 @@ class BaseSkill(ABC):
 
     @property
     def keywords(self) -> list[str]:
-        """Trigger words for keyword-based tool discovery (Stage 1).
-        Override to list words that indicate this skill is relevant.
-        Listed by GET /skills (the query prefilter retired with the legacy loop)."""
+        """Words that indicate this skill is relevant, listed by GET /skills
+        (the query prefilter that used them retired with the legacy loop)."""
         return []
 
     @property
     def always_available(self) -> bool:
-        """If True, this skill's tools are always included in the LLM context
-        regardless of query matching. Use sparingly — only for skills that
-        could be relevant to any query (e.g., web_search)."""
+        """Listed by GET /skills (the legacy loop always offered such a
+        skill's tools; the harness offers every visible skill's)."""
         return False
 
     @abstractmethod
     def get_tool_definitions(self) -> list[dict]:
         """Return OpenAI-compatible tool definitions for this skill.
         These get passed to llama-server in the tools parameter."""
-
-    def set_llm(self, llm):
-        """Optional: give this skill access to the LLM provider.
-        Override in skills that need to make secondary LLM calls."""
-        pass
 
     async def execute(self, tool_name: str, arguments: dict) -> str:
         """Execute a server-side tool. Only called for server skills.

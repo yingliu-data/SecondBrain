@@ -68,18 +68,17 @@ def test_example_tenants_all_load_without_an_engine(tmp_path):
     p.write_text(json.dumps(doc))
     reg = TenantRegistry(p, "env-key")
     default = reg.get_by_api_key("env-key")
-    assert default.is_default and default.store_key("abc") == "abc"
+    assert default.is_default
     assert sum(1 for t in reg.all_tenants() if t.name == "default") == 1
     wcc = next(t for t in reg.all_tenants() if t.name == "wcc-event")
     assert wcc.allowed_skill_names() == {"web_search"}
 
 
 def test_non_dir_session_backend_is_a_startup_error(monkeypatch):
-    from app.routes import chat
-    monkeypatch.setattr(chat, "create_session_store", lambda: {})
-    monkeypatch.setattr(chat, "SESSION_BACKEND", "memory")
+    from app.session import factory
+    monkeypatch.setattr(factory, "SESSION_BACKEND", "memory")
     with pytest.raises(RuntimeError, match="SESSION_BACKEND='memory' is not supported"):
-        chat._harness_store()
+        factory.create_session_store()
 
 
 def test_harness_chat_streams_and_device_result_resolves(client):

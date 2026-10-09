@@ -1,12 +1,15 @@
 import json
 import sqlite3
 
+import pytest
+
 from protocol.canonical import derive_key_id
 from protocol.fold import fold, replay
 from protocol.replay import load_session, verify_session
 
 from app.session.dir_store import DirStore
 from app.session import migrate
+from eventlog_fakes import conversation
 
 
 def _make_db(path):
@@ -36,19 +39,19 @@ def test_migrate_and_idempotency(tmp_path, monkeypatch):
     assert stats["migrated"] == 2
     assert stats["skipped_invalid"] == 1
 
-    # the sqlite step writes legacy history; --events turns it into a run
-    assert migrate.migrate_events(root, quiet=True)["stats"] == {"migrated": 2}
+    # the sqlite step writes the run itself: nothing left for --events
+    assert migrate.migrate_events(root, quiet=True)["stats"] == {}
     store = DirStore(root)
     default_session = store.get("default", "default", "abc")
     assert default_session is not None
-    history = default_session.read_history()
+    history = conversation(default_session)
     assert [(m["role"], m["content"]) for m in history] == [
         ("user", "hi"), ("assistant", "hello")]
 
     wcc_session = store.get("wcc", "wcc-event", "e1")
     assert wcc_session is not None
     assert wcc_session.read_meta()["tenant"] == "wcc-event"
-    assert wcc_session.read_history() == [{"role": "user", "content": "draft event"}]
+    assert conversation(wcc_session) == [{"role": "user", "content": "draft event"}]
     assert verify_session(wcc_session.root) == []
 
     # Second run: everything already exists
@@ -64,9 +67,9 @@ def _legacy(store, user="wcc", tenant="wcc-event", sid="sess_2026-05-01_101500_a
     """A session directory as the legacy engine left it: session.json,
     history.jsonl rows {ts, role, content, ticket_id}, logs/trace.jsonl."""
     session = store.get_or_create(user, tenant, sid)
-    session.history_jsonl.write_text("".join(json.dumps(r) + "\n" for r in history))
+    (session.root / migrate.HISTORY_FILE).write_text("".join(json.dumps(r) + "\n" for r in history))
     if trace:
-        session.trace_jsonl.write_text("".join(json.dumps(r) + "\n" for r in trace))
+        (session.root / migrate.TRACE_FILE).write_text("".join(json.dumps(r) + "\n" for r in trace))
     return session
 
 
@@ -170,7 +173,7 @@ def test_events_migration_of_a_real_shaped_session(tmp_path):
     assert prefix[2]["tool_call_id"] == prefix[1]["tool_calls"][0]["id"]
 
     # the session's history and checkpoint
-    assert session.read_history()[:2] == [
+    assert conversation(session)[:2] == [
         {"role": "user", "content": "Draft an event for Friday"},
         {"role": "assistant", "content": "I drafted **Friday Social** for 6pm."}]
     assert events[-1]["type"] == "checkpoint"
@@ -183,7 +186,6 @@ def test_events_migration_dry_run_writes_nothing(tmp_path, capsys):
     code = migrate.main(["--events", "--dry-run", str(store.root)])
     assert code == 0
     assert not (session.root / "events").exists()
-    assert not (session.root / ".events.migrating").exists()
     out = capsys.readouterr().out
     assert "would_migrate" in out and "dry run" in out
     assert '"tool_calls": 2' in out
@@ -235,9 +237,21 @@ def test_events_migration_history_tool_rows_and_segments(tmp_path):
     assert state.open_calls["call_9"]["state"] == "done"
 
 
-def test_events_migration_skips_sessions_with_events(tmp_path):
+@pytest.mark.no_log_verify("an empty run directory stands in for a live session's run")
+def test_events_migration_skips_sessions_with_a_run(tmp_path):
     store = DirStore(tmp_path / "sessions")
     session = _legacy(store, history=REAL_SHAPED_HISTORY)
-    (session.root / "events").mkdir()
+    (session.root / "events" / "r0001").mkdir(parents=True)
     assert migrate.migrate_events(store.root, quiet=True)["stats"] == {"skipped_existing": 1}
-    assert list((session.root / "events").iterdir()) == []
+    assert [p.name for p in (session.root / "events").iterdir()] == ["r0001"]
+
+
+def test_events_migration_finishes_an_interrupted_one(tmp_path):
+    """An `events/` without a run (a migration interrupted before its
+    rename, its temporary directory left behind) is migrated again."""
+    store = DirStore(tmp_path / "sessions")
+    session = _legacy(store, history=REAL_SHAPED_HISTORY)
+    (session.root / "events" / ".r0000.new").mkdir(parents=True)
+    assert migrate.migrate_events(store.root, quiet=True)["stats"] == {"migrated": 1}
+    assert [p.name for p in (session.root / "events").iterdir()] == ["r0000"]
+    assert verify_session(session.root) == []

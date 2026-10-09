@@ -8,9 +8,8 @@ Each tenant may carry::
 ``cron`` and ``prompt`` are required; ``session`` defaults to ``daily``
 (``DEFAULT_SESSION``) and ``tz`` to ``UTC``.  The fire goes to the session
 ``{tenant.user or tenant.name}/{tenant.name}/{session}`` with the tenant's
-``SessionConfig.from_tenant``.  A malformed entry, or any schedule of a tenant
-on ``engine: legacy`` (Temporal drives only harness sessions), is logged and
-skipped, so one bad line never stops agent-api's startup.
+``SessionConfig.from_tenant``.  A malformed entry is logged and skipped, so
+one bad line never stops agent-api's startup.
 
 ``ensure_schedules`` creates or (when changed) updates one Schedule per
 entry, id ``{tenant}/{session}/{index}``.  The action starts ``ScheduleTickWorkflow``
@@ -98,9 +97,6 @@ def entries_from_tenants(tenants_doc: dict[str, Any]) -> list[ScheduleEntry]:
             continue
         if not name:
             log.warning("schedules of a tenant without a name skipped")
-            continue
-        if tenant.get("engine") == "legacy":
-            log.warning("tenant %s: engine legacy, %d schedule(s) skipped", name, len(schedules))
             continue
         user = tenant.get("user") or name  # agent-api's Tenant model defaults user to name
         try:

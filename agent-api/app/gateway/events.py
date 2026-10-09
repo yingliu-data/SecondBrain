@@ -12,8 +12,7 @@ whether one is running.
 Answers: 202 `{"stored": true}`; 404 `{"stored": false}` when there is no
 such session directory (dropped, logged: the gateway logs it and moves on —
 the post is fire-and-forget); 400 malformed body or unsafe ids; 401 bad
-bearer; 503 when sessions are not directory-backed. The file I/O runs in a
-worker thread, off the event loop.
+bearer. The file I/O runs in a worker thread, off the event loop.
 """
 from __future__ import annotations
 
@@ -52,7 +51,6 @@ def record_gateway_event(payload: dict, *, sessions) -> bool:
 @router.post("/internal/gateway-events")
 async def gateway_events(request: Request):
     from app.routes import chat            # the process's session store
-    from app.session.dir_store import DirStore
 
     if not bearer_ok(request.headers.get("Authorization"), INTERNAL_TOKEN):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
@@ -65,7 +63,5 @@ async def gateway_events(request: Request):
             or not isinstance(payload.get("op"), str)):
         return JSONResponse({"error": "need safe user, tenant, session_id and an op"},
                             status_code=400)
-    if not isinstance(chat.sessions, DirStore):
-        return JSONResponse({"error": "no session directories"}, status_code=503)
     stored = await asyncio.to_thread(record_gateway_event, payload, sessions=chat.sessions)
     return JSONResponse({"stored": stored}, status_code=202 if stored else 404)

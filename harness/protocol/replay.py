@@ -18,18 +18,28 @@ file. The layout is read from the files alone (no agent-api import):
 Public functions (agent-api reuses them):
   load_session(path) -> list[list[event]]    the runs in order, each in seq order;
                                              raises ReplayError when a file is unreadable
+  iter_runs(path, newest_first=, modified_since=)   the same, lazily, the host log
+                                             unread; runs last written before
+                                             modified_since (epoch s) left out
   verify_session(path) -> list[str]          problems, [] == clean. Each names the seq:
                                              "<run>: seq N: reason" (run = r0001, ..., or
                                              "events" for a flat log, the file name for a
                                              .jsonl target), "host: hseq N: reason" for the
                                              host log, "<path>: reason" for the layout
-  find_sessions(root) -> list[Path]          every directory under root holding an event log
+  find_sessions(root, include_before_resume=)   every directory under root holding an
+                                             event log (+ the guest's events.before-resume-N
+                                             buffers)
   summarize(state) -> dict                   the replay summary of a folded State
 
 Per run, verify does validate_log + fold + every checkpoint (hash and prev_hash
 chain) via fold.replay, and reads every line (an unreadable line is a problem
 naming the seq it would have had). Across runs: one session_id. The host log:
 JSON objects with `type` (str), `body` (dict) and `hseq` gapless from 1.
+
+The on-disk layout is spelled here once: RUN_RE / SEGMENT_RE /
+HOST_SEGMENT_RE, run_name(n), segment_name(n, host=), segments(dir),
+host_segments(events_dir), run_numbers(events_dir) (agent-api's StateSync
+and migration write with them).
 
 Stdlib only. Reading files is the point of this module; the fold itself stays
 pure (protocol/fold.py).
@@ -40,6 +50,7 @@ import argparse
 import json
 import re
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 from protocol.fold import State, replay as fold_replay, state_hash
@@ -47,7 +58,18 @@ from protocol.fold import State, replay as fold_replay, state_hash
 RUN_RE = re.compile(r"^r\d{4}$")
 SEGMENT_RE = re.compile(r"^\d{6}\.jsonl$")
 HOST_SEGMENT_RE = re.compile(r"^host-\d{6}\.jsonl$")
+BEFORE_RESUME_RE = re.compile(r"^events\.before-resume-\d+$")   # a log return's moved-aside buffer
 FLAT_RUN = "events"
+
+
+def run_name(n: int) -> str:
+    """The directory name of run n: r0001."""
+    return f"r{n:04d}"
+
+
+def segment_name(n: int, *, host: bool = False) -> str:
+    """The file name of segment n: 000001.jsonl (host-000001.jsonl for the host log)."""
+    return f"{'host-' if host else ''}{n:06d}.jsonl"
 
 
 class ReplayError(ValueError):
@@ -61,19 +83,41 @@ def _events_dir(path: Path) -> Path:
     return sub if sub.is_dir() else path
 
 
-def _segments(directory: Path) -> list[Path]:
-    return sorted(p for p in directory.iterdir() if p.is_file() and SEGMENT_RE.match(p.name))
+def _files(directory: Path, pattern: re.Pattern) -> list[Path]:
+    directory = Path(directory)
+    if not directory.is_dir():
+        return []
+    return sorted(p for p in directory.iterdir() if p.is_file() and pattern.match(p.name))
+
+
+def segments(directory) -> list[Path]:
+    """A run directory's segment files, in order ([] when it is absent)."""
+    return _files(directory, SEGMENT_RE)
+
+
+def host_segments(events_dir) -> list[Path]:
+    """The host log's segment files, in order."""
+    return _files(events_dir, HOST_SEGMENT_RE)
+
+
+def run_numbers(events_dir) -> list[int]:
+    """The run numbers under events_dir (its rNNNN directories), in order."""
+    events_dir = Path(events_dir)
+    if not events_dir.is_dir():
+        return []
+    return sorted(int(p.name[1:]) for p in events_dir.iterdir()
+                  if p.is_dir() and RUN_RE.match(p.name))
 
 
 def _run_dirs(events_dir: Path) -> list[tuple[str, list[Path]]]:
     """(run name, its segment files) in order. Flat segments directly under
     events_dir are one run named 'events' (it comes first)."""
     runs: list[tuple[str, list[Path]]] = []
-    flat = _segments(events_dir)
+    flat = segments(events_dir)
     if flat:
         runs.append((FLAT_RUN, flat))
-    for d in sorted(p for p in events_dir.iterdir() if p.is_dir() and RUN_RE.match(p.name)):
-        runs.append((d.name, _segments(d)))
+    for n in run_numbers(events_dir):
+        runs.append((run_name(n), segments(events_dir / run_name(n))))
     return runs
 
 
@@ -116,38 +160,60 @@ def _by_seq(events: list[dict]) -> list[dict]:
     return events
 
 
-def _load(path) -> tuple[list[tuple[str, list[dict]]], list[dict], list[str]]:
-    """(runs as (name, events), host records, read problems)."""
-    path = Path(path)
-    problems: list[str] = []
+def _run_files(path: Path) -> list[tuple[str, list[Path]]]:
+    """(run name, its files) of a target: a .jsonl file is one run named
+    after it, a directory its runs (empty run directories included)."""
     if path.is_file():
-        return [(path.name, _by_seq(_read_lines([path], path.name, problems)))], [], problems
+        return [(path.name, [path])]
     if not path.is_dir():
         raise ReplayError(f"{path}: no such file or directory")
-    events_dir = _events_dir(path)
+    return _run_dirs(_events_dir(path))
+
+
+def _load(path) -> tuple[list[tuple[str, list[dict]]], list[dict], list[str], list[str]]:
+    """(runs as (name, events), host records, read errors, layout notes).
+    Read errors are unreadable files and lines; layout notes an empty run
+    directory or no log at all (load_session tolerates those)."""
+    path = Path(path)
+    errors: list[str] = []
+    notes: list[str] = []
     runs = []
-    for name, segments in _run_dirs(events_dir):
-        if not segments:
-            problems.append(f"{name}: run directory holds no segments")
+    for name, files in _run_files(path):
+        if not files:
+            notes.append(f"{name}: run directory holds no segments")
             continue
-        runs.append((name, _by_seq(_read_lines(segments, name, problems))))
-    host_files = sorted(p for p in events_dir.iterdir()
-                        if p.is_file() and HOST_SEGMENT_RE.match(p.name))
-    host = _read_lines(host_files, "host", problems, seq_key="hseq")
+        runs.append((name, _by_seq(_read_lines(files, name, errors))))
+    if path.is_file():
+        return runs, [], errors, notes
+    host = _read_lines(host_segments(_events_dir(path)), "host", errors, seq_key="hseq")
     if not runs and not host:
-        problems.append(f"{path}: no event log (no events/rNNNN/ runs, no NNNNNN.jsonl segments)")
-    return runs, host, problems
+        notes.append(f"{path}: no event log (no events/rNNNN/ runs, no NNNNNN.jsonl segments)")
+    return runs, host, errors, notes
+
+
+def iter_runs(path, *, newest_first: bool = False,
+              modified_since: float | None = None) -> Iterator[list[dict]]:
+    """The runs of a session directory (or the one run of a .jsonl file),
+    each a list of events in seq order, read one at a time; the host log is
+    not read. `modified_since` (epoch seconds) leaves out a run whose newest
+    segment was last written before it: none of its events is newer. Raises
+    ReplayError when a file cannot be read or a line is not a JSON object."""
+    runs = _run_files(Path(path))
+    for name, files in reversed(runs) if newest_first else runs:
+        if not files:
+            continue
+        if modified_since is not None and files[-1].stat().st_mtime < modified_since:
+            continue
+        errors: list[str] = []
+        events = _by_seq(_read_lines(files, name, errors))
+        if errors:
+            raise ReplayError("; ".join(errors))
+        yield events
 
 
 def load_session(path) -> list[list[dict]]:
-    """The runs of a session directory (or the one run of a .jsonl file), each
-    a list of events in seq order. Raises ReplayError when a file cannot be
-    read or a line is not a JSON object."""
-    runs, _host, problems = _load(path)
-    read_errors = [p for p in problems if "holds no segments" not in p and "no event log" not in p]
-    if read_errors:
-        raise ReplayError("; ".join(read_errors))
-    return [events for _name, events in runs]
+    """Every run of iter_runs(path), oldest first."""
+    return list(iter_runs(path))
 
 
 # ---------------------------------------------------------------- checks
@@ -191,28 +257,32 @@ def verify_session(path) -> list[str]:
     and the prev_hash chain, per run; one session_id across runs; the host
     log's hseq. [] == clean. Never raises for a bad log."""
     try:
-        runs, host, problems = _load(path)
+        runs, host, errors, notes = _load(path)
     except (ReplayError, OSError) as exc:
         return [str(exc)]
     more, _ = _verify_runs(runs)
-    return problems + more + _host_problems(host)
+    return errors + notes + more + _host_problems(host)
 
 
-def find_sessions(root) -> list[Path]:
+def find_sessions(root, *, include_before_resume: bool = False) -> list[Path]:
     """Every directory under root (root included) that holds an event log: an
     `events/` dir with run dirs or segments, or flat segments of its own when
-    it is itself named `events`. A `.jsonl` file root is returned as is."""
+    it is itself named `events`. A `.jsonl` file root is returned as is. With
+    include_before_resume, also every `events.before-resume-N` buffer a log
+    return moved aside (flat segments, verified as a log of its own)."""
     root = Path(root)
     if root.is_file():
         return [root]
+    dirs = sorted(p for p in root.rglob("*") if p.is_dir())
     found = [root] if root.name == "events" and root.is_dir() and _run_dirs(root) else []
-    for d in sorted([root, *(p for p in root.rglob("*") if p.is_dir())]):
+    for d in [root, *dirs]:
         if d.name == "events" or RUN_RE.match(d.name):
             continue
         ev = d / "events"
-        if ev.is_dir() and (_run_dirs(ev) or any(HOST_SEGMENT_RE.match(p.name)
-                                                 for p in ev.iterdir())):
+        if ev.is_dir() and (_run_dirs(ev) or host_segments(ev)):
             found.append(d)
+    if include_before_resume:
+        found.extend(d for d in dirs if BEFORE_RESUME_RE.match(d.name))
     return found
 
 
@@ -245,7 +315,8 @@ def _cmd_replay(args) -> int:
     report, bad = [], 0
     for target in _targets(args):
         try:
-            runs, _host, problems = _load(target)
+            runs, _host, errors, notes = _load(target)
+            problems = errors + notes
         except ReplayError as exc:
             runs, problems = [], [str(exc)]
         run_problems, results = _verify_runs(runs)

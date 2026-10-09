@@ -13,6 +13,10 @@
     .read(after_seq=0)            events from disk, in seq order (safe from another
                                   thread: the bulk server's log return)
   read_current_run(events_dir, after_seq)   the same without loading the session
+  write_segments(run_dir, events) / replace_run_dir(run_dir, events)
+                                the segment writer (migration and the retool
+                                below): a new run directory, or one swapped in
+  retool(events, tools)         a migrated run re-pinned to a hello's tools
     .state                        protocol.fold.State folded from the log
     .question_bodies              question_id -> the `question` body (current run)
     .last_seq                     highest stored seq
@@ -38,14 +42,15 @@ trace: the `history.jsonl` / `logs/trace.jsonl` projections are retired
 projection below.
 
 Migrated runs. `migrated_run` is True while the
-current run is one `app.session.migrate --events` wrote from a legacy
-history (its session_start has `migrated: true`) and no guest has continued
-it yet (it still ends with the migration's checkpoint). The worker's first
-boot of such a session is a resume: `retool_migrated(tools)` re-pins the
-run's session_start.tools to the hello's effective tools (the legacy run
-never had a guest; its own allowlist holds only the legacy tools), then
-hello{resume: true} makes the guest fold the migrated run (the log return),
-so the prior conversation is in context and the run continues its seqs.
+current run is one `app.session.migrate` wrote from a legacy history (its
+session_start has `migrated: true`) and no guest has continued it yet (it
+still ends with the migration's checkpoint); it is read from disk when
+asked (at a fresh boot). The worker's first boot of such a session is a
+resume: `retool_migrated(tools)` re-pins the run's session_start.tools to
+the hello's effective tools (the legacy run never had a guest; its own
+allowlist holds only the legacy tools), then hello{resume: true} makes the
+guest fold the migrated run (the log return), so the prior conversation is
+in context and the run continues its seqs.
 
 Memory projection. A guest `memory{scope: session}` event
 whose `derived_from` is a compaction turn of this run (read from the fold:
@@ -71,7 +76,9 @@ from pathlib import Path
 
 from protocol.canonical import sha256_hex
 from protocol.events import validate_event
-from protocol.fold import FoldError, State, apply
+from protocol.fold import FoldError, State, apply, checkpoint_body, replay
+from protocol.messages import encode
+from protocol.replay import host_segments, run_name, run_numbers, segment_name, segments
 
 from app.config import HARNESS_SEGMENT_EVENTS
 from app.session.session_dir import SessionDir, utcnow_iso
@@ -83,42 +90,86 @@ class StateSyncError(Exception):
     """An event the host refuses to store (schema or fold error)."""
 
 
-_SEGMENT_GLOB = "[0-9][0-9][0-9][0-9][0-9][0-9].jsonl"     # a run's segments
-_HOST_SEGMENT_GLOB = "host-" + _SEGMENT_GLOB                 # the host log's
-_RUN_GLOB = "r[0-9][0-9][0-9][0-9]"
-
-
-def _segment_name(n: int, prefix: str = "") -> str:
-    return f"{prefix}{n:06d}.jsonl"
-
-
-def _host_segments(events_dir: Path) -> list[Path]:
-    return sorted(Path(events_dir).glob(_HOST_SEGMENT_GLOB))
-
-
 def _run_dir(events_dir: Path, run: int) -> Path:
-    return Path(events_dir) / f"r{run:04d}"
-
-
-def _runs(events_dir: Path) -> list[int]:
-    """The run numbers under `events_dir`, in order."""
-    return sorted(int(p.name[1:]) for p in Path(events_dir).glob(_RUN_GLOB) if p.is_dir())
+    return Path(events_dir) / run_name(run)
 
 
 def _append_line(path: Path, obj: dict) -> int:
     """Append `obj` as one durable line; the file's inode."""
-    line = json.dumps(obj, separators=(",", ":"), ensure_ascii=False) + "\n"
     with path.open("a", encoding="utf-8") as f:
-        f.write(line)
+        f.write(encode(obj))
         f.flush()
         os.fsync(f.fileno())
         return os.fstat(f.fileno()).st_ino
 
 
+def write_segments(run_dir: Path, events: list[dict],
+                   segment_events: int = HARNESS_SEGMENT_EVENTS) -> None:
+    """A run's events as segment files (seq 1..N in 000001.jsonl, ...) in a
+    new directory `run_dir`."""
+    segment_events = max(1, int(segment_events))
+    run_dir.mkdir(parents=True)
+    for start in range(0, len(events), segment_events):
+        with (run_dir / segment_name(start // segment_events + 1)).open("w", encoding="utf-8") as f:
+            f.writelines(encode(ev) for ev in events[start:start + segment_events])
+            f.flush()
+            os.fsync(f.fileno())
+
+
+def replace_run_dir(run_dir: Path, events: list[dict],
+                    segment_events: int = HARNESS_SEGMENT_EVENTS) -> None:
+    """`run_dir` (absent or not) holding exactly `events`: written to a
+    temporary sibling, swapped in by rename, the old directory removed; a
+    reader sees the old run or the new one, never a part."""
+    run_dir = Path(run_dir)
+    fresh = run_dir.with_name(f".{run_dir.name}.new")
+    old = run_dir.with_name(f".{run_dir.name}.old")
+    for stale in (fresh, old):
+        if stale.exists():
+            shutil.rmtree(stale)
+    write_segments(fresh, events, segment_events)
+    if run_dir.exists():
+        os.rename(run_dir, old)
+    os.rename(fresh, run_dir)
+    shutil.rmtree(old, ignore_errors=True)
+
+
+def retool(events: list[dict], tools: list[dict]) -> list[dict]:
+    """A migrated run, not yet continued, re-pinned to the tool list of the
+    hello that is about to resume it: session_start.tools = `tools` plus the
+    legacy tools the run's tool_calls name (so they stay allowed), and the
+    closing checkpoint recomputed. The legacy run never had a guest, so its
+    allowlist is whatever the first harness guest offers. Raises ValueError
+    when the run is not a migrated, uncontinued one, or when a legacy tool
+    shares its name with an offered tool on another side."""
+    if not events or events[0]["type"] != "session_start" \
+            or events[0]["body"].get("migrated") is not True:
+        raise ValueError("not a migrated run")
+    if events[-1]["type"] != "checkpoint":
+        raise ValueError("the migrated run was continued already")
+    offered = {t["name"]: t for t in tools}
+    merged = [dict(t) for t in tools]
+    for t in events[0]["body"]["tools"]:
+        have = offered.get(t["name"])
+        if have is None:
+            merged.append(dict(t))
+            offered[t["name"]] = t
+        elif have["side"] != t["side"]:
+            raise ValueError(f"legacy tool {t['name']!r} (side {t['side']}) is offered "
+                             f"on side {have['side']}")
+    body = [{**events[0], "body": {**events[0]["body"],
+                                   "tools": sorted(merged, key=lambda t: t["name"])}},
+            *events[1:-1]]
+    state, problems = replay(body)
+    if problems:
+        raise ValueError(f"retooled run does not verify: {problems[0]}")
+    return [*body, {**events[-1], "body": checkpoint_body(body, state=state)}]
+
+
 def count_host_events(events_dir: Path, segment_events: int = HARNESS_SEGMENT_EVENTS) -> int:
     """The highest hseq in the session's host log (0 when there is none):
     full segments before the last one, plus the last one's lines."""
-    host = _host_segments(events_dir)
+    host = host_segments(events_dir)
     if not host:
         return 0
     with host[-1].open("rb") as f:
@@ -133,7 +184,7 @@ def append_host_event(events_dir: Path, hseq: int, session_id: str | None, type:
     host-log writer (it owns the hseq counter)."""
     n = (hseq - 1) // segment_events + 1
     rec = {"ts": utcnow_iso(), "hseq": hseq, "session_id": session_id, "type": type, "body": body}
-    path = Path(events_dir) / _segment_name(n, "host-")
+    path = Path(events_dir) / segment_name(n, host=True)
     return path, _append_line(path, rec), rec
 
 
@@ -193,7 +244,7 @@ def _read_run(run_dir: Path, after_seq: int, segment_events: int,
     `through`), skipping the segments that end before after_seq."""
     out: list[dict] = []
     start_segment = after_seq // segment_events + 1
-    for path in sorted(run_dir.glob(_SEGMENT_GLOB)) if run_dir.is_dir() else []:
+    for path in segments(run_dir):
         if int(path.stem) < start_segment:
             continue
         with path.open("r", encoding="utf-8") as f:
@@ -217,7 +268,7 @@ def read_current_run(events_dir: Path, after_seq: int = 0,
                      segment_events: int = HARNESS_SEGMENT_EVENTS) -> list[dict]:
     """The latest run's events with seq > after_seq, without loading the
     session (no StateSync, no fold): GET /sessions/{id}/events."""
-    runs = _runs(events_dir)
+    runs = run_numbers(events_dir)
     return (_read_run(_run_dir(events_dir, runs[-1]), after_seq, max(1, int(segment_events)))
             if runs else [])
 
@@ -237,19 +288,16 @@ class StateSync:
                  segment_events: int = HARNESS_SEGMENT_EVENTS) -> None:
         self.session = (session_dir if isinstance(session_dir, SessionDir)
                         else SessionDir(Path(session_dir)))
-        self.events_dir = self.session.root / "events"
+        self.events_dir = self.session.events
         self.events_dir.mkdir(parents=True, exist_ok=True)
         self.segment_events = max(1, int(segment_events))
         self._lock = threading.RLock()
         self.run = 1
         self.state = State()
-        self.ticket_id: str | None = None
         self._host_log = host_log(self.events_dir, self.segment_events)
         self.seen_inputs: set[str] = set()       # across runs
         self.settled: dict[str, dict] = {}       # input_id -> settle body, across runs
         self.question_bodies: dict[str, dict] = {}  # question_id -> body, current run
-        self._migrated_start = False             # current run written by migrate --events
-        self._last_type: str | None = None       # type of the current run's last event
         self._load()
 
     # ------------------------------------------------------------ disk
@@ -258,13 +306,12 @@ class StateSync:
         return _run_dir(self.events_dir, self.run)
 
     def runs(self) -> list[int]:
-        return _runs(self.events_dir)
+        return run_numbers(self.events_dir)
 
     def _load(self) -> None:
         for run in self.runs():
             self.run, self.state = run, State()
             self.question_bodies = {}
-            self._migrated_start, self._last_type = False, None
             for ev in self.read(0, run=run):
                 try:
                     apply(self.state, ev)
@@ -282,7 +329,6 @@ class StateSync:
             self.run += 1
             self.state = State()
             self.question_bodies = {}
-            self._migrated_start, self._last_type = False, None
             return self.run
 
     def read(self, after_seq: int = 0, *, run: int | None = None) -> list[dict]:
@@ -327,7 +373,7 @@ class StateSync:
             # Append before applying: the ack that follows promises durability,
             # so a failed write (ENOSPC, EIO) must leave last_seq where it was.
             self.run_dir.mkdir(parents=True, exist_ok=True)
-            path = self.run_dir / _segment_name((seq - 1) // self.segment_events + 1)
+            path = self.run_dir / segment_name((seq - 1) // self.segment_events + 1)
             offset = path.stat().st_size if path.exists() else 0
             _append_line(path, event)
             try:
@@ -346,10 +392,7 @@ class StateSync:
         """What must hold across runs: the input_ids seen, each task's
         settle; and the current run's question bodies."""
         etype, b = event["type"], event["body"]
-        self._last_type = etype
-        if etype == "session_start":
-            self._migrated_start = b.get("migrated") is True
-        elif etype == "input":
+        if etype == "input":
             self.seen_inputs.add(b["input_id"])
         elif etype == "question":
             self.question_bodies[b["question_id"]] = b
@@ -357,38 +400,44 @@ class StateSync:
             self.settled[b["input_id"]] = b
 
     # ------------------------------------------------------------ migrated runs
+    def _migrated_events(self) -> list[dict] | None:
+        """The current run's events when it is a migrated legacy history no
+        guest has continued yet (it still ends with the migration's
+        checkpoint), else None. Reads the first line, the run only then."""
+        if self.state.last_seq == 0:
+            return None
+        first = segments(self.run_dir)[0]
+        with first.open("r", encoding="utf-8") as f:
+            head = json.loads(f.readline())
+        if head["body"].get("migrated") is not True:
+            return None
+        events = self.read(0)
+        return events if events[-1]["type"] == "checkpoint" else None
+
     @property
     def migrated_run(self) -> bool:
         """The current run is a migrated legacy history no guest has
-        continued yet (it still ends with the migration's checkpoint)."""
-        return self._migrated_start and self._last_type == "checkpoint"
+        continued yet."""
+        with self._lock:
+            return self._migrated_events() is not None
 
     def retool_migrated(self, tools: list[dict]) -> bool:
         """Re-pin the current migrated run's session_start.tools to `tools`
         (the effective tools of the hello about to resume it; the legacy
         tools its calls name stay offered) and recompute its checkpoint, so
         the resumed guest may call every tool it offers. Rewrites the run's
-        segments (a new directory swapped in) and refolds it. False when the
-        run is not an uncontinued migrated one or cannot be re-pinned."""
-        from app.session.migrate import retool, write_segments
+        segments (replace_run_dir) and refolds it. False when the run is not
+        an uncontinued migrated one or cannot be re-pinned."""
         with self._lock:
-            if not self.migrated_run:
+            events = self._migrated_events()
+            if events is None:
                 return False
-            events = _read_run(self.run_dir, 0, self.segment_events)
             try:
                 events = retool(events, tools)
             except ValueError as e:
                 logger.warning("migrated run %s keeps its tools: %s", self.run_dir, e)
                 return False
-            fresh = self.events_dir / f".{self.run_dir.name}.retool"
-            old = self.events_dir / f".{self.run_dir.name}.old"
-            for stale in (fresh, old):
-                if stale.exists():
-                    shutil.rmtree(stale)
-            write_segments(fresh, events, self.segment_events)
-            os.rename(self.run_dir, old)
-            os.rename(fresh, self.run_dir)
-            shutil.rmtree(old, ignore_errors=True)
+            replace_run_dir(self.run_dir, events, self.segment_events)
             self.state, self.question_bodies = State(), {}
             for ev in events:
                 apply(self.state, ev)
@@ -402,7 +451,7 @@ class StateSync:
 
     def read_host(self) -> list[dict]:
         out: list[dict] = []
-        for path in _host_segments(self.events_dir):
+        for path in host_segments(self.events_dir):
             with path.open("r", encoding="utf-8") as f:
                 out.extend(json.loads(l) for l in f if l.strip())
         return out

@@ -11,6 +11,7 @@ from app.host.state_sync import read_current_run
 from app.session.dir_store import DirStore
 from app.session.eventlog import parse_ts
 from app.session.ids import session_key
+from app.session.session_dir import SessionDir
 from app.tenants import Tenant
 
 router = APIRouter(prefix="/api/v1/sessions")
@@ -18,70 +19,28 @@ logger = logging.getLogger("routes.sessions")
 
 _EPOCH = datetime.fromtimestamp(0, timezone.utc)
 
-_sessions = None
+_sessions: DirStore | None = None
 
 
-def set_sessions(sessions):
+def set_sessions(sessions: DirStore):
     global _sessions
     _sessions = sessions
 
 
-def _is_dir_store() -> bool:
-    return isinstance(_sessions, DirStore)
-
-
-# ── Legacy (sqlite/dict) helpers ─────────────────────────────
-
-def _visible_to(tenant: Tenant, store_key: str) -> bool:
-    if tenant.is_default:
-        return ":" not in store_key
-    return store_key.startswith(f"{tenant.name}:")
-
-
-def _strip_prefix(tenant: Tenant, store_key: str) -> str:
-    if tenant.is_default:
-        return store_key
-    return store_key[len(tenant.name) + 1:]
-
-
-# ── Routes ───────────────────────────────────────────────────
-
 @router.get("")
 async def list_sessions(tenant: Tenant = Depends(verify)):
-    if _is_dir_store():
-        rows = _sessions.list_for_tenant(tenant.user, tenant.name)
-        return {"sessions": [
-            {"session_id": r["session_id"], "updated_at": r["updated_at"]}
-            for r in rows
-        ]}
-    if hasattr(_sessions, "list_sessions"):
-        rows = _sessions.list_sessions()
-        return {"sessions": [
-            {**row, "session_id": _strip_prefix(tenant, row["session_id"])}
-            for row in rows if _visible_to(tenant, row["session_id"])
-        ]}
-    return {"sessions": [
-        {"session_id": _strip_prefix(tenant, k)}
-        for k in _sessions.keys() if _visible_to(tenant, k)
-    ]}
+    rows = _sessions.list_for_tenant(tenant.user, tenant.name)
+    return {"sessions": [{"session_id": r["session_id"], "updated_at": r["updated_at"]}
+                         for r in rows]}
 
 
 @router.delete("/{session_id}")
 async def delete_session(session_id: str, tenant: Tenant = Depends(verify)):
-    if _is_dir_store():
-        try:
-            deleted = _sessions.delete(tenant.user, tenant.name, session_id)
-        except ValueError:
-            raise HTTPException(400, "Invalid session id")
-        if deleted:
-            return {"status": "ok", "deleted": session_id}
-        raise HTTPException(404, f"Session '{session_id}' not found")
-    store_key = tenant.store_key(session_id)
-    if hasattr(_sessions, "delete"):
-        if _sessions.delete(store_key):
-            return {"status": "ok", "deleted": session_id}
-    elif store_key in _sessions:
-        del _sessions[store_key]
+    try:
+        deleted = _sessions.delete(tenant.user, tenant.name, session_id)
+    except ValueError:
+        raise HTTPException(400, "Invalid session id")
+    if deleted:
         return {"status": "ok", "deleted": session_id}
     raise HTTPException(404, f"Session '{session_id}' not found")
 
@@ -96,24 +55,20 @@ def _since(minutes: int | None) -> datetime | None:
 def recent_traces(since_minutes: int = 10, limit: int = 200,
                   tenant: Tenant = Depends(verify)):
     """Trace rows across all of this tenant's sessions — answers 'which
-    tools ran in the last N minutes'. Built from each session's event log
-    (every run). Requires the dir backend. A plain def:
-    FastAPI runs the file reads in its threadpool, off the event loop."""
-    if not _is_dir_store():
-        raise HTTPException(501, "Traces require SESSION_BACKEND=dir")
+    tools ran in the last N minutes'. Built from each session's event log;
+    a run (so a session) last written before the cutoff is not read. A
+    plain def: FastAPI runs the file reads in its threadpool, off the
+    event loop."""
     floor = _since(since_minutes)
     out = []
     for row in _sessions.list_for_tenant(tenant.user, tenant.name):
-        session = _sessions.get(tenant.user, tenant.name, row["session_id"])
-        if session is None:
-            continue
         try:
-            rows = session.read_trace(since=floor)
+            # a session's own last `limit` rows are all it can add to the answer
+            rows = SessionDir(row["root"]).read_trace(since=floor, limit=limit)
         except Exception as e:      # one unreadable log never hides the others
             logger.warning("traces: session %s unreadable: %s", row["session_id"], e)
             continue
-        for event in rows:
-            out.append({"session_id": row["session_id"], **event})
+        out.extend({"session_id": row["session_id"], **event} for event in rows)
     out.sort(key=lambda e: parse_ts(e.get("ts")) or _EPOCH)
     return {"traces": out[-limit:] if limit > 0 else []}
 
@@ -121,17 +76,15 @@ def recent_traces(since_minutes: int = 10, limit: int = 200,
 @router.get("/{session_id}/traces")
 def session_traces(session_id: str, since_minutes: int | None = None,
                    limit: int = 200, tenant: Tenant = Depends(verify)):
-    """One session's trace rows from its event log (every run)."""
-    session = _session_or_404(tenant, session_id, "Traces require SESSION_BACKEND=dir")
+    """One session's trace rows from its event log (newest runs first, up
+    to `limit` rows)."""
+    session = _session_or_404(tenant, session_id)
     return {"traces": session.read_trace(since=_since(since_minutes), limit=limit)}
 
 
 # ── the session workflow ──
 
-def _session_or_404(tenant: Tenant, session_id: str,
-                    not_dir: str = "Requires SESSION_BACKEND=dir"):
-    if not _is_dir_store():
-        raise HTTPException(501, not_dir)
+def _session_or_404(tenant: Tenant, session_id: str) -> SessionDir:
     try:
         session = _sessions.get(tenant.user, tenant.name, session_id)
     except ValueError:
@@ -187,4 +140,4 @@ def session_events(session_id: str, after_seq: int = 0, tenant: Tenant = Depends
     after_seq = max(0, after_seq)
     if w is not None:
         return w.sync.read(after_seq)       # bounded by the acked seq, thread-safe
-    return read_current_run(session.root / "events", after_seq)
+    return read_current_run(session.events, after_seq)

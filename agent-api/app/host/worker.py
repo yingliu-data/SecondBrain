@@ -3,7 +3,7 @@ Temporal activities).
 
   Worker(session, tenant, registry, sandbox, sinks=None)
     .act(task_input) -> settle body     task_input = {input_id, text, kind?,
-                                        attachments?, ticket_id?}
+                                        attachments?}
     .attach() -> asyncio.Queue          an SSE sink: every projected SSE string
                                         is put on it; None ends the stream
     .detach(queue)
@@ -675,8 +675,7 @@ class Worker:
             "limits": self.limits(),
             "hooks": {},
             "async_tools": False,
-            **({"exclude_builtins": list(self.tenant.exclude_builtins)}
-               if getattr(self.tenant, "exclude_builtins", None) else {}),
+            "exclude_builtins": list(self.tenant.exclude_builtins),
             "question_timeout_s": HARNESS_QUESTION_TIMEOUT_S,
             "ui_attached": True,
             "ports": dict(self.ports),
@@ -1206,7 +1205,6 @@ class Worker:
     async def _run(self, task_input: dict, fut: asyncio.Future) -> dict:
         input_id = task_input["input_id"]
         wall_clock_s = self.task_wall_clock_s
-        self.sync.ticket_id = task_input.get("ticket_id")
         self.sync.host_event("workflow", {"kind": "task_signal", "input_id": input_id})
         self._cancel_idle()
         self._resumes = 0
@@ -1236,7 +1234,6 @@ class Worker:
                                     else result.get("outcome", "failed"))
         if self.sides is not None:
             await self.sides.cancel_all()
-        self.sync.ticket_id = None
         if self.vm_state == "running" and not self.closed:
             self._arm_idle()
         return result

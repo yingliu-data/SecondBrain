@@ -5,7 +5,7 @@ from app.skills.base import BaseSkill
 from app.skills.avatar_control.poses import POSES, POSE_NAMES
 from app.skills.avatar_control.body import JOINT_LIMITS, clamp_joint
 from app.skills.avatar_control.motion import build_animation, EasingType
-from app.skills.avatar_control.planner_llm import PlannerLLM
+from app.skills.avatar_control.planner_llm import planner_llm
 
 logger = logging.getLogger("skills.avatar_control")
 
@@ -73,10 +73,7 @@ class AvatarControlSkill(BaseSkill):
     ]
 
     def __init__(self):
-        self._llm = PlannerLLM()     # plan_movement's decomposition call
-
-    def set_llm(self, llm):
-        self._llm = llm
+        self._llm = planner_llm      # plan_movement's decomposition call
 
     def get_tool_definitions(self) -> list[dict]:
         return [

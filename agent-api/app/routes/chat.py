@@ -10,11 +10,10 @@ from flows.client import signal_answer, signal_task
 from flows.session_workflow import AnswerSignal
 from fastapi.responses import StreamingResponse
 from app.auth.middleware import verify
-from app.config import HARNESS_KEEPALIVE_S, MAX_INPUT, SESSION_BACKEND
+from app.config import HARNESS_KEEPALIVE_S, MAX_INPUT
 from app.host import temporal
 from app.host.stream import KEEPALIVE, SSE_HEADERS, fatal_items, tokens
 from app.host.worker import Workers, new_input_id, session_config
-from app.session.dir_store import DirStore
 from app.session.factory import create_session_store
 from app.session.ids import session_key
 from app.session.queue import SessionQueue
@@ -27,20 +26,7 @@ logger = logging.getLogger("chat")
 router = APIRouter()
 
 
-def _harness_store() -> DirStore:
-    """The directory session store: the only one the harness engine runs on.
-    Anything else stops agent-api at import (startup)."""
-    store = create_session_store()
-    if not isinstance(store, DirStore):
-        raise RuntimeError(
-            f"SESSION_BACKEND={SESSION_BACKEND!r} is not supported: the harness engine "
-            f"needs the directory session store (SESSION_BACKEND=dir, the default). "
-            f"The legacy engine that ran on sqlite/memory was removed; migrate "
-            f"old sqlite sessions with app/session/migrate.py.")
-    return store
-
-
-sessions = _harness_store()
+sessions = create_session_store()
 session_queue = SessionQueue()
 workers = Workers(sessions=sessions)   # one Worker per running session
 _registry = None
@@ -148,8 +134,7 @@ async def _harness_turn(tenant: Tenant, session_id: str, message: str, input_id:
         ticket = await asyncio.to_thread(Ticket.start, session, "chat.turn",
                                          inputs={"message": message, "input_id": input_id})
         sink = worker.attach(input_id)
-        task = asyncio.ensure_future(worker.act({"input_id": input_id, "text": message,
-                                                 "ticket_id": ticket.ticket_id}))
+        task = asyncio.ensure_future(worker.act({"input_id": input_id, "text": message}))
 
         def _finish(t: asyncio.Task) -> None:
             try:

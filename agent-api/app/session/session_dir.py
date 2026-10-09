@@ -11,10 +11,10 @@ Layout::
         tickets/             # append-only per-operation records (Phase 3)
         logs/
 
-The conversation and the trace are read from the event log
-(app.session.eventlog); `history.jsonl` and `logs/trace.jsonl` are no longer
-written. A legacy session's `history.jsonl` is converted to an event log run
-by `python -m app.session.migrate --events`.
+The trace is read from the event log (app.session.eventlog); the legacy
+`history.jsonl` / `logs/trace.jsonl` files are no longer written. A legacy
+session's files are converted to an event log run by
+`python -m app.session.migrate --events`.
 """
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from app.session.eventlog import conversation, load_runs, trace_rows
+from app.session.eventlog import read_trace
 from app.session.state import transition
 
 SCHEMA_VERSION = 1
@@ -54,11 +54,6 @@ class SessionDir:
         return self.root / "session.json"
 
     @property
-    def history_jsonl(self) -> Path:
-        """Legacy conversation file; only migrate --events reads it."""
-        return self.root / "history.jsonl"
-
-    @property
     def workspace(self) -> Path:
         return self.root / "workspace"
 
@@ -77,11 +72,6 @@ class SessionDir:
     @property
     def logs(self) -> Path:
         return self.root / "logs"
-
-    @property
-    def trace_jsonl(self) -> Path:
-        """Legacy trace file; only migrate --events reads it."""
-        return self.logs / "trace.jsonl"
 
     @classmethod
     def create(
@@ -106,7 +96,6 @@ class SessionDir:
             "created_at": now,
             "updated_at": now,
             "title": title,
-            "message_count": 0,
             "last_ticket_id": None,
             "schema_version": SCHEMA_VERSION,
         }
@@ -145,11 +134,6 @@ class SessionDir:
     def events(self) -> Path:
         return self.root / "events"
 
-    def read_history(self, *, limit: int | None = None) -> list[dict[str, Any]]:
-        """The conversation from the event log (every run): user text and
-        settled answers, as {role, content}."""
-        return conversation(load_runs(self.root), limit=limit)
-
     def read_trace(
         self,
         *,
@@ -157,5 +141,5 @@ class SessionDir:
         since: datetime | None = None,
     ) -> list[dict[str, Any]]:
         """Trace rows built from the event log (every run), oldest first;
-        optionally only those at or after `since`."""
-        return trace_rows(load_runs(self.root), since=since, limit=limit)
+        optionally only those at or after `since` (eventlog.read_trace)."""
+        return read_trace(self.root, since=since, limit=limit)

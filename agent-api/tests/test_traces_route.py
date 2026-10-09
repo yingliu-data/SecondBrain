@@ -4,6 +4,7 @@ session is covered the same way."""
 import hashlib
 import hmac
 import json
+import os
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -17,6 +18,7 @@ from app.session.dir_store import DirStore
 from app.session.migrate import migrate_events
 from app.tenants import TenantRegistry
 from eventlog_fakes import LogBuilder, store
+from app.session import migrate
 
 TWO_TENANT_DOC = {
     "tenants": [
@@ -110,6 +112,44 @@ def test_traces_recent_answers_last_minutes(client, dir_store):
     assert [t["session_id"] for t in r.json()["traces"]][:3] == ["s0", "s0", "s0"]
 
 
+def _age(session, hours: float) -> None:
+    """Every segment of the session's runs last written `hours` ago."""
+    t = time.time() - hours * 3600
+    for seg in session.events.glob("r*/*.jsonl"):
+        os.utime(seg, (t, t))
+
+
+def test_traces_recent_skips_sessions_last_written_before_the_cutoff(client, dir_store):
+    """A run whose segments were last written before the cutoff is not read
+    (its rows could not be newer), whatever its events' ts say."""
+    quiet = dir_store.get_or_create("wcc", "wcc-event", "s2")
+    store(quiet, LogBuilder(session_id="s2", ts=_iso(datetime.now(timezone.utc)), user="wcc",
+                            tenant="wcc-event").start().text_task("in_q", "hi", "yo").events)
+    _age(quiet, 2)
+    r = signed_get(client, "/api/v1/sessions/traces/recent?since_minutes=2", "key-event")
+    assert {t["session_id"] for t in r.json()["traces"]} == {"s1"}
+
+
+@pytest.mark.no_log_verify("the old run is corrupted on purpose")
+def test_session_traces_read_newest_runs_first(client, dir_store):
+    """/{id}/traces stops at `limit` rows or at `since`: an older run beyond
+    them is never read (here: a corrupted one)."""
+    session = dir_store.get("wcc", "wcc-event", "s1")
+    store(session, LogBuilder(ts=_iso(datetime.now(timezone.utc)), user="wcc", tenant="wcc-event")
+          .start().text_task("in_2", "again", "ok").events, new_run=True)
+    first = sorted(session.events.glob("r*"))[0]
+    with (first / "000001.jsonl").open("a") as f:
+        f.write("not json\n")
+    _age(session, 2)
+    for seg in sorted(session.events.glob("r*"))[-1].glob("*.jsonl"):
+        os.utime(seg)                                   # the newest run: written now
+    r = signed_get(client, "/api/v1/sessions/s1/traces?limit=3", "key-event")
+    assert [t["event"] for t in r.json()["traces"]] == ["turn_start", "assistant_response",
+                                                       "settle"]
+    r = signed_get(client, "/api/v1/sessions/s1/traces?since_minutes=5&limit=50", "key-event")
+    assert len(r.json()["traces"]) == 3
+
+
 def test_sibling_tenant_cannot_see_traces(client):
     """Same user, different tenant token → that tenant sees nothing."""
     r = signed_get(client, "/api/v1/sessions/s1/traces", "key-analytic")
@@ -133,8 +173,8 @@ def test_migrated_session_traces(client, dir_store):
     rows = [{"ts": _iso(t0), "role": "user", "content": "draft an event", "ticket_id": "tk_a"},
             {"ts": _iso(t0 + timedelta(seconds=5)), "role": "assistant",
              "content": "Drafted.", "ticket_id": "tk_a"}]
-    legacy.history_jsonl.write_text("".join(json.dumps(r) + "\n" for r in rows))
-    legacy.trace_jsonl.write_text("".join(json.dumps(r) + "\n" for r in [
+    (legacy.root / migrate.HISTORY_FILE).write_text("".join(json.dumps(r) + "\n" for r in rows))
+    (legacy.root / migrate.TRACE_FILE).write_text("".join(json.dumps(r) + "\n" for r in [
         {"ts": _iso(t0 + timedelta(seconds=1)), "event": "tool_call", "ticket_id": "tk_a",
          "detail": {"name": "wcc-events__draft_event", "arguments": {"title": "x"}}},
         {"ts": _iso(t0 + timedelta(seconds=2)), "event": "tool_result", "ticket_id": "tk_a",

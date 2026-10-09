@@ -858,3 +858,17 @@ def test_op_state_input_required_suspends_an_mcp_call_until_the_resend():
                          "input_request": request})
     with pytest.raises(FoldError, match="input_required for guest-side call 'cB'"):
         fold(log.events)
+
+
+def test_checkpoint_body_seals_the_events_and_continues_the_chain():
+    from protocol.fold import checkpoint_body
+    events = [e for e in golden("text_answer") if e["type"] != "checkpoint"]
+    events = [e for e in events if e["seq"] <= 5]
+    first = checkpoint_body(events)
+    assert first == {"through_seq": 5, "state_hash": state_hash(fold(events)),
+                     "prev_hash": hash_value(events[0])}
+    assert checkpoint_body(events, state=fold(events)) == first
+    sealed = events + [{**events[-1], "seq": 6, "type": "checkpoint", "body": first}]
+    assert replay(sealed)[1] == []
+    assert checkpoint_body(sealed)["prev_hash"] == first["state_hash"]   # chained
+    assert checkpoint_body(events, prev="x" * 64)["prev_hash"] == "x" * 64

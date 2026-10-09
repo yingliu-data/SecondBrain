@@ -19,6 +19,8 @@ from protocol.replay import verify_session
 from app.session.migrate import migrate_session
 from test_host_e2e import make_worker, tool_call, upstream  # noqa: F401
 from host_fakes import session, users_root  # noqa: F401
+from eventlog_fakes import conversation
+from app.session import migrate
 
 HISTORY = [
     {"ts": "2026-05-01T10:15:02.117Z", "role": "user", "content": "My dog is called Biscuit.",
@@ -39,8 +41,8 @@ TRACE = [
 
 
 def _migrate(session):
-    session.history_jsonl.write_text("".join(json.dumps(r) + "\n" for r in HISTORY))
-    session.trace_jsonl.write_text("".join(json.dumps(r) + "\n" for r in TRACE))
+    (session.root / migrate.HISTORY_FILE).write_text("".join(json.dumps(r) + "\n" for r in HISTORY))
+    (session.root / migrate.TRACE_FILE).write_text("".join(json.dumps(r) + "\n" for r in TRACE))
     report = migrate_session(session)
     assert report["status"] == "migrated", report
     return report
@@ -79,7 +81,7 @@ async def test_migrated_session_continues_with_its_history(session, upstream):  
         assert events[report["events"]]["seq"] == report["events"] + 1
         assert replay(events)[1] == []
         assert verify_session(session.root) == []
-        assert session.read_history()[-2:] == [
+        assert conversation(session)[-2:] == [
             {"role": "user", "content": "What is my dog called?"},
             {"role": "assistant", "content": "Biscuit, as you told me."}]
     finally:

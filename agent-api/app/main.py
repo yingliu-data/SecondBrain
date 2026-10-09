@@ -31,8 +31,7 @@ middleware.set_tenant_registry(tenant_registry)
 # per-tenant API key (Bearer + HMAC).
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=sorted(set(tenant_registry.guest().origins)
-                         | set(tenant_registry.all_origins())),
+    allow_origins=tenant_registry.all_origins(),
     allow_methods=["POST", "GET", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization", "X-Timestamp", "X-Signature"],
 )

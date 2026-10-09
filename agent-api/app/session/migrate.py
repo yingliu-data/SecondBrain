@@ -7,15 +7,17 @@
    "abc"           (un-namespaced) → user "default", tenant "default"
    "wcc-event:abc" (namespaced)    → tenant "wcc-event" under its configured user
                                      (resolved via tenants.json; fallback: user = tenant)
-   Writes each conversation as a legacy `history.jsonl`; run step 2 next.
-   Idempotent: existing session dirs are skipped. SQLite is left untouched.
+   Each conversation's user/assistant messages become the event log run
+   `events/r0000` exactly as step 2 builds one (line L = the Lth of those
+   messages, ts = the migration time). Idempotent: existing session dirs
+   are skipped. SQLite is left untouched.
 
 2. legacy `history.jsonl` → event log run `events/r0000`:
 
      python -m app.session.migrate --events [--dry-run] <sessions_root>
 
    Every session directory ({root}/{user}/{tenant}_{session_id}/) with a
-   non-empty `history.jsonl` and no `events/` gets one run:
+   non-empty `history.jsonl` and no run under `events/` gets one run:
 
      session_start  user/tenant from session.json, resumed: false,
                     migrated: true, tools = the legacy tools the history used
@@ -39,24 +41,25 @@
    only). Assistant rows before the first user message are skipped (counted).
    Every run is checked with protocol.fold.replay (validate + fold +
    checkpoint chain) before it is written, and written through a temporary
-   directory renamed to `events/`, so a session either has its whole run or
-   none. Idempotent: a session with `events/` is skipped. The legacy files
-   are left in place (nothing reads them any more).
+   directory renamed to `events/r0000` (state_sync.replace_run_dir), so a
+   session either has its whole run or none. Idempotent: a session whose
+   `events/` holds a run is skipped. The legacy files are left in place
+   (nothing reads them any more).
 """
 from __future__ import annotations
 
 import argparse
 import json
-import os
-import shutil
 import sqlite3
 from pathlib import Path
 
 from protocol.canonical import derive_id, derive_key_id, hash_value
 from protocol.events import make_event
-from protocol.fold import fold, replay, state_hash
+from protocol.fold import checkpoint_body, replay
+from protocol.replay import run_name, run_numbers
 
 from app.config import HARNESS_SEGMENT_EVENTS, SESSION_DB_PATH, SESSIONS_ROOT
+from app.host.state_sync import replace_run_dir
 from app.session.dir_store import DirStore
 from app.session.eventlog import parse_ts
 from app.session.ids import is_safe_id
@@ -65,8 +68,10 @@ from app.session.session_dir import SessionDir, utcnow_iso
 LEGACY_MODEL = "legacy"
 LEGACY_TOOL = "legacy_tool"          # a legacy tool row that names no tool
 NO_RESULT = "[no result recorded]"
+HISTORY_FILE = "history.jsonl"       # the legacy files, relative to the session dir
+TRACE_FILE = "logs/trace.jsonl"
+MIGRATED_RUN = 0                     # the run a migration writes: events/r0000
 _EPOCH_TS = "1970-01-01T00:00:00.000Z"
-_TMP_EVENTS = ".events.migrating"
 
 
 # ---------------------------------------------------------------- sqlite → dirs
@@ -78,17 +83,11 @@ def _tenant_users() -> dict[str, str]:
         return {}
 
 
-def _append_legacy_history(session: SessionDir, rows: list[dict]) -> None:
-    """Write legacy history.jsonl rows ({ts, role, content}) for --events."""
-    with session.history_jsonl.open("a", encoding="utf-8") as f:
-        for row in rows:
-            f.write(json.dumps(row, separators=(",", ":"), ensure_ascii=False) + "\n")
-
-
-def migrate(db_path: str = SESSION_DB_PATH, root: str = SESSIONS_ROOT) -> dict:
+def migrate(db_path: str = SESSION_DB_PATH, root: str = SESSIONS_ROOT,
+            segment_events: int = HARNESS_SEGMENT_EVENTS) -> dict:
     store = DirStore(root)
     users = _tenant_users()
-    stats = {"migrated": 0, "skipped_existing": 0, "skipped_invalid": 0}
+    stats = {"migrated": 0, "skipped_existing": 0, "skipped_invalid": 0, "failed": 0}
 
     conn = sqlite3.connect(db_path)
     rows = conn.execute("SELECT session_id, messages, updated_at FROM sessions").fetchall()
@@ -115,11 +114,19 @@ def migrate(db_path: str = SESSION_DB_PATH, root: str = SESSIONS_ROOT) -> dict:
         except json.JSONDecodeError:
             messages = []
         now = utcnow_iso()
-        _append_legacy_history(session, [
-            {"ts": now, "role": m["role"], "content": m.get("content") or ""}
-            for m in messages if m.get("role") in ("user", "assistant")])
-        session.update_meta(title=f"migrated from sqlite ({updated_at})",
-                            message_count=len(messages))
+        history = list(enumerate(
+            ({"ts": now, "role": m["role"], "content": m.get("content") or ""}
+             for m in messages if m.get("role") in ("user", "assistant")), start=1))
+        session.update_meta(title=f"migrated from sqlite ({updated_at})")
+        if history:
+            meta = {"user": user, "tenant": tenant, "session_id": session_id,
+                    "created_at": session.read_meta().get("created_at")}
+            events, _counts, problems = build_events(meta, history)
+            if problems:
+                print(f"  FAILED {store_key!r}: {problems[:3]}")
+                stats["failed"] += 1
+                continue
+            write_run(session, events, segment_events)
         print(f"  {store_key!r} -> {user}/{tenant}_{session_id} ({len(messages)} msgs)")
         stats["migrated"] += 1
 
@@ -168,7 +175,7 @@ def _trace_tools(session: SessionDir) -> dict[str, list[dict]]:
     each tool_call paired with the next tool_result of the same name."""
     by_ticket: dict[str, list[dict]] = {}
     open_calls: dict[str, list[dict]] = {}
-    for _, row in _read_jsonl(session.trace_jsonl):
+    for _, row in _read_jsonl(session.root / TRACE_FILE):
         ticket, event = row.get("ticket_id"), row.get("event")
         detail = row.get("detail") if isinstance(row.get("detail"), dict) else {}
         if not isinstance(ticket, str) or event not in ("tool_call", "tool_result"):
@@ -274,8 +281,10 @@ class _Log:
 
 
 def build_events(meta: dict, history: list[tuple[int, dict]],
-                 trace_tools: dict[str, list[dict]] | None = None) -> tuple[list[dict], dict]:
-    """The run r0000 of a legacy session: (events, counts)."""
+                 trace_tools: dict[str, list[dict]] | None = None
+                 ) -> tuple[list[dict], dict, list[str]]:
+    """The run r0000 of a legacy session: (events, counts, problems), the
+    problems of protocol.fold.replay over it ([] == it verifies)."""
     user, tenant, session_id = meta["user"], meta["tenant"], meta["session_id"]
     trace_tools = trace_tools or {}
     exchanges, skipped = _exchanges(history)
@@ -340,48 +349,10 @@ def build_events(meta: dict, history: list[tuple[int, dict]],
         log.emit("settle", {"input_id": input_id, "outcome": "done" if answer is not None else "failed",
                             "answer": answer or "", "usage": {}, "manifest": {}})
 
-    through = log.events[-1]["seq"]
-    log.emit("checkpoint", {"through_seq": through, "state_hash": state_hash(fold(log.events)),
-                            "prev_hash": hash_value(log.events[0])})
+    state, problems = replay(log.events)     # one fold: verifies, and seals the run
+    log.emit("checkpoint", checkpoint_body(log.events, state=state))
     counts["events"] = len(log.events)
-    return log.events, counts
-
-
-def retool(events: list[dict], tools: list[dict]) -> list[dict]:
-    """A migrated run, not yet continued, re-pinned to the tool list of the
-    hello that is about to resume it: session_start.tools = `tools` plus the
-    legacy tools the run's tool_calls name (so they stay allowed), and the
-    closing checkpoint recomputed. The legacy run never had a guest, so its
-    allowlist is whatever the first harness guest offers. Raises ValueError
-    when the run is not a migrated, uncontinued one, or when a legacy tool
-    shares its name with an offered tool on another side."""
-    if not events or events[0]["type"] != "session_start" \
-            or events[0]["body"].get("migrated") is not True:
-        raise ValueError("not a migrated run")
-    if events[-1]["type"] != "checkpoint":
-        raise ValueError("the migrated run was continued already")
-    offered = {t["name"]: t for t in tools}
-    merged = [dict(t) for t in tools]
-    for t in events[0]["body"]["tools"]:
-        have = offered.get(t["name"])
-        if have is None:
-            merged.append(dict(t))
-            offered[t["name"]] = t
-        elif have["side"] != t["side"]:
-            raise ValueError(f"legacy tool {t['name']!r} (side {t['side']}) is offered "
-                             f"on side {have['side']}")
-    out = [dict(e) for e in events]
-    out[0] = {**events[0], "body": {**events[0]["body"],
-                                    "tools": sorted(merged, key=lambda t: t["name"])}}
-    body = out[-1]["body"]
-    out[-1] = {**events[-1], "body": {
-        "through_seq": body["through_seq"],
-        "state_hash": state_hash(fold(out[:-1])),
-        "prev_hash": hash_value(out[0])}}
-    problems = replay(out)[1]
-    if problems:
-        raise ValueError(f"retooled run does not verify: {problems[0]}")
-    return out
+    return log.events, counts, problems
 
 
 def _meta(session: SessionDir) -> dict | None:
@@ -403,61 +374,40 @@ def _meta(session: SessionDir) -> dict | None:
             "created_at": meta.get("created_at")}
 
 
-def write_run(session_root: Path, events: list[dict],
+def write_run(session: SessionDir, events: list[dict],
               segment_events: int = HARNESS_SEGMENT_EVENTS) -> Path:
     """Write `events` as events/r0000 (segments as StateSync lays them out),
     through a temporary directory renamed into place."""
-    tmp = session_root / _TMP_EVENTS
-    if tmp.exists():
-        shutil.rmtree(tmp)
-    write_segments(tmp / "r0000", events, segment_events)
-    target = session_root / "events"
-    os.rename(tmp, target)
+    target = session.events / run_name(MIGRATED_RUN)
+    session.events.mkdir(exist_ok=True)
+    replace_run_dir(target, events, segment_events)
     return target
-
-
-def write_segments(run_dir: Path, events: list[dict],
-                   segment_events: int = HARNESS_SEGMENT_EVENTS) -> None:
-    """A run's events as segment files (seq 1..N in 000001.jsonl, ...) in a
-    new directory `run_dir`."""
-    segment_events = max(1, int(segment_events))
-    run_dir.mkdir(parents=True)
-    for start in range(0, len(events), segment_events):
-        chunk = events[start:start + segment_events]
-        path = run_dir / f"{start // segment_events + 1:06d}.jsonl"
-        with path.open("w", encoding="utf-8") as f:
-            for ev in chunk:
-                f.write(json.dumps(ev, separators=(",", ":"), ensure_ascii=False) + "\n")
-            f.flush()
-            os.fsync(f.fileno())
 
 
 def migrate_session(session: SessionDir, *, dry_run: bool = False,
                     segment_events: int = HARNESS_SEGMENT_EVENTS) -> dict:
     """Convert one session; returns its report {status, ...counts}."""
-    root = session.root
-    if (root / "events").exists():
+    if run_numbers(session.events):
         return {"status": "skipped_existing"}
-    history = _read_jsonl(session.history_jsonl)
+    history = _read_jsonl(session.root / HISTORY_FILE)
     if not history:
         return {"status": "skipped_empty"}
     meta = _meta(session)
     if meta is None:
         return {"status": "skipped_invalid"}
-    events, counts = build_events(meta, history, _trace_tools(session))
-    problems = replay(events)[1]
+    events, counts, problems = build_events(meta, history, _trace_tools(session))
     if problems:
         return {"status": "failed", "problems": problems[:5], **counts}
     if dry_run:
         return {"status": "would_migrate", **counts}
-    write_run(root, events, segment_events)
+    write_run(session, events, segment_events)
     return {"status": "migrated", **counts}
 
 
 def _session_dirs(root: Path):
     for user_dir in sorted(p for p in root.iterdir() if p.is_dir()) if root.is_dir() else []:
         for entry in sorted(p for p in user_dir.iterdir() if p.is_dir()):
-            if (entry / "session.json").exists() and (entry / "history.jsonl").exists():
+            if (entry / "session.json").exists() and (entry / HISTORY_FILE).exists():
                 yield SessionDir(entry)
 
 

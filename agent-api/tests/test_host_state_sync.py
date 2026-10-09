@@ -9,6 +9,8 @@ from protocol.fold import fold, state_hash
 
 from app.host.state_sync import StateSync, StateSyncError
 from host_fakes import HASH, read_jsonl, session, users_root  # noqa: F401
+from eventlog_fakes import conversation
+from app.session import migrate
 
 SID = "s1"
 TOOLS = [{"name": "bash", "side": "guest", "pin": None},
@@ -107,9 +109,9 @@ def test_no_history_or_trace_projection_files(session):
     sync.ticket_id = "tk_1"
     for e in text_task():
         sync.accept(e)
-    assert not session.history_jsonl.exists()
-    assert not session.trace_jsonl.exists()
-    hist = session.read_history()
+    assert not (session.root / migrate.HISTORY_FILE).exists()
+    assert not (session.root / migrate.TRACE_FILE).exists()
+    hist = conversation(session)
     assert hist == [{"role": "user", "content": "hi"},
                     {"role": "assistant", "content": "hello there world"}]
     names = [t["event"] for t in session.read_trace()]
@@ -123,7 +125,7 @@ def _migrated(session, tool="wcc-events__draft_event"):
             {"ts": "2026-05-01T10:00:01.000Z", "role": "tool", "tool_call_id": "c0",
              "name": tool, "content": "ok"},
             {"ts": "2026-05-01T10:00:02.000Z", "role": "assistant", "content": "hello"}]
-    session.history_jsonl.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    (session.root / migrate.HISTORY_FILE).write_text("".join(json.dumps(r) + "\n" for r in rows))
     assert migrate_session(session)["status"] == "migrated"
 
 
@@ -186,7 +188,8 @@ def test_tool_trace_projection(session):
     assert trace["tool_call"]["detail"] == {"name": "web_search", "arguments": {"q": "x"},
                                             "call_id": "c1", "side": "host"}
     assert trace["tool_result"]["detail"]["result"] == "found"
-    assert trace["tool_result"]["detail"]["duration_ms"] == 12
+    assert trace["tool_result"]["duration_ms"] == 12             # the row's, as op_state's
+    assert "duration_ms" not in trace["tool_result"]["detail"]
     assert "llm_error" in trace and "loop_exhausted" in trace
 
 

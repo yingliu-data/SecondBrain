@@ -19,12 +19,19 @@ target passes, else 1 and prints `<target>: seq <n>: <reason>` per failure
 (hard error naming the seq, PLAN 14). JSON output with `--json`. The session
 directory layout is read from the files alone (no agent-api import). Public
 functions `load_session(dir) -> list[list[event]]` (runs) and
-`verify_session(dir) -> list[str]` (problems) for agent-api to reuse.
+`verify_session(dir) -> list[str]` (problems) for agent-api to reuse. (As
+built: also `iter_runs(dir, newest_first=, modified_since=)`, the runs read
+lazily without the host log, and the layout names — `run_name`,
+`segment_name`, `segments`, `host_segments`, `run_numbers` — that
+agent-api's StateSync and migration write with.)
 
 **CI logs:** every event log a test writes (e2e, M3–M5 tests, agent-api host
 tests) is verified at the end of its test by a shared fixture/hook in each
 suite (`verify_session` on every session dir the test created). A failure
-fails the test.
+fails the test. (As built: one pytest plugin, `harness/logverify.py`, loaded
+by both suites' conftest with `pytest_plugins = ["logverify"]`; it covers
+`find_sessions(tmp_path, include_before_resume=True)` and the
+`no_log_verify` marker. The harness suite adds its FakeHost replay on top.)
 
 ## 2. Traces from the fold (agent-api)
 
@@ -34,14 +41,21 @@ but are built from the event log (tool_call / op_state / tool_result /
 turn_start / llm_response / question / settle → rows) for harness sessions.
 `logs/trace.jsonl` and `history.jsonl` stop being written (the "kept one
 release" projections retire); readers that still need history get it from
-the fold. Migrated sessions (§4) are covered the same way.
+the fold. Migrated sessions (§4) are covered the same way. (As built: the
+host log is never read for traces; `/{id}/traces` reads runs newest first
+and stops once it has `limit` rows or reaches back before `since`;
+`/traces/recent` does not read a run whose segments were last written
+before its cutoff, so idle sessions cost a stat. A `tool_result` row's
+`duration_ms` is on the row only, as on `op_state` rows.)
 
 ## 3. Legacy removal (agent-api, gateway)
 
 - `AGENT_ENGINE`, `Tenant.engine` and `_legacy_turn` are removed; an `engine`
   key in tenants.json is accepted and ignored with a warning. Every tenant
   runs on the harness engine. The harness requires the directory session
-  store: a non-dir `SESSION_BACKEND` is a startup error with a clear message.
+  store: a non-dir `SESSION_BACKEND` is a startup error with a clear message
+  (`app/session/factory.py`; the sqlite `SessionStore` is deleted, only
+  `migrate` still reads a raw `conversations.db`).
 - `app/agent/` is deleted. Shared pieces move first: `SSE_HEADERS` →
   `app/host/stream.py`; `_AVATAR_TOOLS` → the avatar_control skill package;
   `sanitize` → `app/host/sanitize.py`; `tool_result_events` / `tool_results`
@@ -51,17 +65,24 @@ the fold. Migrated sessions (§4) are covered the same way.
   the same harness chat path with a guest tenant profile (`auth: origin`,
   `local_skills: ["avatar_control"]`, its limits as today). Wire behaviour of
   the guest route (SSE `token` / `avatar_command` / `done`) is unchanged.
+  (As built: the profile is an ordinary entry of the tenant registry, its
+  origins part of CORS; `auth: origin` is refused for any tenant not named
+  `guest`, and a `guest` entry must use it.)
 - `GatewayUpstreamSkill` (legacy-only) and agent-api's `app/gateway/
   upstream_skill.py` are deleted; the gateway's legacy routes
   `/internal/upstreams/{name}/tools` and `/internal/call` are deleted with
   their tests. `tenants.json` `mcp_servers` (top-level map and tenant list)
-  is accepted and ignored by agent-api (the gateway owns it).
+  is accepted and ignored by agent-api (the gateway owns it). (As built: a
+  tenant's `engine`, `mcp_servers` and `promoted` are dropped at load with a
+  warning; `mcp_servers` without `local_skills` becomes `local_skills: []`.)
 
 ## 4. Legacy sessions → event logs (`migrate.py --events`)
 
 `python -m app.session.migrate --events [--dry-run] <sessions_root>` converts
 every session that has `history.jsonl` and no `events/` into an event log run
-`r0000`:
+`r0000` (as built: no run under `events/`, so an interrupted migration is
+finished on the next pass; the sqlite step builds the same run straight from
+its rows):
 
 - `session_start` with the session's user/tenant, `resumed: false`,
   `tools` = the legacy tools its tool calls name (side host; empty when
@@ -80,8 +101,11 @@ resume, so the prior conversation is in context. (As built: the worker's
 first boot of a run that is migrated and not yet continued is a resume, and
 `StateSync.retool_migrated` first re-pins that run's `session_start.tools` to
 the hello's effective tools plus the legacy ones and recomputes its closing
-checkpoint, so the resumed guest can call every tool it offers.) `--dry-run` reports what
-would be written. Idempotent: a session with `events/` is skipped.
+checkpoint, so the resumed guest can call every tool it offers; the run is
+rewritten through `state_sync.replace_run_dir`, the writer migration uses,
+and the closing checkpoint is `protocol.fold.checkpoint_body`.) `--dry-run`
+reports what would be written. Idempotent: a session with a run under
+`events/` is skipped.
 
 ## 5. Async tool calls (`harness/bench/`)
 

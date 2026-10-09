@@ -13,6 +13,7 @@ from app.host.stream import DONE, tokens
 from app.host.worker import GuestError, Worker, Workers, strip_current_time
 from host_fakes import (FakeRegistry, FakeSandbox, FakeTenant, read_jsonl, session,  # noqa: F401
                         token_text, users_root, worker_kwargs)
+from eventlog_fakes import conversation
 
 
 async def drain(q: asyncio.Queue) -> list[str]:
@@ -52,7 +53,7 @@ async def test_text_answer_streams_legacy_tokens_and_stores_the_log(session):
     stored = w.sync.read(0)
     assert [e["seq"] for e in stored] == [e["seq"] for e in guest.events]
     assert state_hash(fold(stored)) == state_hash(w.sync.state)
-    assert session.read_history() == [{"role": "user", "content": "hi"},
+    assert conversation(session) == [{"role": "user", "content": "hi"},
                                       {"role": "assistant", "content": "Hello there world"}]
     kinds = [h["body"].get("kind") or h["body"]["op"]
              for h in w.sync.read_host() if h["type"] in ("vm", "workflow")]
@@ -137,7 +138,7 @@ async def test_redelivered_input_runs_once(session):
     assert again == first
     assert sse == tokens("answer one") + [DONE]
     assert sandbox.starts == 1                              # no second guest run
-    assert session.read_history().count({"role": "user", "content": "hi"}) == 1
+    assert conversation(session).count({"role": "user", "content": "hi"}) == 1
     # a different input is a second run of the guest (fresh log run r0002)
     second = await w.act({"input_id": "in_2", "text": "again"})
     assert second["outcome"] == "done" and sandbox.starts == 2
@@ -282,7 +283,7 @@ async def test_streamed_deltas_reach_the_sink_verbatim_once(session):
     toks = [json.loads(s.split("data: ", 1)[1])["text"] for s in sse if s.startswith("event: token")]
     assert toks == ["Hel", "lo, wör", "ld"] and sse[-1] == DONE
     assert "think" not in "".join(sse)
-    assert session.read_history()[-1] == {"role": "assistant", "content": "Hello, wörld"}
+    assert conversation(session)[-1] == {"role": "assistant", "content": "Hello, wörld"}
     # second task, LLM_STREAM=false shape: the whole text as one `text` delta
     sandbox.script = [{"text": "Second answer", "deltas": ["Second answer"], "delta_kind": "text"}]
     sink = w.attach()

@@ -1,4 +1,4 @@
-"""DirStore — filesystem-backed session store. Replaces SQLite SessionStore.
+"""DirStore — the filesystem-backed session store.
 
 Layout: ``{root}/{user}/{tenant}_{session_id}/`` — sessions are separated
 per tenant (different toolsets must not mix) but grouped under the user who
@@ -50,7 +50,8 @@ class DirStore:
         return True
 
     def list_for_tenant(self, user: str, tenant: str) -> list[dict[str, Any]]:
-        """Sessions belonging to one tenant of one user, newest first."""
+        """Sessions belonging to one tenant of one user, newest first:
+        {session_id, tenant, updated_at, state, title, root}."""
         return self._scan(user, prefix=tenant + "_")
 
     def list_for_user(self, user: str) -> list[dict[str, Any]]:
@@ -80,7 +81,7 @@ class DirStore:
                 "updated_at": meta.get("updated_at"),
                 "state": meta.get("state"),
                 "title": meta.get("title", ""),
-                "message_count": meta.get("message_count", 0),
+                "root": entry,
             })
         out.sort(key=lambda m: m.get("updated_at") or "", reverse=True)
         return out

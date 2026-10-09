@@ -9,6 +9,10 @@ Public contract (other modules import these names):
                                            resumes from a kept State (seq <= last_seq
                                            skipped)
   state_hash(state) -> str                 hash_value(state.to_canonical())
+  checkpoint_body(events, prev=None, *, state=None) -> dict
+                                           {through_seq, state_hash, prev_hash} sealing
+                                           the events (prev: the chain's head as they
+                                           have it)
   verify_checkpoints(events, *, last_only=False) -> list[str]
                                            "seq N: ..." strings, empty == all good
   replay(events) -> (State, list[str])     validate_log + verify_checkpoints + fold
@@ -545,6 +549,20 @@ def fold(events, upto_seq=None, *, state: State | None = None) -> State:
 
 def state_hash(state: State) -> str:
     return hash_value(state.to_canonical())
+
+
+def checkpoint_body(events, prev: str | None = None, *, state: State | None = None) -> dict:
+    """The body of the checkpoint that seals `events` (in seq order): through
+    the last event, state_hash of their fold (`state` when the caller has
+    folded them already), prev_hash = `prev`, else the chain's head as the
+    events have it (the last checkpoint's state_hash, or hash_value of the
+    session_start for the first). Pure."""
+    if prev is None:
+        last_cp = next((e for e in reversed(events) if e.get("type") == "checkpoint"), None)
+        prev = last_cp["body"]["state_hash"] if last_cp else hash_value(events[0])
+    return {"through_seq": events[-1]["seq"],
+            "state_hash": state_hash(state if state is not None else fold(events)),
+            "prev_hash": prev}
 
 
 # ---------------------------------------------------------------- checks

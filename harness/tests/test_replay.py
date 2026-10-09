@@ -131,6 +131,20 @@ def test_unreadable_line_names_the_seq_it_would_have_had(tmp_path):
         load_session(tmp_path)
 
 
+def test_iter_runs_newest_first_skips_runs_written_before_a_time(tmp_path):
+    import os
+    from protocol.replay import iter_runs
+    write_run(tmp_path, "r0001", golden("text_answer"))
+    write_run(tmp_path, "r0002", golden("text_answer")[:3])
+    (tmp_path / "events" / "r0003").mkdir()                      # empty: no run
+    with open(tmp_path / "events" / "host-000001.jsonl", "w") as fh:
+        fh.write("not json\n")                                   # the host log is not read
+    assert [len(r) for r in iter_runs(tmp_path, newest_first=True)] == [3, len(golden("text_answer"))]
+    seg = tmp_path / "events" / "r0001" / "000001.jsonl"
+    os.utime(seg, (1000, 1000))
+    assert [len(r) for r in iter_runs(tmp_path, modified_since=2000)] == [3]
+
+
 # ---------------------------------------------------------------- multi-run sessions
 def test_multi_run_session_verifies_each_run_with_its_own_fold(tmp_path):
     first = golden("text_answer")
@@ -235,12 +249,13 @@ def test_ci_hook_checks_fake_host_logs_per_guest_run():
     assert problems and problems[0].startswith("run 2: seq 5: ")
 
 
-def test_ci_hook_finds_session_dirs_and_resume_buffers(tmp_path):
-    from tests.conftest import produced_logs
+def test_find_sessions_with_resume_buffers(tmp_path):
     write_run(tmp_path / "sess", "r0001", golden("text_answer"))
     flat = tmp_path / "log" / "events"
     flat.mkdir(parents=True)
     (flat / "000001.jsonl").write_text("", encoding="utf-8")
     (tmp_path / "log" / "events.before-resume-1").mkdir()
-    got = sorted(p.relative_to(tmp_path).as_posix() for p in produced_logs(tmp_path))
+    got = sorted(p.relative_to(tmp_path).as_posix() for p in find_sessions(tmp_path, include_before_resume=True))
     assert got == ["log", "log/events.before-resume-1", "sess"]
+    assert "log/events.before-resume-1" not in {
+        p.relative_to(tmp_path).as_posix() for p in find_sessions(tmp_path)}

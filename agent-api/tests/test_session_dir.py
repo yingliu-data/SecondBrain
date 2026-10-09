@@ -6,7 +6,8 @@ from app.session.manifest import Manifest
 from app.session.session_dir import SessionDir
 from app.session.state import StateError
 from app.session.ticket import Ticket
-from eventlog_fakes import LogBuilder, store
+from eventlog_fakes import LogBuilder, store, conversation
+from app.session import migrate
 
 
 @pytest.fixture
@@ -38,16 +39,16 @@ def test_state_forward_only(session):
 
 
 def test_history_comes_from_the_event_log(session):
-    """No history.jsonl; read_history folds every run's inputs + settles."""
+    """No history.jsonl; the conversation folds every run's inputs + settles."""
     store(session, LogBuilder().start().text_task("in_1", "hello", "hi there").events)
     store(session, LogBuilder().start().text_task("in_2", "again", "sure").events, new_run=True)
-    msgs = session.read_history()
+    msgs = conversation(session)
     assert msgs == [{"role": "user", "content": "hello"},
                     {"role": "assistant", "content": "hi there"},
                     {"role": "user", "content": "again"},
                     {"role": "assistant", "content": "sure"}]
-    assert session.read_history(limit=1) == [{"role": "assistant", "content": "sure"}]
-    assert not session.history_jsonl.exists()
+    assert conversation(session, limit=1) == [{"role": "assistant", "content": "sure"}]
+    assert not (session.root / migrate.HISTORY_FILE).exists()
 
 
 def test_trace_from_the_event_log_and_since(session):
@@ -62,7 +63,7 @@ def test_trace_from_the_event_log_and_since(session):
     past = datetime.now(timezone.utc) - timedelta(minutes=1)
     assert len(session.read_trace(since=past)) == 8
     assert [r["event"] for r in session.read_trace(limit=2)] == ["assistant_response", "settle"]
-    assert not session.trace_jsonl.exists()
+    assert not (session.root / migrate.TRACE_FILE).exists()
 
 
 def test_ticket_lifecycle(session):
@@ -76,7 +77,7 @@ def test_ticket_lifecycle(session):
     assert record["state"] == "success"
     assert record["completed_at"]
     assert session.read_meta()["last_ticket_id"] == ticket.ticket_id
-    assert not session.trace_jsonl.exists()      # the ticket file is the record
+    assert not (session.root / migrate.TRACE_FILE).exists()      # the ticket file is the record
 
 
 def test_manifest_detects_tamper(session):

@@ -21,6 +21,7 @@ from app.host.stream import DONE, tokens
 from app.host.worker import Worker
 from host_fakes import (FakeRegistry, FakeTenant, FakeUpstreamLLM, session,  # noqa: F401
                         token_text, users_root)
+from eventlog_fakes import conversation
 
 GUEST_ROOT = Path(__file__).resolve().parents[2] / "harness"
 
@@ -81,7 +82,7 @@ async def test_e2e_text_answer(session, upstream):
         state, problems = replay(events)
         assert problems == []
         assert events[0]["type"] == "session_start" and events[-1]["type"] == "settle"
-        assert session.read_history()[-1] == {"role": "assistant", "content": "Hello from the guest"}
+        assert conversation(session)[-1] == {"role": "assistant", "content": "Hello from the guest"}
     finally:
         await w.close()
 

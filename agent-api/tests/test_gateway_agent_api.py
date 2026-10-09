@@ -99,6 +99,6 @@ def test_tenants_file_loads_old_fields_and_ignores_mcp_servers(tmp_path):
     assert not hasattr(reg, "mcp_server_configs")
     a = reg.get_by_api_key("k")
     # MCP servers without local_skills: still no local skills (never widened)
-    assert a.allowed_skill_names() == set()
-    assert a.promoted == ["wcc-events__draft_event"]
+    assert a.local_skills == [] and a.allowed_skill_names() == set()
+    assert not hasattr(a, "promoted") and not hasattr(a, "mcp_servers")   # dropped, logged
     assert reg.get_by_api_key("kb").allowed_skill_names() == {"web_search"}

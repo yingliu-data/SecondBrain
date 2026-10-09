@@ -46,7 +46,6 @@ async def test_entries_defaults_and_skips(caplog):
             {"cron": "0 8 * * *"},                                       # no prompt: skipped
             {"cron": "0 9 * * *", "prompt": "Nine", "session": "work", "tz": None},
         ]},
-        {"name": "old", "engine": "legacy", "schedules": [{"cron": "0 7 * * *", "prompt": "x"}]},
         {"name": "bad", "answer_wait_s": -1, "schedules": [{"cron": "0 7 * * *", "prompt": "x"}]},
         {"name": "none", "schedules": None},
     ]}
@@ -58,7 +57,7 @@ async def test_entries_defaults_and_skips(caplog):
     assert (e0.config.answer_wait_s, e0.config.wall_clock_s) == (86400, 900)
     assert entries[1].tz == "UTC"
     logged = caplog.text
-    assert "needs cron and prompt" in logged and "engine legacy" in logged
+    assert "needs cron and prompt" in logged
     assert "bad session config" in logged
 
 

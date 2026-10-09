@@ -72,3 +72,24 @@ def store(session, events: list[dict], *, new_run: bool = False) -> StateSync:
     for ev in events:
         sync.accept(ev)
     return sync
+
+
+USER_KINDS = ("task", "follow_up", "steer")
+
+
+def conversation(session, *, limit: int | None = None) -> list[dict]:
+    """The conversation in a session's event log, as the retired
+    history.jsonl had it: the text of every new task/follow_up/steer input
+    and every non-empty settled answer, in log order across runs."""
+    from protocol.replay import load_session
+    out: list[dict] = []
+    for events in load_session(session.root):
+        for ev in events:
+            etype, b = ev["type"], ev["body"]
+            if etype == "input" and b.get("dedupe") == "new" and b.get("kind") in USER_KINDS:
+                out.append({"role": "user", "content": b.get("text", "")})
+            elif etype == "settle" and b.get("answer"):
+                out.append({"role": "assistant", "content": b["answer"]})
+    if limit is not None:
+        out = out[-limit:] if limit > 0 else []
+    return out

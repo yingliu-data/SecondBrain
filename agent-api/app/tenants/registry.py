@@ -18,10 +18,12 @@ class TenantRegistry:
     exists (unrestricted local skills, global prompt), so existing clients
     keep working even with no tenants file at all. The guest avatar profile
     (`guest`, auth origin, app/auth/guest.py) is synthesized too unless the
-    file has an `auth: "origin"` entry named guest; it is reachable by name
-    (routes/guest.py, the Temporal activities), never by an API key.
-    The top-level `mcp_servers` map is the gateway's and is ignored here.
-    Config is read once at startup; restart to apply changes.
+    file has an `auth: "origin"` entry named guest; it is a tenant like the
+    others (by name: routes/guest.py, the Temporal activities), never matched
+    by an API key. `auth: "origin"` is for the guest only (no other route
+    serves origin tenants). The top-level `mcp_servers` map is the
+    gateway's and is ignored here. Config is read once at startup; restart
+    to apply changes.
     """
 
     def __init__(self, path: str | Path, default_api_key: str):
@@ -32,12 +34,9 @@ class TenantRegistry:
             self._tenants.append(Tenant(
                 name="default", api_key=default_api_key, is_default=True,
             ))
-        guest = next((t for t in self._tenants
-                      if t.name == GUEST_TENANT and t.auth == "origin"), None)
-        if guest is None:
+        if self.get_by_name(GUEST_TENANT) is None:
             from app.auth.guest import guest_profile
-            guest = guest_profile()
-        self._guest = guest
+            self._tenants.append(guest_profile())
         logger.info(f"Tenants loaded: {[t.name for t in self._tenants]}")
 
     def _load(self, path: Path):
@@ -49,6 +48,9 @@ class TenantRegistry:
         names, keys = set(), set()
         for entry in data.get("tenants", []):
             tenant = Tenant(**entry)
+            if (tenant.auth == "origin") != (tenant.name == GUEST_TENANT):
+                raise ValueError(f"tenant {tenant.name!r}: auth: origin is for the "
+                                 f"{GUEST_TENANT!r} tenant only (and it must use it)")
             if tenant.name in names:
                 raise ValueError(f"Duplicate tenant name: {tenant.name}")
             if tenant.auth == "key":
@@ -72,14 +74,11 @@ class TenantRegistry:
         return list(self._tenants)
 
     def get_by_name(self, name: str) -> Tenant | None:
-        found = next((t for t in self._tenants if t.name == name), None)
-        if found is None and name == self._guest.name:
-            return self._guest
-        return found
+        return next((t for t in self._tenants if t.name == name), None)
 
     def guest(self) -> Tenant:
         """The guest avatar profile (auth origin)."""
-        return self._guest
+        return self.get_by_name(GUEST_TENANT)
 
     def tenants_doc(self) -> dict:
         """{"tenants": [...]} in the shape flows.schedules.ensure_schedules
@@ -87,13 +86,8 @@ class TenantRegistry:
         return {"tenants": [t.workflow_entry() for t in self._tenants]}
 
     def all_origins(self) -> list[str]:
-        """Every key tenant's registered origins (CORS; the guest profile's
-        origins are added by main.py)."""
-        origins = []
-        for t in self._tenants:
-            if t.auth == "key":
-                origins.extend(t.origins)
-        return sorted(set(origins))
+        """Every tenant's registered origins, the guest's included (CORS)."""
+        return sorted({o for t in self._tenants for o in t.origins})
 
 
 def create_tenant_registry() -> TenantRegistry:

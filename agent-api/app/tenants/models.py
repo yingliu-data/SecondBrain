@@ -7,6 +7,13 @@ from protocol.allowlist import GUEST_BUILTINS
 
 logger = logging.getLogger("tenants")
 
+# tenants.json keys agent-api no longer reads -> why (Tenant._drop_retired)
+RETIRED = {
+    "engine": "every tenant runs the harness engine",
+    "mcp_servers": "the mcp-gateway's gateway.json owns MCP access",
+    "promoted": "the mcp-gateway's gateway.json owns MCP access",
+}
+
 
 class Tenant(BaseModel):
     """One entry: an API key bound to origins, a prompt, and a toolset.
@@ -17,14 +24,14 @@ class Tenant(BaseModel):
     tenant name, so single-tenant users need not set it.
 
     `auth`: "key" (Bearer + HMAC with `api_key`, app/auth/middleware.py) or
-    "origin" (no key; the browser Origin must be one of `origins` — the
+    "origin" (no key; the browser Origin must be one of `origins` — only the
     guest avatar page, routes/guest.py). An origin tenant is never matched
     by an API key.
 
-    Every tenant runs the harness engine. An `engine` key is accepted
-    and ignored with a warning; `mcp_servers` is accepted and ignored too
+    Retired keys are accepted, dropped and logged (RETIRED): `engine`
+    (every tenant runs the harness engine), `mcp_servers` and `promoted`
     (the mcp-gateway's gateway.json owns MCP access), except that a tenant
-    listing MCP servers without `local_skills` still gets no local skills.
+    listing MCP servers without `local_skills` gets `local_skills: []`.
     """
     name: str
     user: str = ""
@@ -33,8 +40,6 @@ class Tenant(BaseModel):
     origins: list[str] = []
     system_prompt: str | None = None      # None -> global SYSTEM_PROMPT
     local_skills: list[str] | None = None  # None -> all local skills
-    mcp_servers: list[str] = []            # ignored by agent-api (the gateway's)
-    promoted: list[str] = []               # gateway-only (migrate_config): first-class MCP tools
     max_tools: int | None = None           # None -> config.MAX_TOOLS
     max_tokens: int | None = None          # None -> LLM default
     exclude_builtins: list[str] = []       # guest built-ins this tenant's sessions do not get
@@ -57,12 +62,16 @@ class Tenant(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _ignore_engine(cls, data):
-        if isinstance(data, dict) and "engine" in data:
-            data = dict(data)
-            engine = data.pop("engine")
-            logger.warning("tenant %s: `engine: %s` ignored (every tenant runs the harness "
-                           "engine)", data.get("name"), engine)
+    def _drop_retired(cls, data):
+        if not isinstance(data, dict) or not RETIRED.keys() & data.keys():
+            return data
+        data = dict(data)
+        if data.get("mcp_servers") and data.get("local_skills") is None:
+            data["local_skills"] = []           # an MCP-only tenant never had local skills
+        for key, why in RETIRED.items():
+            if key in data:
+                logger.warning("tenant %s: `%s: %s` ignored (%s)",
+                               data.get("name"), key, data.pop(key), why)
         return data
 
     @field_validator("exclude_builtins")
@@ -84,13 +93,6 @@ class Tenant(BaseModel):
                 f"tenant name/user must be filesystem-safe [A-Za-z0-9_-]: "
                 f"name={self.name!r} user={self.user!r}")
 
-    def store_key(self, session_id: str) -> str:
-        """Store key for this tenant. The default tenant keeps raw keys so
-        existing conversation rows keep working."""
-        if self.is_default:
-            return session_id
-        return f"{self.name}:{session_id}"
-
     def workflow_entry(self) -> dict:
         """The tenants.json view flows reads (SessionConfig.from_tenant,
         schedules): no key, no prompt, unset knobs left out."""
@@ -101,6 +103,4 @@ class Tenant(BaseModel):
     def allowed_skill_names(self) -> set[str] | None:
         """Local skill names this tenant may use; None means unrestricted
         (default tenant). MCP tools are the gateway's policy, not this."""
-        if self.local_skills is None:
-            return set() if self.mcp_servers else None
-        return set(self.local_skills)
+        return None if self.local_skills is None else set(self.local_skills)
