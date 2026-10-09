@@ -16,8 +16,10 @@ guest from that seq.  The workflow never sees the heartbeat details itself:
 they live on the activity task on the server and are handed to the next
 attempt by the server.  The workflow only sees the final ``RunResult``.
 
-Continue-as-new after ``config.max_tasks_per_run`` tasks, carrying the seen
-input ids, the queued-but-unrun tasks and the task in flight (if parked).
+Continue-as-new after ``config.max_tasks_per_run`` tasks or once the history
+passes ``config.max_history_events`` (checked between tasks and while a task is
+parked), carrying the seen input ids, the queued-but-unrun tasks and the task
+in flight if parked, with its answer deadline (a hop does not re-arm the wait).
 """
 
 from __future__ import annotations
@@ -100,6 +102,9 @@ class SessionState:
     in_flight: tuple[TaskSignal, RunResult] | None = None
     """A task that was parked when the previous run ended: it is resumed from
     that ``RunResult`` (``park_vm`` again, then wait for the answer)."""
+    in_flight_deadline: float | None = None
+    """Answer deadline of ``in_flight`` (epoch seconds, workflow time); None
+    re-arms a full ``answer_wait_s`` (a state written before M5)."""
     generation: int = 0
     """Number of continue-as-new hops so far."""
 
@@ -147,6 +152,8 @@ class _Live:
     """The parked question an ``answer`` must name."""
     answer: AnswerSignal | None = None
     abort: AbortSignal | None = None
+    deadline: float | None = None
+    """Epoch seconds (workflow time) when the parked question escalates."""
 
     def take(self, name: str) -> Any:
         """Consume ``answer``/``abort`` once."""
@@ -167,11 +174,15 @@ class SessionWorkflow:
         self._phase = "idle"
         self._current: TaskSignal | None = None
         self._tasks_run = 0
+        self._signals = 0
+        """Signals received by this run (any, ignored ones too): they are what
+        grows the history of a parked run."""
 
     # ---- signals ----------------------------------------------------------
 
     @workflow.signal(name="task")
     def task(self, sig: TaskSignal) -> None:
+        self._signals += 1
         if sig.input_id in self._seen:
             workflow.logger.info("duplicate task ignored: %s", sig.input_id)
             return
@@ -180,13 +191,17 @@ class SessionWorkflow:
 
     @workflow.signal(name="answer")
     def answer(self, sig: AnswerSignal) -> None:
-        if self._live is None or sig.question_id != self._live.question_id:
-            workflow.logger.info("answer for unknown question ignored: %s", sig.question_id)
+        self._signals += 1
+        parked = self._live.question_id if self._live else None
+        if parked is None or sig.question_id != parked:
+            workflow.logger.info("answer for question %r ignored (parked on %r)",
+                                 sig.question_id, parked)
             return
         self._live.answer = sig
 
     @workflow.signal(name="abort")
     def abort(self, sig: AbortSignal) -> None:
+        self._signals += 1
         if self._live is None:
             workflow.logger.info("abort while idle ignored: %s", sig.reason)
             return
@@ -223,20 +238,22 @@ class SessionWorkflow:
         self._pending = deque([*state.pending, *early])
 
         if state.in_flight is not None:
-            await self._run_one(*state.in_flight)
+            await self._run_one(*state.in_flight, deadline=state.in_flight_deadline)
 
         while True:
-            if self._tasks_run >= self._cfg.max_tasks_per_run:
-                await workflow.wait_condition(workflow.all_handlers_finished)
-                workflow.continue_as_new(self._carry())
+            if self._tasks_run >= self._cfg.max_tasks_per_run or (
+                    self._tasks_run > 0 and self._history_full()):
+                await self._continue_as_new()
             await workflow.wait_condition(lambda: bool(self._pending))
             await self._run_one(self._pending.popleft())
 
     # ---- one task ---------------------------------------------------------
 
-    async def _run_one(self, task: TaskSignal, carried: RunResult | None = None) -> None:
+    async def _run_one(self, task: TaskSignal, carried: RunResult | None = None,
+                       deadline: float | None = None) -> None:
         """Run one task start to finish; ``carried`` is the parked result of a
-        task handed over by continue-as-new, which skips the first run."""
+        task handed over by continue-as-new, which skips the first run, and
+        ``deadline`` its carried answer deadline."""
         self._current = task
         live = self._live = _Live()
         try:
@@ -247,6 +264,9 @@ class SessionWorkflow:
                     # The answer may arrive while the VM is still being parked:
                     # the signal handler must already know the question.
                     live.question_id = qid
+                    live.deadline = deadline if deadline is not None else (
+                        workflow.now().timestamp() + self._cfg.answer_wait_s)
+                    deadline = None  # a later question in this task gets a full wait
                     self._phase = "parked"
                     # Idempotent: re-called for a carried parked task.
                     await self._activity("park_vm", ParkVM(
@@ -318,16 +338,30 @@ class SessionWorkflow:
             return RunResult(outcome=outcome, question_id=question_id)
 
     async def _wait_answer_and_resume(self, task: TaskSignal, question_id: str) -> RunResult:
-        """Parked: wait for ``answer`` or the ``answer_wait_s`` timer."""
+        """Parked: wait for ``answer``, ``abort`` or the deadline timer.
+
+        A run whose history passes ``max_history_events`` while parked
+        continues-as-new from here, carrying the task and its deadline.  It
+        only does so after this run made progress or received a signal, so a
+        threshold below a fresh run's size cannot loop.
+        """
         live = self._live
-        assert live is not None
-        try:
-            await workflow.wait_condition(
-                lambda: live.answer is not None or live.abort is not None,
-                timeout=timedelta(seconds=self._cfg.answer_wait_s),
-            )
-        except asyncio.TimeoutError:
+        assert live is not None and live.deadline is not None
+
+        def _woken() -> bool:
+            return (live.answer is not None or live.abort is not None
+                    or ((self._tasks_run > 0 or self._signals > 0) and self._history_full()))
+
+        remaining = live.deadline - workflow.now().timestamp()
+        if remaining <= 0 and not _woken():
             return RunResult(outcome="escalated", question_id=question_id)
+        if remaining > 0:
+            try:
+                await workflow.wait_condition(_woken, timeout=timedelta(seconds=remaining))
+            except asyncio.TimeoutError:
+                return RunResult(outcome="escalated", question_id=question_id)
+        if live.answer is None and live.abort is None:
+            await self._continue_as_new()
         ans: AnswerSignal | None = live.take("answer")
         if ans is None:
             live.take("abort")
@@ -351,6 +385,17 @@ class SessionWorkflow:
         return await workflow.execute_activity(
             name, payload, **_activity_kwargs(self._cfg.activities[name]))
 
+    def _history_full(self) -> bool:
+        return workflow.info().get_current_history_length() >= self._cfg.max_history_events
+
+    async def _continue_as_new(self) -> None:
+        """Hop to a new run (raises ``ContinueAsNewError``; never returns)."""
+        await workflow.wait_condition(workflow.all_handlers_finished)
+        workflow.logger.info("continue-as-new: %d tasks, %d history events, %s",
+                             self._tasks_run, workflow.info().get_current_history_length(),
+                             self._phase)
+        workflow.continue_as_new(self._carry())
+
     def _remember(self, input_id: str) -> None:
         self._seen[input_id] = None
         if len(self._seen) > SEEN_LIMIT:
@@ -359,14 +404,17 @@ class SessionWorkflow:
     def _carry(self) -> SessionState:
         assert self._state is not None
         in_flight = None
+        deadline = None
         if self._phase == "parked":
             assert self._current is not None and self._live is not None
             in_flight = (self._current, RunResult(outcome="parked", question_id=self._live.question_id))
+            deadline = self._live.deadline
         return replace(
             self._state,
             seen=list(self._seen),
             pending=list(self._pending),
             in_flight=in_flight,
+            in_flight_deadline=deadline,
             generation=self._state.generation + 1,
         )
 

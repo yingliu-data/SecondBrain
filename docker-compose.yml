@@ -62,6 +62,13 @@ services:
       - RATE_LIMIT_PER_MINUTE=30
       - MCP_GATEWAY_URL=http://mcp-gateway:8090
       - INTERNAL_TOKEN=${INTERNAL_TOKEN}          # shared bearer with mcp-gateway (both directions)
+      # M5: harness tenants run through the Temporal session workflow (and the
+      # worker runs in this process); unset TEMPORAL_ADDRESS -> direct path.
+      - TEMPORAL_ADDRESS=temporal:7233
+      - TEMPORAL_NAMESPACE=secondbrain
+    depends_on:
+      temporal:
+        condition: service_started               # not healthy: the direct path works without it
     volumes:
       - ./agent-api/data:/root/agent-api/data   # Persistent data (logs, db, tenants.json)
       - /var/run/docker.sock:/var/run/docker.sock  # Auto-start local LLM on fallback
@@ -119,6 +126,40 @@ services:
       retries: 3
       start_period: 10s
 
+  # -- Temporal (harness M5: session workflows, timers, schedules) ----------
+  # Dev server with a SQLite file on the bind mount and the UI bundled
+  # (harness/docs/FLOWS.md). gRPC 7233 is reachable only on llm_internal
+  # (agent-api: temporal:7233), never published; the UI is on 127.0.0.1:8233
+  # (ssh -L 8233:localhost:8233). The image runs as uid 1000 ("temporal"):
+  # first time, `mkdir -p agent-api/data/temporal && sudo chown 1000:1000 agent-api/data/temporal`.
+  # Retention 30 days: `docker compose exec temporal temporal operator namespace
+  # update --namespace secondbrain --retention 720h` once after the first start.
+  temporal:
+    image: temporalio/temporal:1.9.1            # CLI 1.9.1 = Server 1.32.0, UI 2.54.1 (spikes/temporal.md)
+    container_name: secondbrain-temporal
+    restart: unless-stopped
+    command:
+      - server
+      - start-dev
+      - --ip=0.0.0.0
+      - --db-filename=/data/temporal.db
+      - --namespace=secondbrain
+      - --ui-port=8233
+      - --log-level=warn
+    volumes:
+      - ./agent-api/data/temporal:/data         # temporal.db (workflows, histories, schedules)
+    ports:
+      - "127.0.0.1:8233:8233"                   # UI only, localhost only
+    networks:
+      - llm_internal                            # agent-api <-> temporal:7233 (internal, no egress)
+      - temporal_ui                             # only so the UI port can be published
+    healthcheck:
+      test: ["CMD", "temporal", "operator", "cluster", "health", "--address", "localhost:7233"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
   # -- Cloudflare Tunnel ---------------------------------------------------
   cloudflared:
     image: cloudflare/cloudflared:latest
@@ -157,5 +198,7 @@ networks:
     internal: true    # No internet access for LLM
   tunnel_network:
     driver: bridge
+  temporal_ui:
+    driver: bridge    # temporal only: a container on internal networks alone cannot publish a port
   agent-net:
     external: true    # Created once on the VM (docker network create agent-net); wcc-mcp joins it too

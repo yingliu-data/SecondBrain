@@ -8,14 +8,16 @@ dev server, and skips if that cannot be launched.
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import timedelta
+from pathlib import Path
 
 import pytest
 from temporalio.testing import WorkflowEnvironment
 
-from flows.activities import SessionRef
-from flows.schedules import ensure_schedules, entries_from_tenants, schedule_id
+from flows.activities import SessionConfig, SessionRef
+from flows.schedules import DEFAULT_SESSION, ensure_schedules, entries_from_tenants, schedule_id
 
 
 async def test_entries_from_tenants():
@@ -32,6 +34,42 @@ async def test_entries_from_tenants():
     assert entries[0].config.answer_wait_s == 60  # the tenant's config rides along
     assert entries[1].tz == "UTC"
     assert schedule_id("t", "s", 3) == "t/s/3"
+
+
+async def test_entries_defaults_and_skips(caplog):
+    doc = {"_comment": "ignored", "tenants": [
+        {"name": "default", "answer_wait_s": 86400, "wall_clock_s": 900, "schedules": [
+            {"cron": "0 7 * * *", "prompt": "Morning brief"},           # session defaults to daily
+            {"cron": "0 8 * * *"},                                       # no prompt: skipped
+            {"cron": "0 9 * * *", "prompt": "Nine", "session": "work", "tz": None},
+        ]},
+        {"name": "old", "engine": "legacy", "schedules": [{"cron": "0 7 * * *", "prompt": "x"}]},
+        {"name": "bad", "answer_wait_s": -1, "schedules": [{"cron": "0 7 * * *", "prompt": "x"}]},
+        {"name": "none", "schedules": None},
+    ]}
+    entries = entries_from_tenants(doc)
+    # the index is the list position: a skipped entry does not renumber the next one
+    assert [e.schedule_id for e in entries] == ["default/daily/0", "default/work/2"]
+    e0 = entries[0]
+    assert (e0.user, e0.session, e0.tz, e0.prompt) == ("default", DEFAULT_SESSION, "UTC", "Morning brief")
+    assert (e0.config.answer_wait_s, e0.config.wall_clock_s) == (86400, 900)
+    assert entries[1].tz == "UTC"
+    logged = caplog.text
+    assert "needs cron and prompt" in logged and "engine legacy" in logged
+    assert "bad session config" in logged
+
+
+def test_tenants_example_schedules():
+    """The shipped ``tenants.json.example`` parses into the morning brief."""
+    path = Path(__file__).resolve().parents[3] / "agent-api" / "tenants.json.example"
+    if not path.exists():
+        pytest.skip(f"{path} not in this checkout")
+    doc = json.loads(path.read_text())
+    entries = entries_from_tenants(doc)
+    assert [(e.schedule_id, e.cron, e.prompt) for e in entries] == [
+        ("default/daily/0", "0 7 * * *", "Morning brief")]
+    by_name = {t["name"]: SessionConfig.from_tenant(t) for t in doc["tenants"]}
+    assert by_name["default"].answer_wait_s == 86400
 
 
 async def test_ensure_schedules_create_update_trigger_delete(tenv, make_session):

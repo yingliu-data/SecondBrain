@@ -140,14 +140,29 @@ class Session:
             # terminate racing an in-flight activity) stops the Java
             # time-skipping test server from skipping time for every later
             # test (env.sleep fails with "Timeout expired" after 30 s).
-            await wait_until(lambda: self._not_running(), 10, "task to settle")
+            await wait_until(lambda: self._settled(), 10, "task to settle")
             await session_handle(self.client, self.ref).terminate("test done")
         except Exception as e:  # noqa: BLE001 - never started or already closed
             print(f"teardown: {self.ref.session_id}: {e!r}")
         await self.worker.__aexit__(None, None, None)
 
-    async def _not_running(self) -> bool:
-        return (await self.status()).state != "running"
+    async def _settled(self) -> bool:
+        """No pending activity and no workflow task in flight, on two polls
+        0.25 s apart: an idle run may be mid continue-as-new (history
+        trigger), and a terminate racing that hop wedges the time-skipping
+        server like a pending activity does.  ``describe`` only, no query: a
+        query can time out on the test server right after a hop."""
+        for i in range(2):
+            if i:
+                await asyncio.sleep(0.25)
+            raw = (await session_handle(self.client, self.ref).describe()).raw_description
+            if raw.pending_activities or raw.HasField("pending_workflow_task"):
+                return False
+        return True
+
+    async def run_id(self) -> str:
+        """Current run id (``describe``; follows continue-as-new)."""
+        return (await session_handle(self.client, self.ref).describe()).run_id
 
 
 @pytest_asyncio.fixture
