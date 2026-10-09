@@ -1,11 +1,10 @@
 """M4 worker side: hello tool entries from the gateway (up, down, cached for
-resume), legacy mcp_* skills kept out of host entries, the :5011 forwarder's
+resume), the :5011 forwarder's
 lifecycle, and `lost` discarding a held call."""
 import asyncio
 
 import pytest
 
-from app.gateway.upstream_skill import GatewayUpstreamSkill
 from app.host.endpoints import socket_path
 from app.host.sides import DeviceCalls
 from app.host.worker import Worker
@@ -43,14 +42,10 @@ class WebSearch(BaseSkill):
 
 
 def SkillRegistry():
-    """The real registry (no disk discovery) with a host skill and a legacy
-    MCP skill registered like main.py does."""
+    """The real registry (no disk discovery) with a host skill."""
     reg = RealRegistry.__new__(RealRegistry)
     reg._skills, reg._enabled = {}, {}
     reg.register(WebSearch())
-    legacy = GatewayUpstreamSkill("wcc-events", base_url="http://127.0.0.1:9")
-    legacy._cached_defs = [fn("wcc-events__draft_event")]
-    reg.register(legacy)
     return reg
 
 
@@ -63,7 +58,7 @@ def gateway():
 
 
 @pytest.mark.asyncio
-async def test_hello_appends_gateway_entries_and_drops_legacy_mcp_skills(session, gateway):
+async def test_hello_appends_gateway_entries(session, gateway):
     sandbox = FakeSandbox([{"text": "ok"}])
     w = Worker(session, FakeTenant(), SkillRegistry(), sandbox, device_calls=DeviceCalls(),
                **worker_kwargs(gateway_url=gateway.url))

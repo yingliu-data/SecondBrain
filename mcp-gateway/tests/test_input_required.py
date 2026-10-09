@@ -106,10 +106,3 @@ async def test_held_call_does_not_count_toward_concurrency(upstream, harness):
             "request_state": req["request_state"], "action": "accept", "content": {"approved": True}}})
         assert final["isError"] is False
         assert gw.gateway.limiter.running(key) == 0
-
-
-async def test_legacy_call_declines_elicitation(upstream, harness):
-    async with harness(make_config(upstream.url)) as gw:
-        r = await gw.internal("POST", "/internal/call", json={"name": "fake__approve", "arguments": {"item": "y"}})
-        assert r.status_code == 200
-        assert r.json() == {"content": "y: decline", "is_error": False}

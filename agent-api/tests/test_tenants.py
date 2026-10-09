@@ -25,7 +25,7 @@ def test_named_tenant_scoping(tenant_registry):
     wcc = tenant_registry.get_by_api_key("wcc-key")
     assert wcc.name == "wcc-events"
     assert wcc.store_key("abc") == "wcc-events:abc"
-    assert wcc.allowed_skill_names() == {"web_search", "mcp_wcc"}
+    assert wcc.allowed_skill_names() == {"web_search"}     # mcp_servers: the gateway's
     assert wcc.max_tools == 2
 
 
@@ -71,13 +71,52 @@ def test_duplicate_key_rejected(tmp_path):
         TenantRegistry(_write(tmp_path, doc), "k")
 
 
-def test_unknown_mcp_server_rejected(tmp_path):
-    doc = {"tenants": [{"name": "a", "api_key": "x", "mcp_servers": ["ghost"]}]}
-    with pytest.raises(ValueError, match="unknown MCP server"):
-        TenantRegistry(_write(tmp_path, doc), "k")
+def test_mcp_servers_accepted_and_ignored(tmp_path):
+    """M6: agent-api no longer validates MCP server names (gateway.json does)."""
+    doc = {"mcp_servers": {"bad__name": {"url": "http://x/mcp"}},
+           "tenants": [{"name": "a", "api_key": "x", "mcp_servers": ["ghost"],
+                        "local_skills": []}]}
+    reg = TenantRegistry(_write(tmp_path, doc), "k")
+    assert reg.get_by_api_key("x").allowed_skill_names() == set()
 
 
-def test_server_name_with_separator_rejected(tmp_path):
-    doc = {"mcp_servers": {"bad__name": {"url": "http://x/mcp"}}, "tenants": []}
-    with pytest.raises(Exception):
-        TenantRegistry(_write(tmp_path, doc), "k")
+def test_engine_key_accepted_and_ignored_with_a_warning(tmp_path, caplog):
+    doc = {"tenants": [{"name": "a", "api_key": "x", "engine": "legacy"},
+                       {"name": "b", "api_key": "y", "engine": "bogus"}]}
+    with caplog.at_level("WARNING", logger="tenants"):
+        reg = TenantRegistry(_write(tmp_path, doc), "k")
+    a = reg.get_by_api_key("x")
+    assert not hasattr(a, "engine") and "engine" not in a.workflow_entry()
+    assert reg.get_by_api_key("y") is not None
+    assert sum("ignored" in r.getMessage() for r in caplog.records) == 2
+
+
+def test_guest_profile_is_synthesized_and_never_matched_by_key(tmp_path):
+    from protocol.allowlist import GUEST_BUILTINS
+    from app.auth.guest import ALLOWED_ORIGINS
+    reg = TenantRegistry(tmp_path / "none.json", "k")
+    g = reg.guest()
+    assert reg.get_by_name("guest") is g and g not in reg.all_tenants()
+    assert g.auth == "origin" and g.api_key == ""
+    assert g.allowed_skill_names() == {"avatar_control"}
+    assert set(g.exclude_builtins) == set(GUEST_BUILTINS)
+    assert set(g.origins) == ALLOWED_ORIGINS and g.max_tools == 2 and g.answer_wait_s == 0
+    assert reg.get_by_api_key("") is None
+    assert "{current_time}" in g.system_prompt
+    # not in the key tenants' CORS origins (main.py adds the guest's own)
+    assert reg.all_origins() == []
+
+
+def test_guest_profile_from_tenants_json(tmp_path):
+    doc = {"tenants": [{"name": "guest", "auth": "origin", "origins": ["https://x.example"],
+                        "local_skills": ["avatar_control"], "max_tools": 4}]}
+    reg = TenantRegistry(_write(tmp_path, doc), "k")
+    assert reg.guest().origins == ["https://x.example"] and reg.guest().max_tools == 4
+
+
+def test_key_tenant_needs_a_key_and_builtins_are_checked():
+    from app.tenants import Tenant
+    with pytest.raises(ValueError, match="api_key is required"):
+        Tenant(name="a")
+    with pytest.raises(ValueError, match="not guest built-ins"):
+        Tenant(name="a", api_key="k", exclude_builtins=["nope"])

@@ -415,7 +415,6 @@ async def test_second_death_in_a_task_fails_it(session):
     assert result["outcome"] == "failed" and "died again" in result["answer"]
     assert any(s.startswith("event: error") for s in sse) and sse[-1] == DONE
     assert len(sandbox.guests) == 2                          # max_resumes = 1
-    assert session.read_history()[-1]["role"] == "assistant"
     # the next task starts fresh (a new run); its resume budget is its own
     sandbox.die_runs = 0
     sandbox.script = [{"text": "fresh"}]

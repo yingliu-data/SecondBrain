@@ -2,7 +2,6 @@ import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.skills.registry import SkillRegistry
-from app.agent.llm import LLMProvider
 from app.auth import middleware
 from app.tenants import create_tenant_registry
 from app.routes import chat, tool_result, skills, health, sessions, guest
@@ -26,48 +25,29 @@ app = FastAPI()
 tenant_registry = create_tenant_registry()
 middleware.set_tenant_registry(tenant_registry)
 
-# CORS — guest avatar origins plus every tenant's registered origins.
-# The Origin header never grants access by itself: tenant identity always
-# comes from the per-tenant API key (Bearer + HMAC).
-GUEST_ORIGINS = [
-    "https://robot.yingliu.site",
-    "http://localhost:5173",
-    "http://localhost:4173",
-]
+# CORS — the guest avatar profile's origins plus every tenant's registered
+# origins. Outside the guest route (auth: origin, avatar_control only) the
+# Origin header never grants access: tenant identity always comes from the
+# per-tenant API key (Bearer + HMAC).
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=sorted(set(GUEST_ORIGINS) | set(tenant_registry.all_origins())),
+    allow_origins=sorted(set(tenant_registry.guest().origins)
+                         | set(tenant_registry.all_origins())),
     allow_methods=["POST", "GET", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization", "X-Timestamp", "X-Signature"],
 )
 
-# Initialize core components
+# Host skills (the harness's host side). MCP tools are the mcp-gateway's:
+# the guest calls it over :5011 (tenants.json `mcp_servers` is ignored here).
 registry = SkillRegistry()
-llm = LLMProvider()
-
-# Give skills access to LLM (for plan_movement decomposition)
-registry.set_llm_provider(llm)
-
-# Legacy engine: one skill per MCP upstream named in tenants.json
-# `mcp_servers` (names only; URLs and tokens live in the gateway's
-# gateway.json). Tool lists come from the mcp-gateway in the background
-# after startup — a down gateway never blocks boot (M4-CONTRACTS §8).
-from app.gateway.upstream_skill import GatewayUpstreamSkill
-
-mcp_upstreams: list[GatewayUpstreamSkill] = []
-for _name, _cfg in tenant_registry.mcp_server_configs().items():
-    _skill = GatewayUpstreamSkill(_name, tool_defs_ttl_s=_cfg.tool_defs_ttl_s)
-    registry.register(_skill)
-    mcp_upstreams.append(_skill)
 
 # Inject dependencies into routes
-chat.set_dependencies(registry, llm)
+chat.set_registry(registry)
 # harness Workers: the tenant's answer_wait_s (a question park, either path)
 from app.host.activities import worker_config
 chat.workers.config_for = worker_config
-guest.set_dependencies(registry, llm)
+guest.set_tenant(tenant_registry.guest())
 skills.set_registry(registry)
-health.set_llm(llm)
 sessions.set_sessions(chat.sessions)
 
 # Mount routers (all under /api/v1/ for versioning, except /health)
@@ -88,13 +68,6 @@ async def _start_guest_cleanup():
 
 
 @app.on_event("startup")
-async def _start_mcp_refresh():
-    import asyncio
-    for skill in mcp_upstreams:
-        asyncio.create_task(skill.start_background_refresh())
-
-
-@app.on_event("startup")
 async def _start_temporal():
     # M5 (harness/docs/M5-CONTRACTS.md): TEMPORAL_ADDRESS set -> the session
     # workflow's worker runs on this loop with the real activities, and the
@@ -102,9 +75,6 @@ async def _start_temporal():
     # for Temporal, the direct path serves /chat until (unless) it is up.
     from app.host import temporal
     from app.host.activities import HostActivities
-    from app.session.dir_store import DirStore
-    if not isinstance(chat.sessions, DirStore):
-        return
     acts = HostActivities(chat.workers, tenant_registry, registry)
     temporal.start_in_background(acts.activities(), tenant_registry.tenants_doc())
 
@@ -117,8 +87,7 @@ async def _stop_temporal():
 
 @app.on_event("shutdown")
 async def _stop_harness_workers():
-    # Harness engine (AGENT_ENGINE=harness or a tenant's `engine`): stop every
-    # session's sandbox, LLM proxy and Unix-socket listeners.
+    # Stop every session's sandbox, LLM proxy and Unix-socket listeners.
     await chat.workers.shutdown()
     from app.gateway.client import aclose_clients
     await aclose_clients()

@@ -50,16 +50,10 @@ class SkillRegistry:
                 logger.error(f"Failed to load skill '{modname}': {e}")
         self._save_state()
 
-    def set_llm_provider(self, llm):
-        """Pass LLM provider to skills that need secondary LLM calls."""
-        for skill in self._skills.values():
-            skill.set_llm(llm)
-
-    def _visible(self, name: str, allowed: set[str] | None, engine: str | None = None) -> bool:
-        """A skill is visible if enabled, within the caller's allowed set
-        (None = unrestricted) and offered to the caller's engine (None = any)."""
-        return (self._enabled.get(name, True) and (allowed is None or name in allowed)
-                and (engine is None or engine in self._skills[name].engines))
+    def _visible(self, name: str, allowed: set[str] | None) -> bool:
+        """A skill is visible if enabled and within the caller's allowed set
+        (None = unrestricted)."""
+        return self._enabled.get(name, True) and (allowed is None or name in allowed)
 
     # ── Public API ────────────────────────────────────────────
 
@@ -101,70 +95,38 @@ class SkillRegistry:
         logger.info(f"Skill '{skill_name}' {'enabled' if enabled else 'disabled'}")
         return True
 
-    def get_active_tool_definitions(self, allowed: set[str] | None = None,
-                                    engine: str | None = None) -> list[dict]:
-        """Return tool definitions for ALL enabled skills (fallback path).
-        Prefer get_tools_for_query() to filter by relevance."""
+    def get_active_tool_definitions(self, allowed: set[str] | None = None) -> list[dict]:
+        """Tool definitions of every visible skill (the harness offers them all:
+        the keyword prefilter retired with the legacy loop, D16)."""
         defs = []
         for name, skill in self._skills.items():
-            if self._visible(name, allowed, engine):
+            if self._visible(name, allowed):
                 defs.extend(skill.get_tool_definitions())
         return defs
 
-    def get_tools_for_query(self, query: str, allowed: set[str] | None = None) -> list[dict]:
-        """Return tool definitions relevant to a user query.
-
-        Stage 1 (keyword pre-filter):
-        - Check each skill's keywords against the lowercased query
-        - Always include skills with always_available=True
-        - If keyword matches found → return matched + always-available tools
-        - If no matches → fall back to all enabled tools
-        """
-        query_lower = query.lower()
-        matched = []
-        always_on = []
-
-        for name, skill in self._skills.items():
-            if not self._visible(name, allowed):
-                continue
-            if skill.always_available:
-                always_on.extend(skill.get_tool_definitions())
-            elif any(kw in query_lower for kw in skill.keywords):
-                matched.extend(skill.get_tool_definitions())
-
-        if matched:
-            logger.info(f"Tool filter: {len(matched)} matched + {len(always_on)} always-on")
-            return matched + always_on
-
-        # No keyword hits — fall back to all visible tools
-        return self.get_active_tool_definitions(allowed)
-
-    def get_server_tool_names(self, allowed: set[str] | None = None,
-                              engine: str | None = None) -> set[str]:
+    def get_server_tool_names(self, allowed: set[str] | None = None) -> set[str]:
         """Names of all tools that execute on the server."""
         names = set()
         for name, skill in self._skills.items():
-            if self._visible(name, allowed, engine) and skill.execution_side == "server":
+            if self._visible(name, allowed) and skill.execution_side == "server":
                 for t in skill.get_tool_definitions():
                     names.add(t["function"]["name"])
         return names
 
-    def get_device_tool_names(self, allowed: set[str] | None = None,
-                              engine: str | None = None) -> set[str]:
+    def get_device_tool_names(self, allowed: set[str] | None = None) -> set[str]:
         """Names of all tools that execute on the iPhone."""
         names = set()
         for name, skill in self._skills.items():
-            if self._visible(name, allowed, engine) and skill.execution_side == "device":
+            if self._visible(name, allowed) and skill.execution_side == "device":
                 for t in skill.get_tool_definitions():
                     names.add(t["function"]["name"])
         return names
 
     async def execute_server_tool(self, tool_name: str, arguments: dict,
-                                  allowed: set[str] | None = None,
-                                  engine: str | None = None) -> str:
+                                  allowed: set[str] | None = None) -> str:
         """Route a server-side tool call to the right skill."""
         for skill in self._skills.values():
-            if not self._visible(skill.name, allowed, engine):
+            if not self._visible(skill.name, allowed):
                 continue
             for t in skill.get_tool_definitions():
                 if t["function"]["name"] == tool_name:

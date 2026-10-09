@@ -29,11 +29,7 @@ INTERNAL_TOKEN = os.environ.get("INTERNAL_TOKEN", "")
 # Worker -> GET /internal/tools at session start: short, a down gateway must
 # not hold the hello up (the session starts without MCP tools).
 MCP_GATEWAY_TOOLS_TIMEOUT_S = float(os.environ.get("MCP_GATEWAY_TOOLS_TIMEOUT_S", 5))
-# Legacy skill -> GET /internal/upstreams/{name}/tools (background refresh;
-# the gateway lists the upstream live, so slower than the pinned list above).
-MCP_GATEWAY_UPSTREAM_TOOLS_TIMEOUT_S = float(
-    os.environ.get("MCP_GATEWAY_UPSTREAM_TOOLS_TIMEOUT_S", 30))
-# Forwarder / legacy call read timeout: above the longest upstream timeout_s
+# Forwarder read timeout: above the longest upstream timeout_s
 # (calls run up to 45 min).
 MCP_GATEWAY_CALL_TIMEOUT_S = float(os.environ.get("MCP_GATEWAY_CALL_TIMEOUT_S", 3600))
 MAX_INPUT = int(os.environ.get("MAX_INPUT_LENGTH", 4096))
@@ -41,7 +37,9 @@ MAX_TOOLS = int(os.environ.get("MAX_TOOL_CALLS_PER_TURN", 10))
 TOOL_TIMEOUT = int(os.environ.get("TOOL_TIMEOUT", 60))        # seconds for device tool response
 
 # ── Session Store (swap backend without touching agent code) ──
-SESSION_BACKEND = os.environ.get("SESSION_BACKEND", "dir")  # "dir" | "sqlite" | "memory"
+# The harness engine runs on "dir" only; anything else is a startup error
+# (routes/chat.py). "sqlite" stays readable for migrate.py.
+SESSION_BACKEND = os.environ.get("SESSION_BACKEND", "dir")
 SESSION_DB_PATH = os.environ.get("SESSION_DB_PATH", "data/conversations.db")
 SESSIONS_ROOT = os.environ.get("SESSIONS_ROOT", "data/sessions")   # dir backend
 USERS_ROOT = os.environ.get("USERS_ROOT", "data/users")            # user-scope memory/profile
@@ -69,11 +67,10 @@ Rules:
 - Current time: {current_time}
 """
 
-# ── Agent engine (PLAN.md D3) ──
-# "legacy": app/agent/loop.py in-process. "harness": the guest harness in a
-# sandbox per session, driven by app/host/. A tenant may override with
-# `engine` in tenants.json.
-AGENT_ENGINE = os.environ.get("AGENT_ENGINE", "legacy")
+# ── Agent engine ──
+# M6: every tenant runs the harness engine (the guest harness in a sandbox per
+# session, driven by app/host/). AGENT_ENGINE and the in-process legacy loop
+# are gone; a tenant's `engine` in tenants.json is ignored with a warning.
 
 # ── Harness host half (app/host/) ──
 # Where harness/guest + harness/protocol live. The guest is run from this

@@ -70,17 +70,3 @@ def test_save_state_excludes_mcp(registry, tmp_path, monkeypatch):
     saved = json.loads((tmp_path / "skills.json").read_text())
     assert "mcp_wcc" not in saved
     assert saved["web_search"] is False
-
-
-def test_engine_filter_hides_legacy_only_skills(registry):
-    from app.gateway.upstream_skill import GatewayUpstreamSkill
-    legacy = GatewayUpstreamSkill("wcc-events")
-    legacy._cached_defs = [{"type": "function", "function": {"name": "wcc-events__x",
-                                                             "description": "", "parameters": {}}}]
-    registry.register(legacy)
-    assert "wcc-events__x" in registry.get_server_tool_names(None)
-    assert "wcc-events__x" in registry.get_server_tool_names(None, engine="legacy")
-    harness = registry.get_server_tool_names(None, engine="harness")
-    assert "wcc-events__x" not in harness and "web_search_tool" in harness
-    assert not any(d["function"]["name"] == "wcc-events__x"
-                   for d in registry.get_active_tool_definitions(None, engine="harness"))

@@ -4,8 +4,6 @@
   auth_headers(token)                       Authorization: Bearer (none when empty)
   bearer_ok(header, token)                  an incoming Authorization matches (empty token = ok)
   fetch_session_tools(...)   GET  /internal/tools                -> hello entries
-  fetch_upstream_tools(...)  GET  /internal/upstreams/{n}/tools  -> OpenAI defs (session-less)
-  call_tool(...)             POST /internal/call                 -> {content, is_error}
   aclose_clients()           close the shared clients (app shutdown)
 
 One httpx.AsyncClient per base URL is shared by every call (per-request
@@ -21,8 +19,7 @@ import httpx
 
 from protocol.mcp import SESSION_HEADER, TENANT_HEADER, USER_HEADER
 
-from app.config import (INTERNAL_TOKEN, MCP_GATEWAY_CALL_TIMEOUT_S, MCP_GATEWAY_TOOLS_TIMEOUT_S,
-                        MCP_GATEWAY_UPSTREAM_TOOLS_TIMEOUT_S, MCP_GATEWAY_URL)
+from app.config import INTERNAL_TOKEN, MCP_GATEWAY_TOOLS_TIMEOUT_S, MCP_GATEWAY_URL
 
 
 class GatewayError(RuntimeError):
@@ -98,24 +95,3 @@ async def fetch_session_tools(user: str, tenant: str, session: str, *,
     data = await _request("GET", path, base_url=base_url, timeout_s=timeout_s,
                           headers={**auth_headers(token), **identity_headers(user, tenant, session)})
     return _tool_list(data, path)
-
-
-async def fetch_upstream_tools(name: str, *, base_url: str = MCP_GATEWAY_URL,
-                               token: str = INTERNAL_TOKEN,
-                               timeout_s: float = MCP_GATEWAY_UPSTREAM_TOOLS_TIMEOUT_S) -> list[dict]:
-    """One upstream's tools as OpenAI function defs (session-less: no identity)."""
-    path = f"/internal/upstreams/{name}/tools"
-    data = await _request("GET", path, base_url=base_url, timeout_s=timeout_s,
-                          headers=auth_headers(token))
-    return _tool_list(data, path)
-
-
-async def call_tool(name: str, arguments: dict, user: str, tenant: str, session: str, *,
-                    base_url: str = MCP_GATEWAY_URL, token: str = INTERNAL_TOKEN,
-                    timeout_s: float = MCP_GATEWAY_CALL_TIMEOUT_S) -> dict:
-    data = await _request("POST", "/internal/call", base_url=base_url, timeout_s=timeout_s,
-                          headers={**auth_headers(token), **identity_headers(user, tenant, session)},
-                          json_body={"name": name, "arguments": arguments})
-    if not isinstance(data, dict) or "content" not in data:
-        raise GatewayError("gateway /internal/call: no content in the answer")
-    return data

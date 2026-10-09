@@ -85,11 +85,6 @@ def error_result(text: str) -> types.CallToolResult:
     return text_result(text, is_error=True)
 
 
-def result_text(result: types.CallToolResult) -> str:
-    texts = [c.text for c in result.content if getattr(c, "text", None)]
-    return "\n".join(texts) if texts else "(no text content returned)"
-
-
 @dataclass
 class _Held:
     """An upstream call parked on an elicitation, waiting for the guest."""
@@ -248,17 +243,9 @@ class Gateway:
             return await self.describe(ident, str(arguments.get("name", "")))
         if name != CALL_TOOL and name not in self.policy.promoted(ident.tenant):
             return error_result(f"unknown tool '{name}' (not a promoted tool; use call_tool)")
-        return await self._call(ident, target, arguments, relay=True)
+        return await self._call(ident, target, arguments)
 
-    async def call_legacy(self, ident: Identity, name: str, arguments: dict) -> types.CallToolResult:
-        """/internal/call: policy applies, no pins, elicitation declined (§3)."""
-        upstream, _ = split_namespaced(name)
-        if not self.policy.allowed(ident.tenant, name):
-            self._error_event(ident, "denied by policy", tool=name, upstream=upstream or None)
-            return error_result(f"tool '{name}' is not allowed for tenant '{ident.tenant}'")
-        return await self._run_upstream(ident, name, arguments, relay=False)
-
-    async def _call(self, ident: Identity, name: str, arguments: dict, *, relay: bool) -> types.CallToolResult:
+    async def _call(self, ident: Identity, name: str, arguments: dict) -> types.CallToolResult:
         upstream, tool = split_namespaced(name)
         if not self.policy.allowed(ident.tenant, name):
             self._error_event(ident, "denied by policy", tool=name, upstream=upstream or None)
@@ -280,13 +267,13 @@ class Gateway:
             sp.quarantined.add(name)
             await self._save(sp)
             return self._quarantine_result(ident, name, upstream)
-        return await self._run_upstream(ident, name, arguments, relay=relay)
+        return await self._run_upstream(ident, name, arguments)
 
     def _quarantine_result(self, ident: Identity, name: str, upstream: str) -> types.CallToolResult:
         self.events.post(ident.event_fields(), "quarantine", tool=name, upstream=upstream)
         return error_result(f"{name}: {MSG_QUARANTINED}")
 
-    async def _run_upstream(self, ident: Identity, name: str, arguments: dict, *, relay: bool) -> types.CallToolResult:
+    async def _run_upstream(self, ident: Identity, name: str, arguments: dict) -> types.CallToolResult:
         upstream_name, tool = split_namespaced(name)
         upstream = self.upstreams[upstream_name]
         limit = self.policy.max_concurrent(ident.tenant)
@@ -300,7 +287,7 @@ class Gateway:
             self.limiter.release(ident.key)
             self._error_event(ident, str(e), tool=name, upstream=upstream_name)
             return error_result(str(e))
-        call = UpstreamCall(upstream, tool, arguments, relay=relay)
+        call = UpstreamCall(upstream, tool, arguments)
         return await self._await_outcome(ident, name, call)
 
     async def _await_outcome(self, ident: Identity, name: str, call: UpstreamCall) -> types.CallToolResult:
@@ -373,12 +360,6 @@ class Gateway:
 
     def _error_event(self, ident: Identity, error: str, **fields) -> None:
         self.events.post(ident.event_fields(), "error", ok=False, error=error, **fields)
-
-    # ── Legacy surface ────────────────────────────────────────
-
-    async def upstream_openai_tools(self, upstream: str) -> list[dict]:
-        tools = await self.upstreams[upstream].tools()
-        return [defn_to_openai(namespaced(upstream, tool), defn, via=upstream) for tool, (defn, _) in tools.items()]
 
     # ── Lifecycle ─────────────────────────────────────────────
 

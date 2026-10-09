@@ -1,6 +1,6 @@
-"""The routes under AGENT_ENGINE=harness / tenant engine: chat streams the
-Worker's sink; tool-result goes to DeviceCalls (409 for unknown ids);
-legacy stays untouched."""
+"""The chat routes on the harness engine (every tenant, M6): chat streams
+the Worker's sink; tool-result goes to DeviceCalls (409 for unknown ids and
+for another tenant's calls)."""
 import hashlib
 import hmac
 import json
@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 
 from app.auth import middleware
 from app.session.dir_store import DirStore
-from app.tenants import Tenant, TenantRegistry
+from app.tenants import TenantRegistry
 from app.host.sides import DEVICE_CALLS
 from app.host.worker import Workers
 from host_fakes import FakeRegistry, FakeSandbox, users_root  # noqa: F401
@@ -31,8 +31,8 @@ def _headers(key, body: dict):
 def client(tmp_path, users_root, monkeypatch):
     from app.routes import chat, tool_result
     doc = {"tenants": [
-        {"name": "harn", "api_key": "harn-key", "engine": "harness"},
-        {"name": "leg", "api_key": "leg-key"},
+        {"name": "harn", "api_key": "harn-key"},
+        {"name": "other", "api_key": "other-key"},
     ]}
     path = tmp_path / "tenants.json"
     path.write_text(json.dumps(doc))
@@ -44,7 +44,7 @@ def client(tmp_path, users_root, monkeypatch):
     workers = Workers(sandbox_factory=lambda: FakeSandbox(script), sessions=store, hello_timeout_s=5,
                       wall_clock_s=15)
     monkeypatch.setattr(chat, "workers", workers)
-    chat.set_dependencies(FakeRegistry(), None)
+    chat.set_registry(FakeRegistry())
     monkeypatch.setattr(chat, "HARNESS_KEEPALIVE_S", 0.2)
     app = FastAPI()
     app.include_router(chat.router)
@@ -55,37 +55,31 @@ def client(tmp_path, users_root, monkeypatch):
         c.portal.call(workers.shutdown)
 
 
-def test_tenant_engine_field():
-    assert Tenant(name="a", api_key="k").engine is None
-    assert Tenant(name="a", api_key="k", engine="harness").engine == "harness"
-    with pytest.raises(ValueError):
-        Tenant(name="a", api_key="k", engine="other")
-
-
-def test_example_default_tenant_runs_on_harness_over_the_env_default(tmp_path, monkeypatch):
-    """M3-CONTRACTS §7: AGENT_ENGINE stays legacy; the default tenant's entry
-    in tenants.json.example says harness, and Tenant.engine wins."""
-    import json as _json
+def test_example_tenants_all_load_without_an_engine(tmp_path):
+    """M6: every tenant runs on harness; tenants.json.example has no
+    `engine` any more and still loads (mcp_servers accepted and ignored)."""
     from pathlib import Path
 
-    import app.routes.chat as chat_mod
-    from app.tenants import TenantRegistry
-
-    assert chat_mod.AGENT_ENGINE == "legacy"
-    doc = _json.loads((Path(__file__).parent.parent / "tenants.json.example").read_text())
+    doc = json.loads((Path(__file__).parent.parent / "tenants.json.example").read_text())
+    assert not any("engine" in t for t in doc["tenants"])
     for i, t in enumerate(doc["tenants"]):
         t["api_key"] = "env-key" if t["name"] == "default" else f"key-{i}"
     p = tmp_path / "tenants.json"
-    p.write_text(_json.dumps(doc))
+    p.write_text(json.dumps(doc))
     reg = TenantRegistry(p, "env-key")
     default = reg.get_by_api_key("env-key")
     assert default.is_default and default.store_key("abc") == "abc"
     assert sum(1 for t in reg.all_tenants() if t.name == "default") == 1
-    assert chat_mod.engine_for(default) == "harness"
     wcc = next(t for t in reg.all_tenants() if t.name == "wcc-event")
-    assert chat_mod.engine_for(wcc) == "legacy"                  # no engine: the env default
-    monkeypatch.setattr(chat_mod, "AGENT_ENGINE", "harness")
-    assert chat_mod.engine_for(Tenant(name="x", api_key="k", engine="legacy")) == "legacy"
+    assert wcc.allowed_skill_names() == {"web_search"}
+
+
+def test_non_dir_session_backend_is_a_startup_error(monkeypatch):
+    from app.routes import chat
+    monkeypatch.setattr(chat, "create_session_store", lambda: {})
+    monkeypatch.setattr(chat, "SESSION_BACKEND", "memory")
+    with pytest.raises(RuntimeError, match="SESSION_BACKEND='memory' is not supported"):
+        chat._harness_store()
 
 
 def test_harness_chat_streams_and_device_result_resolves(client):
@@ -139,8 +133,8 @@ def test_harness_chat_streams_and_device_result_resolves(client):
     assert [b["outcome"] for b in w.sync.settled.values()] == ["done", "done"]
 
 
-def test_legacy_tenant_keeps_legacy_tool_result_semantics(client):
+def test_unknown_tool_result_is_409_for_every_tenant(client):
     c, _ = client
-    raw, h = _headers("leg-key", {"tool_call_id": "nope", "result": "x"})
-    assert c.post("/api/v1/tool-result", content=raw, headers=h).status_code == 404
+    raw, h = _headers("other-key", {"tool_call_id": "nope", "result": "x"})
+    assert c.post("/api/v1/tool-result", content=raw, headers=h).status_code == 409
     assert DEVICE_CALLS.count() == 0

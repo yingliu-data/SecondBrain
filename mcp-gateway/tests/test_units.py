@@ -63,7 +63,7 @@ def test_pin_is_stable_and_conversion_does_not_mutate():
                                    "properties": {"x": {"type": "string"}}},
                       annotations=types.ToolAnnotations(readOnlyHint=True))
     before = pin_of(tool_defn(tool))
-    openai = defn_to_openai("up__t", tool_defn(tool), via="up")
+    openai = defn_to_openai("up__t", tool_defn(tool))
     assert "$schema" not in openai["function"]["parameters"]
     assert "$schema" in tool.inputSchema
     assert pin_of(tool_defn(tool)) == before

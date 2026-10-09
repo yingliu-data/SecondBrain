@@ -5,14 +5,15 @@ endpoints.py   per-session Unix-socket listeners for the vsock ports; Firecracke
 worker.py      act(): start sandbox, accept :5000, hello + task, relay events, sides, settle
 llm_proxy.py   :5010 -> vLLM (LLM_URL); usage; budgets later
 sides.py       host skills via SkillRegistry; device relay via SSE + /tool-result
+sanitize.py    the after_tool rewrite of host/device results
 gateway_forwarder.py  :5011 -> mcp-gateway (POST /mcp only), identity headers, held calls
 uds_http.py    the threaded HTTP server llm_proxy and gateway_forwarder share
 state_sync.py  ack after append; events/ segments in the session dir; projections
 stream.py      events -> SSE (token, tool_call, avatar_command, question, done, seq, error)
 sandbox/       firecracker.py (boot, kill; snapshots in M3), local.py (guest subprocess, tests)
 
-Engine switch: config.AGENT_ENGINE ("legacy" | "harness"), per-tenant `engine`
-in tenants.json (routes/chat.py engine_for).
+Every tenant runs this engine (M6: the in-process legacy loop, AGENT_ENGINE
+and the per-tenant `engine` switch are gone).
 
 Dependencies: agent-api imports the stdlib-only `protocol` package and runs
 the guest from `secondbrain-harness` (pyproject: path ../harness, editable).

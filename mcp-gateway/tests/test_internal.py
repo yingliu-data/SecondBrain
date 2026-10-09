@@ -1,5 +1,4 @@
 """Bearer, identity headers, /internal/* routes, /healthz."""
-import json
 
 import pytest
 from conftest import IDENT, make_config
@@ -14,8 +13,7 @@ async def test_healthz_needs_nothing(upstream, harness):
         assert r.status_code == 200 and r.json() == {"ok": True}
 
 
-@pytest.mark.parametrize("path,method", [("/mcp", "POST"), ("/internal/tools", "GET"),
-                                         ("/internal/call", "POST"), ("/internal/upstreams/fake/tools", "GET")])
+@pytest.mark.parametrize("path,method", [("/mcp", "POST"), ("/internal/tools", "GET")])
 async def test_bearer_required_everywhere(upstream, harness, path, method):
     async with harness(make_config(upstream.url)) as gw:
         r = await gw.internal(method, path, token=None)
@@ -44,8 +42,6 @@ async def test_identity_headers_400(upstream, harness, bad):
     async with harness(make_config(upstream.url)) as gw:
         assert (await gw.rpc("tools/list", ident=bad)).status_code == 400
         assert (await gw.internal("GET", "/internal/tools", ident=bad)).status_code == 400
-        assert (await gw.internal("POST", "/internal/call", ident=bad,
-                                  json={"name": "fake__add", "arguments": {}})).status_code == 400
 
 
 async def test_internal_tools_hello_shape(upstream, harness):
@@ -72,34 +68,13 @@ async def test_tenant_without_policy_gets_meta_only(upstream, harness):
         stranger = {**IDENT, "X-SB-Tenant": "nobody"}
         tools = (await gw.internal("GET", "/internal/tools", ident=stranger)).json()["tools"]
         assert [t["name"] for t in tools] == list(META_DEFNS)
-        r = await gw.internal("POST", "/internal/call", ident=stranger, json={"name": "fake__add", "arguments": {"a": 1, "b": 1}})
-        assert r.json()["is_error"] is True
+        res = await gw.call("call_tool", {"name": "fake__add", "arguments": {"a": 1, "b": 1}}, ident=stranger)
+        assert res["isError"] is True
 
 
-async def test_legacy_upstream_tools(upstream, harness):
+@pytest.mark.parametrize("path,method", [("/internal/call", "POST"), ("/internal/upstreams/fake/tools", "GET")])
+async def test_legacy_routes_are_gone(upstream, harness, path, method):
+    """M6: the legacy engine's routes were deleted with the engine."""
     async with harness(make_config(upstream.url)) as gw:
-        r = await gw.internal("GET", "/internal/upstreams/fake/tools", ident=False)
-        assert r.status_code == 200
-        defs = {d["function"]["name"]: d for d in r.json()["tools"]}
-        assert {"fake__echo", "fake__add", "fake__approve", "fake__boom"} <= set(defs)
-        assert defs["fake__add"]["function"]["description"] == "[via fake MCP] Add two integers."
-        assert "$schema" not in json.dumps(defs)
-        assert (await gw.internal("GET", "/internal/upstreams/nope/tools", ident=False)).status_code == 404
-
-
-async def test_legacy_upstream_tools_unreachable(harness):
-    async with harness(make_config("http://127.0.0.1:9/mcp")) as gw:
-        r = await gw.internal("GET", "/internal/upstreams/fake/tools", ident=False)
-        assert r.status_code == 502
-
-
-async def test_legacy_call(upstream, harness, agent_api):
-    async with harness(make_config(upstream.url, deny=["fake__boom"])) as gw:
-        r = await gw.internal("POST", "/internal/call", json={"name": "fake__add", "arguments": {"a": 4, "b": 5}})
-        assert r.json() == {"content": "9", "is_error": False}
-        r = await gw.internal("POST", "/internal/call", json={"name": "fake__boom", "arguments": {}})
-        assert r.json()["is_error"] is True and "not allowed" in r.json()["content"]
-        r = await gw.internal("POST", "/internal/call", json={"arguments": {}})
-        assert r.status_code == 400
-        await gw.events.drain()
-    assert agent_api.ops("call")[0]["tool"] == "fake__add"
+        r = await gw.internal(method, path, json={"name": "fake__add", "arguments": {}})
+        assert r.status_code in (404, 405)
