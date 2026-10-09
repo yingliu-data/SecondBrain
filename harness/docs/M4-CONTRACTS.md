@@ -17,15 +17,25 @@ mcp-gateway ──HTTP──▶ agent-api POST /internal/gateway-events   (host 
 Env: agent-api `MCP_GATEWAY_URL` (default `http://mcp-gateway:8090`);
 mcp-gateway `GATEWAY_CONFIG` (default `/data/gateway.json`), `GATEWAY_STATE_DIR`
 (default `/data/gateway-state`), `AGENT_API_URL` (default `http://agent-api:8000`);
-both `INTERNAL_TOKEN` (shared bearer for the `/internal/*` routes, both
-directions; empty = no check, dev only).
+both `INTERNAL_TOKEN` (shared bearer for every gateway route except
+`/healthz` — `/mcp` included, the forwarder adds it — and for
+`/internal/gateway-events`; empty = no check, dev only).
 
 ## 2. Identity headers
 
-Every request into the gateway except `/healthz` carries
+`POST /mcp`, `GET /internal/tools` and `POST /internal/call` carry
 `X-SB-User`, `X-SB-Tenant`, `X-SB-Session` (= the event-log `session_id`;
-for the legacy engine, the legacy session id). The forwarder sets them and
-**removes any `X-SB-*` header the guest sent**. Missing → 400. The assurance
+for the legacy engine, the legacy session id). Missing → 400.
+`GET /internal/upstreams/{name}/tools` is session-less (the legacy engine's
+background refresh has no user or session) and takes none. The forwarder sets
+them and **removes any `X-SB-*` header the guest sent**; the gateway trusts
+them only on a request that also carries the `INTERNAL_TOKEN` bearer (§1), so
+a peer on the compose network cannot claim a tenant. Because the forwarder
+adds the bearer, it proxies **only `POST /mcp`** (any other method or path →
+404, never forwarded) and drops the guest's own `Authorization` header — else
+a guest could reach `/internal/*` with the host's token. The gateway rejects
+(400) any header value outside `[A-Za-z0-9._@-]{1,128}` or equal to `.`/`..`,
+since the values become path segments of the pin file (§5). The assurance
 behind them is OpenShell's (PLAN.md 11).
 
 ## 3. Gateway HTTP surface
@@ -35,10 +45,10 @@ behind them is OpenShell's (PLAN.md 11).
 | `POST /mcp` | guest via forwarder | MCP streamable HTTP, **stateless, JSON responses** (`json_response=True`): no `initialize` needed, each POST is one JSON-RPC request → one JSON body. Methods: `tools/list`, `tools/call`. |
 | `GET /internal/tools` | worker at session start | Policy-filtered surface for the tenant **in hello shape** (§4) and pins it for the session (first call pins; later calls return the same pins). |
 | `GET /internal/upstreams/{name}/tools` | legacy engine | That upstream's full tool list as OpenAI function defs, names `{upstream}__{tool}` (what `MCPProxySkill` returned). No pinning. |
-| `POST /internal/call` | legacy engine | `{name: "{upstream}__{tool}", arguments}` → `{content: str, is_error: bool}`; policy applies (tenant header). |
+| `POST /internal/call` | legacy engine | `{name: "{upstream}__{tool}", arguments}` → `{content: str, is_error: bool}`; policy applies (tenant header). No elicitation relay here (the legacy engine has no question path): an upstream elicitation on this route is answered `decline` at once and the call's eventual result returned as usual. |
 | `GET /healthz` | compose | `{ok: true}` |
 
-`/internal/*` require `Authorization: Bearer $INTERNAL_TOKEN`.
+Every route except `/healthz` requires `Authorization: Bearer $INTERNAL_TOKEN`.
 
 ### 3.1 The MCP surface (`/mcp`)
 
@@ -84,7 +94,16 @@ when it is a single enum, else free text), and on `ui_response` re-sends the
 The gateway feeds the answer to the held upstream callback and answers this
 second POST with the final result (or another `sb/input_required`). Unknown or
 expired `request_state` → `isError: true` "input request expired". A question
-deadline that passes → the guest sends `action: "cancel"`. The held upstream
+deadline that passes → the guest sends `action: "cancel"`. The question
+deadline is `min(question_timeout_s, expires_in_s)`. `expires_in_s` is the
+held call's remaining upstream `timeout_s` budget (capped at 3600): the
+gateway never advertises a wait the upstream timer would cut short.
+
+While the question is open the guest holds no connection to the gateway: the
+operation is **suspended, not running** — its `op_timeout_s` timer is paused
+(it restarts on the re-send) and it does not block `park` (the coordinator
+treats it like a pending `question`; a parked VM re-sends on `ui_response`
+after resume). A held call does not count toward `max_concurrent` (§6). The held upstream
 call lives in gateway memory (one replica; a gateway restart loses it → the
 call's result is an error). All of it is one operation, one `call_id`.
 
@@ -106,14 +125,36 @@ Meta tools get `pin` = sha256 of their own canonical definition and `timeout_s`
 and pin as today. The guest's op timeout for an mcp call is the entry's
 `timeout_s` (fallback `limits.op_timeout_s.mcp`).
 
+Guest-side change this needs: today `protocol.allowlist.effective_tools`
+keeps only `{name, side, pin}` and `guest.config.from_hello` never fills
+`cfg.tool_schemas`, so an entry's `schema`, `description` and `timeout_s` are
+dropped and `guest.context.tool_schemas` falls back to an empty-parameters
+schema (host/device tools are already affected). The guest workstream keeps
+`{name: schema}` and `{name: timeout_s}` from `hello.config.tools` on
+`GuestConfig` (`tool_schemas`, `tool_timeouts`); `session_start.tools` is
+unchanged. The gateway port is `hello.config.ports.gateway` (default 5011),
+added to the guest's `DEFAULT_PORTS` in the same change (today an unknown
+port name fails the hello).
+
 ## 5. Pins and quarantine
 
 `pin = protocol.canonical.sha256_hex(canonical_json(defn))` where `defn` is the
 upstream MCP tool as `{name, description, inputSchema}` (+ `outputSchema`,
-`annotations` when present), name un-namespaced. The pin table for a session
+`annotations` when present), name un-namespaced, taken from
+`tool.model_dump(mode="json", exclude_none=True)` **before** any conversion:
+`schema.mcp_tool_to_openai` pops `$schema` from `tool.inputSchema` in place,
+so it must work on a copy, or one definition hashes two ways depending on
+call order and a session quarantines a tool that never changed. The pin table for a session
 is written to `{GATEWAY_STATE_DIR}/pins/{user}/{tenant}/{session}.json` at the
 first `/internal/tools` or `/mcp` call (atomic write) and read back after a
-restart, so a gateway restart never loses a pin. A tool whose current upstream
+restart, so a gateway restart never loses a pin (this replaces PLAN.md 9's
+"rebuilt from `session_start`": only promoted and meta pins are in
+`session_start`, not the tools reached through `call_tool`). The table covers every tool
+the tenant's policy allows at that moment (not only the promoted ones) and
+stores, per namespaced name, `{pin, defn}` — `describe_tool` returns the stored
+`defn`, which a restart must not lose either. A tool absent from the table
+(added upstream after the session pinned) is not callable in that session:
+`isError: true` "tool not available in this session"; new sessions pick it up. A tool whose current upstream
 definition hashes differently from the session's pin is **quarantined for
 that session**: calls return `isError: true` "tool definition changed since
 this session started (quarantined)". New sessions pin the new definition.
@@ -128,11 +169,16 @@ Definitions are cached per upstream for `tool_defs_ttl_s`.
 ```
 
 `upstreams` keys = today's `tenants.json` `mcp_servers` keys. Globs match the
-namespaced name; deny wins over allow; a tenant absent from `tenants` or an
+namespaced name; deny wins over allow (this replaces PLAN.md 9's "first
+match wins"); a tenant absent from `tenants` or an
 upstream not listed → no tools (default deny). `max_concurrent` per session
 (default 2). `python -m app.migrate_config tenants.json` prints a
 `gateway.json` from today's tenants file (each tenant's `mcp_servers` →
 `upstreams`, `allow: ["*"]`, `promoted` from an optional tenant `promoted` key).
+The default tenant (synthesized from `API_SECRET_KEY` or `is_default: true`) is
+unrestricted in agent-api (`Tenant.allowed_skill_names()` → `None`), so the
+migration emits it with every upstream in the file, not with its (empty)
+`mcp_servers`; otherwise default deny would silently drop its MCP tools.
 
 ## 7. Gateway events
 
@@ -146,7 +192,11 @@ The gateway posts `POST {AGENT_API_URL}/internal/gateway-events` (bearer
 
 fire-and-forget (a failed post is logged, never fails the call). agent-api
 appends it as a `gateway` host event to that session's host log when the
-session directory exists (worker or not), else drops it with a log line.
+session directory exists, else drops it with a log line. With a live worker
+the append goes through that worker's `StateSync.host_event` (one writer, one
+`hseq` counter); without one, through a writer serialised by a per-session lock
+in agent-api that recounts `hseq` from the existing host segments — never a second concurrent
+`StateSync` on the same session.
 
 ## 8. Legacy engine
 
