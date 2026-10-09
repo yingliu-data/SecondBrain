@@ -1,6 +1,6 @@
 """stream — guest events → the SSE strings the clients already consume.
 
-The strings are byte-identical to app/agent/loop.py's: `token` payloads are
+The strings are byte-identical to the retired legacy loop's: `token` payloads are
 `json.dumps({'text': word + ' '})` word by word (the iPhone's TTS expects
 the word-wise emission), `tool_call` is `{id, name, arguments}`,
 `avatar_command` is `{name, result}`, `done` is `{}`. Added for the harness:
@@ -33,15 +33,22 @@ a follow-up), one `token "\\n"` separates them.
   fatal_items(message, **extra) -> [sse]
                               a fatal `error{class, message, **extra}` + `done`
   KEEPALIVE                   ": keepalive\\n\\n", every 15 s while a task runs
+  SSE_HEADERS                 the response headers of every SSE route
 """
 from __future__ import annotations
 
 import json
 
-from app.agent.loop import _AVATAR_TOOLS
+from app.skills.avatar_control import AVATAR_TOOLS
 
 KEEPALIVE = ": keepalive\n\n"
-AVATAR_TOOLS = _AVATAR_TOOLS
+
+SSE_HEADERS = {
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-cache, no-store, no-transform",
+    "X-Accel-Buffering": "no",
+    "Connection": "keep-alive",
+}
 
 
 def sse(event: str, data) -> str:

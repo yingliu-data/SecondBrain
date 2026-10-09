@@ -25,7 +25,7 @@ for _noisy in ("mcp.server.lowlevel.server", "mcp.server.streamable_http"):
     logging.getLogger(_noisy).setLevel(logging.WARNING)
 
 # Routes whose callers must stamp X-SB-User/Tenant/Session (§2).
-IDENTITY_PATHS = {"/mcp", "/internal/tools", "/internal/call"}
+IDENTITY_PATHS = {"/mcp", "/internal/tools"}
 
 
 class AuthMiddleware:

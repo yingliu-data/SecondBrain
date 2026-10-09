@@ -1,6 +1,5 @@
 """M4 agent-api side outside the worker: POST /internal/gateway-events,
-GatewayUpstreamSkill (legacy engine) against a fake gateway, tenants.json
-compatibility."""
+tenants.json compatibility (M6: `mcp_servers` accepted and ignored)."""
 import json
 
 import pytest
@@ -8,12 +7,9 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.gateway import events
-from app.gateway.upstream_skill import GatewayUpstreamSkill
 from app.host.state_sync import StateSync
 from app.session.dir_store import DirStore
-from app.skills.base import set_current_context
 from app.tenants import TenantRegistry
-from gateway_fakes import FakeGateway
 
 EVENT = {"user": "u", "tenant": "t", "session_id": "s1", "op": "call",
          "tool": "wcc-events__draft_event", "upstream": "wcc-events", "ok": True, "ms": 12}
@@ -85,74 +81,24 @@ def test_empty_token_means_no_check(api, monkeypatch):
     assert client.post("/internal/gateway-events", json=EVENT).status_code == 202
 
 
-# ---------------------------------------------------------------- legacy skill
-def fn(name):
-    return {"type": "function", "function": {"name": name, "description": "[via wcc-events MCP] d",
-                                             "parameters": {"type": "object"}}}
-
-
-@pytest.fixture
-def gateway():
-    gw = FakeGateway().start()
-    yield gw
-    gw.stop()
-
-
-@pytest.mark.asyncio
-async def test_upstream_skill_definitions_from_the_gateway(gateway):
-    gateway.upstream_tools["wcc-events"] = [fn("wcc-events__draft_event")]
-    skill = GatewayUpstreamSkill("wcc-events", base_url=gateway.url, token="tok")
-    assert skill.name == "mcp_wcc-events" and skill.get_tool_definitions() == []
-    assert await skill.refresh() is True
-    assert [d["function"]["name"] for d in skill.get_tool_definitions()] == ["wcc-events__draft_event"]
-    req = gateway.requests[0]
-    assert req["path"] == "/internal/upstreams/wcc-events/tools"
-    assert req["headers"]["authorization"] == "Bearer tok"
-    assert not any(k.startswith("x-sb-") for k in req["headers"])   # session-less
-
-
-@pytest.mark.asyncio
-async def test_upstream_skill_execute_posts_internal_call_with_identity(gateway):
-    skill = GatewayUpstreamSkill("wcc-events", base_url=gateway.url, token="tok")
-    set_current_context(None, "u", "t", "sess_legacy")
-    assert await skill.execute("wcc-events__draft_event", {"a": 1}) == "called"
-    req = gateway.requests[-1]
-    assert req["path"] == "/internal/call"
-    assert json.loads(req["body"]) == {"name": "wcc-events__draft_event", "arguments": {"a": 1}}
-    h = req["headers"]
-    assert (h["x-sb-user"], h["x-sb-tenant"], h["x-sb-session"]) == ("u", "t", "sess_legacy")
-    assert h["authorization"] == "Bearer tok"
-    gateway.call_result = {"content": "denied by policy", "is_error": True}
-    assert await skill.execute("wcc-events__draft_event", {}) == "Error: denied by policy"
-    assert (await skill.execute("other__x", {})).startswith("Error: tool 'other__x' does not belong")
-    gateway.status = 500
-    assert (await skill.execute("wcc-events__draft_event", {})).startswith("Error: MCP gateway")
-
-
-@pytest.mark.asyncio
-async def test_upstream_skill_down_gateway_and_missing_identity():
-    skill = GatewayUpstreamSkill("wcc-events", base_url="http://127.0.0.1:9")
-    assert await skill.refresh() is False and skill.get_tool_definitions() == []
-    set_current_context(None, "", "", "")
-    assert "needs a user, tenant and session" in await skill.execute("wcc-events__x", {})
-    set_current_context(None, "u", "t", "s")
-    assert (await skill.execute("wcc-events__x", {})).startswith("Error: MCP gateway unreachable")
-
-
 # ---------------------------------------------------------------- tenants
-def test_tenants_file_loads_old_fields_and_name_only_servers(tmp_path):
+def test_tenants_file_loads_old_fields_and_ignores_mcp_servers(tmp_path):
+    """M6: the top-level map (even one the old schema would reject) and the
+    tenant list are accepted and ignored; the gateway owns MCP access."""
     doc = {"mcp_servers": {"wcc-events": {"url": "http://h/mcp", "auth_token": "x",
                                           "timeout_s": 2700, "tool_defs_ttl_s": 60,
                                           "allow_private": True},
-                           "wcc-analytic": {}},
-           "tenants": [{"name": "a", "api_key": "k", "mcp_servers": ["wcc-events", "wcc-analytic"],
-                        "promoted": ["wcc-events__draft_event"]}]}
+                           "bad__name": {}},
+           "tenants": [{"name": "a", "api_key": "k", "mcp_servers": ["wcc-events", "ghost"],
+                        "promoted": ["wcc-events__draft_event"]},
+                       {"name": "b", "api_key": "kb", "mcp_servers": ["wcc-events"],
+                        "local_skills": ["web_search"]}]}
     path = tmp_path / "tenants.json"
     path.write_text(json.dumps(doc))
     reg = TenantRegistry(path, "default-key")
-    cfgs = reg.mcp_server_configs()
-    assert sorted(cfgs) == ["wcc-analytic", "wcc-events"]
-    assert cfgs["wcc-events"].tool_defs_ttl_s == 60 and cfgs["wcc-analytic"].url == ""
+    assert not hasattr(reg, "mcp_server_configs")
     a = reg.get_by_api_key("k")
-    assert a.allowed_skill_names() == {"mcp_wcc-events", "mcp_wcc-analytic"}
+    # MCP servers without local_skills: still no local skills (never widened)
+    assert a.allowed_skill_names() == set()
     assert a.promoted == ["wcc-events__draft_event"]
+    assert reg.get_by_api_key("kb").allowed_skill_names() == {"web_search"}

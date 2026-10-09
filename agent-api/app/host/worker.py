@@ -545,14 +545,13 @@ class Worker:
 
     def host_tool_entries(self) -> list[dict]:
         """Host/device tools: the allowlist applied to the registry's
-        harness-engine skills, each with its OpenAI schema (keyword prefilter
-        retired, D16)."""
+        skills, each with its OpenAI schema (keyword prefilter retired, D16)."""
         allowed = self.tenant.allowed_skill_names()
-        server = self.registry.get_server_tool_names(allowed, engine="harness")
-        device = self.registry.get_device_tool_names(allowed, engine="harness")
+        server = self.registry.get_server_tool_names(allowed)
+        device = self.registry.get_device_tool_names(allowed)
         entries: list[dict] = []
         seen: set[str] = set()
-        for d in self.registry.get_active_tool_definitions(allowed, engine="harness"):
+        for d in self.registry.get_active_tool_definitions(allowed):
             name = d["function"]["name"]
             if name in seen:
                 continue
@@ -620,6 +619,8 @@ class Worker:
             "limits": self.limits(),
             "hooks": {},
             "async_tools": False,
+            **({"exclude_builtins": list(self.tenant.exclude_builtins)}
+               if getattr(self.tenant, "exclude_builtins", None) else {}),
             "question_timeout_s": HARNESS_QUESTION_TIMEOUT_S,
             "ui_attached": True,
             "ports": dict(self.ports),
@@ -858,6 +859,8 @@ class Worker:
             self._deferred = held + self._deferred
             raise GuestError(f"guest did not connect within {self.hello_timeout_s}s")
         await self.load_gateway_entries()
+        # M6 merge point: a fresh boot whose current run is a migrated one
+        # (StateSync.migrated_run, the events migration) sends resume=True.
         hello = self.build_hello(resume=resume)
         self.last_hello = hello
         self.send_control("hello", hello)
@@ -1181,15 +1184,9 @@ class Worker:
 
     def _fail(self, input_id: str, outcome: str, message: str) -> dict:
         """The host's failure result of a task: its message as the answer
-        (streamed, stored in history) and `host_error` (finish_input's error)."""
+        (streamed) and `host_error` (finish_input's error)."""
         logger.error("task %s: %s (%s)", input_id, message, outcome)
         self._emit_many(tokens(message), input_id)
-        try:
-            self.session.append_history("assistant", message, ticket_id=self.sync.ticket_id)
-            self.session.append_trace("llm_error", {"error": message[:500], "outcome": outcome},
-                                      ticket_id=self.sync.ticket_id)
-        except Exception:
-            pass
         return {"input_id": input_id, "outcome": outcome, "answer": message,
                 "usage": {}, "manifest": {}, "host_error": message}
 

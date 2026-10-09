@@ -193,7 +193,6 @@ async def test_guest_death_fails_the_task_with_error_and_done(session):
     sse = await drain(sink)
     assert result["outcome"] == "failed" and "exited before settling" in result["answer"]
     assert any(s.startswith("event: error") for s in sse) and sse[-1] == DONE
-    assert session.read_history()[-1]["role"] == "assistant"
     await w.close()
 
 

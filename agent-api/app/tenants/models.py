@@ -1,28 +1,11 @@
-from pydantic import BaseModel, field_validator
+import logging
+from typing import Literal
 
-from protocol.mcp import valid_upstream_name
+from pydantic import BaseModel, field_validator, model_validator
 
+from protocol.allowlist import GUEST_BUILTINS
 
-class MCPServerConfig(BaseModel):
-    """A remote MCP server (gateway upstream) that tenants reference by name.
-
-    M4: agent-api only uses the name (and tool_defs_ttl_s for the legacy
-    skill's cache); url, auth_token, timeout_s and allow_private belong to the
-    mcp-gateway's gateway.json and are accepted here only so an existing
-    tenants.json keeps loading (and can be migrated)."""
-    name: str
-    url: str = ""
-    auth_token: str | None = None
-    timeout_s: int = 300           # per-tool-call ceiling
-    tool_defs_ttl_s: int = 300     # cached tools/list refresh interval
-    allow_private: bool = False    # permit loopback/private-range URL (e.g. docker host)
-
-    @field_validator("name")
-    @classmethod
-    def _valid_upstream_name(cls, v: str) -> str:
-        if not valid_upstream_name(v):
-            raise ValueError("MCP server name must be non-empty without '__' or ':'")
-        return v
+logger = logging.getLogger("tenants")
 
 
 class Tenant(BaseModel):
@@ -32,18 +15,29 @@ class Tenant(BaseModel):
     user. Sessions/traces are stored per tenant under the user's directory;
     user-scope memory is shared across the user's tenants. Defaults to the
     tenant name, so single-tenant users need not set it.
+
+    `auth`: "key" (Bearer + HMAC with `api_key`, app/auth/middleware.py) or
+    "origin" (no key; the browser Origin must be one of `origins` — the
+    guest avatar page, routes/guest.py). An origin tenant is never matched
+    by an API key.
+
+    M6: every tenant runs the harness engine. An `engine` key is accepted
+    and ignored with a warning; `mcp_servers` is accepted and ignored too
+    (the mcp-gateway's gateway.json owns MCP access), except that a tenant
+    listing MCP servers without `local_skills` still gets no local skills.
     """
     name: str
     user: str = ""
-    api_key: str
+    api_key: str = ""
+    auth: Literal["key", "origin"] = "key"
     origins: list[str] = []
     system_prompt: str | None = None      # None -> global SYSTEM_PROMPT
     local_skills: list[str] | None = None  # None -> all local skills
-    mcp_servers: list[str] = []            # names from the top-level mcp_servers map
+    mcp_servers: list[str] = []            # ignored by agent-api (the gateway's)
     promoted: list[str] = []               # gateway-only (migrate_config): first-class MCP tools
     max_tools: int | None = None           # None -> config.MAX_TOOLS
     max_tokens: int | None = None          # None -> LLM default
-    engine: str | None = None              # None -> config.AGENT_ENGINE; "legacy" | "harness"
+    exclude_builtins: list[str] = []       # guest built-ins this tenant's sessions do not get
     is_default: bool = False
     # M5 (Temporal session workflow): flows.SESSION_CONFIG_KEYS, read by
     # SessionConfig.from_tenant (None keeps the flows default);
@@ -61,16 +55,29 @@ class Tenant(BaseModel):
             raise ValueError("tenant name must be non-empty and must not contain ':'")
         return v
 
-    @field_validator("engine")
+    @model_validator(mode="before")
     @classmethod
-    def _valid_engine(cls, v: str | None) -> str | None:
-        if v is not None and v not in ("legacy", "harness"):
-            raise ValueError("engine must be 'legacy' or 'harness'")
+    def _ignore_engine(cls, data):
+        if isinstance(data, dict) and "engine" in data:
+            data = dict(data)
+            engine = data.pop("engine")
+            logger.warning("tenant %s: `engine: %s` ignored (every tenant runs the harness "
+                           "engine since M6)", data.get("name"), engine)
+        return data
+
+    @field_validator("exclude_builtins")
+    @classmethod
+    def _known_builtins(cls, v: list[str]) -> list[str]:
+        unknown = sorted(set(v) - set(GUEST_BUILTINS))
+        if unknown:
+            raise ValueError(f"exclude_builtins: not guest built-ins: {unknown}")
         return v
 
     def model_post_init(self, __context) -> None:
         if not self.user:
             self.user = self.name
+        if self.auth == "key" and not self.api_key:
+            raise ValueError(f"tenant {self.name!r}: api_key is required (auth: key)")
         from app.session.ids import is_safe_id
         if not is_safe_id(self.user) or not is_safe_id(self.name):
             raise ValueError(
@@ -86,18 +93,14 @@ class Tenant(BaseModel):
 
     def workflow_entry(self) -> dict:
         """The tenants.json view flows reads (SessionConfig.from_tenant,
-        schedules): no key, no prompt, unset knobs left out; `engine` is
-        the effective one (AGENT_ENGINE when unset: schedules skip legacy)."""
-        from app.config import AGENT_ENGINE
+        schedules): no key, no prompt, unset knobs left out."""
         from flows.activities import SESSION_CONFIG_KEYS
-        entry = self.model_dump(exclude_none=True,
-                                include={"name", "user", "schedules", *SESSION_CONFIG_KEYS})
-        entry["engine"] = self.engine or AGENT_ENGINE
-        return entry
+        return self.model_dump(exclude_none=True,
+                               include={"name", "user", "schedules", *SESSION_CONFIG_KEYS})
 
     def allowed_skill_names(self) -> set[str] | None:
-        """Skill names this tenant may use; None means unrestricted (default tenant)."""
-        if self.local_skills is None and not self.mcp_servers:
-            return None
-        local = set(self.local_skills or [])
-        return local | {f"mcp_{s}" for s in self.mcp_servers}
+        """Local skill names this tenant may use; None means unrestricted
+        (default tenant). MCP tools are the gateway's policy, not this."""
+        if self.local_skills is None:
+            return set() if self.mcp_servers else None
+        return set(self.local_skills)

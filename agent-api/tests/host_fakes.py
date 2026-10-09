@@ -509,19 +509,16 @@ class FakeRegistry:
                                               "parameters": {"type": "object", "properties": {}}}},
         ]
 
-    def get_active_tool_definitions(self, allowed=None, engine=None):
+    def get_active_tool_definitions(self, allowed=None):
         return self._defs()
 
-    def get_tools_for_query(self, query, allowed=None):
-        return self._defs()
-
-    def get_server_tool_names(self, allowed=None, engine=None):
+    def get_server_tool_names(self, allowed=None):
         return {"web_search", "set_pose"}
 
-    def get_device_tool_names(self, allowed=None, engine=None):
+    def get_device_tool_names(self, allowed=None):
         return {"get_calendar_events"}
 
-    async def execute_server_tool(self, name, arguments, allowed=None, engine=None):
+    async def execute_server_tool(self, name, arguments, allowed=None):
         self.calls.append((name, arguments))
         r = self.results.get(name, f"{name} result")
         if isinstance(r, Exception):
@@ -530,9 +527,10 @@ class FakeRegistry:
 
 
 class FakeTenant:
-    def __init__(self, name="t", user="u", engine=None, system_prompt=None,
-                 local_skills=None, max_tools=None, max_tokens=None):
-        self.name, self.user, self.engine = name, user, engine
+    def __init__(self, name="t", user="u", system_prompt=None,
+                 local_skills=None, max_tools=None, max_tokens=None, exclude_builtins=()):
+        self.name, self.user = name, user
+        self.exclude_builtins = list(exclude_builtins)
         self.system_prompt = system_prompt
         self.local_skills = local_skills
         self.max_tools, self.max_tokens = max_tools, max_tokens

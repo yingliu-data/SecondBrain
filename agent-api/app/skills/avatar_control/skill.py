@@ -5,6 +5,7 @@ from app.skills.base import BaseSkill
 from app.skills.avatar_control.poses import POSES, POSE_NAMES
 from app.skills.avatar_control.body import JOINT_LIMITS, clamp_joint
 from app.skills.avatar_control.motion import build_animation, EasingType
+from app.skills.avatar_control.planner_llm import PlannerLLM
 
 logger = logging.getLogger("skills.avatar_control")
 
@@ -72,7 +73,7 @@ class AvatarControlSkill(BaseSkill):
     ]
 
     def __init__(self):
-        self._llm = None
+        self._llm = PlannerLLM()     # plan_movement's decomposition call
 
     def set_llm(self, llm):
         self._llm = llm
@@ -342,7 +343,7 @@ class AvatarControlSkill(BaseSkill):
         }
 
         # Return full animation for the frontend SSE, but compact summary
-        # will be fed to the LLM by the agent loop (via _AVATAR_TOOLS handling)
+        # goes to the guest (app/host/sides.py, AVATAR_TOOLS)
         logger.info(f"plan_movement: '{action}' -> {len(keyframe_poses)} keyframes, {len(frames)} frames")
         return json.dumps(result)
 

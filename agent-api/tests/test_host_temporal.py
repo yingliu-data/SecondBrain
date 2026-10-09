@@ -76,7 +76,7 @@ async def tenv():
 
 
 class Harness:
-    """One test's app: tenant `harn` (engine harness), DirStore, Workers on
+    """One test's app: tenant `harn`, DirStore, Workers on
     LocalSandbox, the Temporal worker on its own task queue."""
 
     def __init__(self, env, tmp_path, upstream, monkeypatch, answer_wait_s=ANSWER_WAIT_S):
@@ -85,7 +85,7 @@ class Harness:
         self.upstream = upstream
         self.session_id = "s-" + uuid.uuid4().hex[:8]
         self.ref = SessionRef(user="harn", tenant="harn", session_id=self.session_id)
-        doc = {"tenants": [{"name": "harn", "api_key": "harn-key", "engine": "harness",
+        doc = {"tenants": [{"name": "harn", "api_key": "harn-key",
                             "answer_wait_s": answer_wait_s, "wall_clock_s": 120}]}
         path = tmp_path / "tenants.json"
         path.write_text(json.dumps(doc))
@@ -104,7 +104,7 @@ class Harness:
         monkeypatch.setattr(chat, "HARNESS_KEEPALIVE_S", 0.5)
         sessions.set_sessions(self.store)
         self.registry = FakeRegistry()
-        chat.set_dependencies(self.registry, None)
+        chat.set_registry(self.registry)
         self.acts = HostActivities(self.workers, self.tenants, self.registry,
                                    abort_wait_s=20)
         app = FastAPI()
@@ -408,16 +408,16 @@ async def test_tenant_workflow_entry_and_doc(tmp_path):
                         "wall_clock_s": 300,
                         "schedules": [{"cron": "0 7 * * *", "prompt": "Morning brief",
                                        "session": "daily"}]},
-                       # no engine: AGENT_ENGINE (legacy) -> its schedules are skipped
-                       {"name": "b", "api_key": "kb",
-                        "schedules": [{"cron": "0 8 * * *", "prompt": "never"}]}]}
+                       # M6: an `engine` is ignored, every tenant's schedules run
+                       {"name": "b", "api_key": "kb", "engine": "legacy",
+                        "schedules": [{"cron": "0 8 * * *", "prompt": "also"}]}]}
     p = tmp_path / "t.json"
     p.write_text(json.dumps(doc))
     reg = TenantRegistry(p, "env-key")
     a = reg.get_by_name("a")
     entry = a.workflow_entry()
-    assert "api_key" not in entry and entry["user"] == "a" and entry["engine"] == "harness"
-    assert reg.get_by_name("b").workflow_entry()["engine"] == "legacy"
+    assert "api_key" not in entry and entry["user"] == "a" and "engine" not in entry
+    assert "engine" not in reg.get_by_name("b").workflow_entry()
     cfg = SessionConfig.from_tenant(entry)
     assert (cfg.answer_wait_s, cfg.wall_clock_s) == (60, 300)
     # every knob flows reads is a Tenant field that reaches the entry
@@ -431,8 +431,9 @@ async def test_tenant_workflow_entry_and_doc(tmp_path):
             cfg.max_history_events) == (301, 61, 7, 900)
     tdoc = reg.tenants_doc()
     assert all("api_key" not in t for t in tdoc["tenants"])
-    [e] = entries_from_tenants(tdoc)
+    e, eb = entries_from_tenants(tdoc)
     assert (e.tenant, e.user, e.session, e.cron) == ("a", "a", "daily", "0 7 * * *")
+    assert (eb.tenant, eb.cron) == ("b", "0 8 * * *")
     assert SessionConfig.from_tenant(reg.get_by_name("default").workflow_entry()) == SessionConfig()
 
 

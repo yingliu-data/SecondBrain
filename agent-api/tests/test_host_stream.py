@@ -1,11 +1,10 @@
-"""stream.py produces the legacy loop's SSE strings byte for byte."""
+"""stream.py produces the (retired) legacy loop's SSE strings byte for byte."""
 import json
 
 import pytest
 
 from app.host.stream import DONE, KEEPALIVE, Projector, project, sse, tokens
 from host_fakes import HASH, token_text
-from test_sessions_and_loop import FakeLLM, FakeRegistry, collect
 
 SID = "s1"
 
@@ -14,17 +13,10 @@ def ev(seq, type, body):
     return {"session_id": SID, "seq": seq, "ts": "t", "schema": 1, "type": type, "body": body}
 
 
-@pytest.mark.asyncio
-async def test_final_text_matches_legacy_word_wise_tokens():
-    from app.agent.loop import run_agent_loop
-
-    class LLM(FakeLLM):
-        async def chat_completion(self, messages, tools=None, max_tokens=None,
-                                  chat_template_kwargs=None):
-            return {"choices": [{"message": {"content": "Hello there, wörld 1 2"},
-                                 "finish_reason": "stop"}]}
-
-    legacy = await collect(run_agent_loop("hi", [], FakeRegistry(), LLM()))
+def test_final_text_matches_legacy_word_wise_tokens():
+    # what app/agent/loop.py streamed for a final answer (deleted in M6)
+    legacy = [f"event: token\ndata: {json.dumps({'text': w + ' '})}\n\n"
+              for w in "Hello there, wörld 1 2".split(" ")] + ["event: done\ndata: {}\n\n"]
     p = Projector()
     out = p.project(ev(2, "input", {"input_id": "in_1", "kind": "task", "text": "hi",
                                     "dedupe": "new"}))

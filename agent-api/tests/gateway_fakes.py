@@ -6,8 +6,6 @@ Records every request as {method, path, headers (lower-cased), body};
                                     `sse=True` answers text/event-stream in chunks;
                                     `hold` (threading.Event) delays the answer until set
   GET  /internal/tools              {"tools": tools}
-  GET  /internal/upstreams/{n}/tools {"tools": upstream_tools[n]}
-  POST /internal/call               call_result (default {"content": "called", "is_error": false})
 `status` overrides every status.
 """
 from __future__ import annotations
@@ -21,8 +19,6 @@ class FakeGateway:
     def __init__(self) -> None:
         self.requests: list[dict] = []
         self.tools: list[dict] = []
-        self.upstream_tools: dict[str, list[dict]] = {}
-        self.call_result: dict = {"content": "called", "is_error": False}
         self.status = 200
         self.sse = False
         self.hold: threading.Event | None = None
@@ -56,17 +52,11 @@ class FakeGateway:
                 self._record()
                 if self.path == "/internal/tools":
                     self._json({"tools": outer.tools})
-                elif self.path.startswith("/internal/upstreams/"):
-                    name = self.path.split("/")[3]
-                    self._json({"tools": outer.upstream_tools.get(name, [])})
                 else:
                     self._json({"error": "nope"}, 404)
 
             def do_POST(self):
                 body = self._record()
-                if self.path == "/internal/call":
-                    self._json(outer.call_result)
-                    return
                 if outer.hold is not None:
                     outer.hold.wait(10)
                 req = json.loads(body or b"{}")

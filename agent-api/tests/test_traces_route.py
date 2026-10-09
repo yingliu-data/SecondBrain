@@ -13,61 +13,6 @@ from app.session.dir_store import DirStore
 from app.tenants import TenantRegistry
 
 
-# ── Agent-loop trace emission ─────────────────────────────────
-
-class ToolLLM:
-    """First call returns a tool call, second call returns final text."""
-    def __init__(self):
-        self.calls = 0
-
-    async def chat_completion(self, messages, tools=None, max_tokens=None,
-                              chat_template_kwargs=None):
-        self.calls += 1
-        if self.calls == 1:
-            return {"choices": [{"finish_reason": "tool_calls", "message": {
-                "content": None,
-                "tool_calls": [{"id": "tc1", "function": {
-                    "name": "fake_tool", "arguments": '{"x": 1}'}}],
-            }}]}
-        return {"choices": [{"finish_reason": "stop",
-                             "message": {"content": "done"}}]}
-
-
-class ToolRegistry:
-    def get_tools_for_query(self, query, allowed=None):
-        return [{"type": "function", "function": {"name": "fake_tool",
-                                                  "description": "", "parameters": {}}}]
-
-    def get_server_tool_names(self, allowed=None):
-        return {"fake_tool"}
-
-    def get_device_tool_names(self, allowed=None):
-        return set()
-
-    async def execute_server_tool(self, name, args, allowed=None):
-        return "tool output"
-
-
-@pytest.mark.asyncio
-async def test_loop_emits_trace_events():
-    from app.agent.loop import run_agent_loop
-    events = []
-
-    def trace(event, detail=None, duration_ms=None):
-        events.append((event, detail, duration_ms))
-
-    async for _ in run_agent_loop("go", [], ToolRegistry(), ToolLLM(), trace=trace):
-        pass
-
-    names = [e[0] for e in events]
-    assert names == ["tool_call", "tool_result", "assistant_response"]
-    call = events[0][1]
-    assert call["name"] == "fake_tool" and call["arguments"] == {"x": 1}
-    result_event = events[1]
-    assert result_event[1]["result"] == "tool output"
-    assert isinstance(result_event[2], int)  # duration_ms measured
-
-
 # ── Trace endpoints: tenant scoping ───────────────────────────
 
 TWO_TENANT_DOC = {

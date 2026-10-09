@@ -34,8 +34,8 @@ import logging
 import time
 from typing import Callable
 
-from app.agent.loop import _AVATAR_TOOLS
-from app.agent.sanitize import sanitize
+from app.host.sanitize import sanitize
+from app.skills.avatar_control import AVATAR_TOOLS
 from app.config import HARNESS_HOST_TOOL_TIMEOUT_S, TOOL_TIMEOUT
 from app.skills.base import set_current_context
 
@@ -183,7 +183,7 @@ class Sides:
                             getattr(self.tenant, "name", ""))
         try:
             raw = await asyncio.wait_for(
-                self.registry.execute_server_tool(name, args, allowed, engine="harness"),
+                self.registry.execute_server_tool(name, args, allowed),
                 timeout=self.host_timeout_s)
         except asyncio.TimeoutError:
             raw = f"Error: {name} timed out after {int(self.host_timeout_s)}s."
@@ -191,7 +191,7 @@ class Sides:
             logger.exception("host skill %s failed", name)
             raw = f"Error: {name} failed: {e}"
         result = str(raw)
-        if name in _AVATAR_TOOLS:
+        if name in AVATAR_TOOLS:
             self.note_host_result(body["call_id"], result)
             if name == "plan_movement":
                 # Legacy: feed the model a compact summary, not the frames.

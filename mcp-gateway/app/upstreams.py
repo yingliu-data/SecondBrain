@@ -154,15 +154,13 @@ class UpstreamCall:
     """One upstream tools/call running in its own task.
 
     Outcomes arrive on a queue: ("result", CallToolResult), ("input",
-    ElicitRequestParams) or ("error", str). With relay=False an elicitation
-    is answered `decline` at once (the legacy route, §3)."""
+    ElicitRequestParams) or ("error", str)."""
 
-    def __init__(self, upstream: Upstream, tool: str, arguments: dict, *, relay: bool):
+    def __init__(self, upstream: Upstream, tool: str, arguments: dict):
         self.upstream = upstream
         self.tool = tool
         self.started = time.monotonic()
         self.deadline = self.started + upstream.cfg.timeout_s
-        self._relay = relay
         self._outcomes: asyncio.Queue = asyncio.Queue()
         self._answer: asyncio.Future | None = None
         self._abandoned = False
@@ -172,8 +170,6 @@ class UpstreamCall:
         return max(0.0, self.deadline - time.monotonic())
 
     async def _elicit(self, _ctx, params: types.ElicitRequestParams) -> types.ElicitResult:
-        if not self._relay:
-            return types.ElicitResult(action="decline")
         if self._abandoned:
             return types.ElicitResult(action="cancel")
         self._answer = asyncio.get_running_loop().create_future()

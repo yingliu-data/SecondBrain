@@ -2,8 +2,8 @@
 
 Names everywhere are `{upstream}__{tool}` (`protocol.mcp.namespaced`).
 `tool_defn` is the canonical MCP definition a pin hashes (M4-CONTRACTS.md §5);
-`defn_to_openai` turns a definition into the OpenAI function format used by
-hello entries and the legacy engine.
+`defn_to_openai` turns a definition into the OpenAI function format of the
+hello entries.
 """
 from __future__ import annotations
 
@@ -25,15 +25,12 @@ def tool_defn(tool: types.Tool) -> dict:
     return defn
 
 
-def defn_to_openai(name: str, defn: dict, via: str | None = None) -> dict:
+def defn_to_openai(name: str, defn: dict) -> dict:
     """OpenAI function definition for a tool definition. `name` is the name
-    the model sees (namespaced for upstream tools); `via` adds the
-    '[via X MCP]' prefix MCPProxySkill used."""
+    the model sees (namespaced for upstream tools)."""
     parameters = copy.deepcopy(defn.get("inputSchema") or {"type": "object", "properties": {}})
     parameters.pop("$schema", None)
     description = defn.get("description") or ""
-    if via:
-        description = f"[via {via} MCP] {description}".strip()
     return {
         "type": "function",
         "function": {"name": name, "description": description, "parameters": parameters},

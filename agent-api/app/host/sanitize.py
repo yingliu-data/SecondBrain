@@ -1,4 +1,8 @@
-import re, logging
+"""sanitize — the `after_tool` rewrite of a host/device tool result (PLAN.md 8):
+truncate to 2000 chars and flag a result that looks like a prompt injection
+(logged to the `security` logger)."""
+import logging
+import re
 
 sec_log = logging.getLogger("security")
 
