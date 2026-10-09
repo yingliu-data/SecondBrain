@@ -1,4 +1,4 @@
-"""guest.context — the request the model sees (PLAN.md section 7; docs/GUEST.md).
+"""guest.context — the request the model sees (docs/GUEST.md).
 
     system_block(cfg) -> str                 fixed per session (no {current_time})
     system_hash(cfg) -> str                  hash of the system text + tool schemas
@@ -8,8 +8,8 @@
     build_request(state, cfg, clock_at_ms, *, attachments=None, preambles=None,
                   with_tools=True, new_memory=None) -> Request
     build_compaction_request(state, cfg, *, preambles=None) -> Request
-                                             the compaction turn's request (M2)
-    estimate_tokens(request) -> int          ceil(request.chars / 4), the raw estimate (M2)
+                                             the compaction turn's request
+    estimate_tokens(request) -> int          ceil(request.chars / 4), the raw estimate
 
 The request is a pure function of (state, cfg, clock_at_ms, the attachments the
 host delivered with the inputs, and the preamble texts of earlier turns), so a
@@ -42,7 +42,7 @@ filled with an error tool message right after their assistant message, so the
 conversation stays well-formed. Open calls are the fold's business
 (placeholders in async mode) and are left alone.
 
-Compaction (M2). The fold rebuilds `state.committed` at a `compaction` event
+Compaction. The fold rebuilds `state.committed` at a `compaction` event
 (protocol.fold._compaction: items before the range, then the summary turn's
 assistant message at origin range[0], then items after the range), so
 `_prefix_items` renders `state.committed` as it is and the request after a
@@ -54,7 +54,7 @@ no tools, no preamble (its `preamble_hash` is the hash of the instruction, so
 the turn_start still records what the model was asked). Staged items are not
 part of it: they stay staged and follow the summary in the next regular turn.
 
-Token estimate (M2): `Request.chars` is the length of the canonical JSON
+Token estimate: `Request.chars` is the length of the canonical JSON
 text of what the model is sent ({messages, tools, params}); the same text
 gives `request_hash` (sha256 of it), so it is serialised once per request.
 `estimate_tokens(request)` = ceil(chars / 4), the raw estimate; the
@@ -235,7 +235,7 @@ def _with_preamble(preamble: str, text: str) -> str:
 
 # ---------------------------------------------------------------- rendering
 def _prefix_items(state) -> list:
-    """The committed items to render. Compaction seam (M2): the fold already
+    """The committed items to render. Compaction seam: the fold already
     rebuilds `state.committed` after a compaction event, so this stays the
     whole list; a window/reserve policy would select here."""
     return list(state.committed)
@@ -355,7 +355,7 @@ def build_request(state, cfg, clock_at_ms: int, *, attachments=None, preambles=N
                      preamble_hash=p_hash, preamble_input_id=first_input if seen_user else None)
 
 
-# ---------------------------------------------------------------- compaction (M2)
+# ---------------------------------------------------------------- compaction
 def build_compaction_request(state, cfg, *, preambles=None) -> Request:
     """The compaction turn's request: the system block, the committed prefix
     rendered as a regular turn renders it (the same preamble registry, the

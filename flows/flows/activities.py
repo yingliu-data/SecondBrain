@@ -1,8 +1,8 @@
-"""Payloads and activity signatures for the session workflow (PLAN section 10).
+"""Payloads and activity signatures for the session workflow.
 
 The dataclasses here are the contract between ``flows.session_workflow`` and
-the host half of agent-api (``app/host/worker.py``), which will provide the real
-bodies in M5.  The bodies below are STUBS: they record every call in
+the host half of agent-api (``app/host/worker.py``), which provides the real
+bodies.  The bodies below are STUBS: they record every call in
 ``CALLS``, sleep briefly and return the outcome scripted in ``SCRIPTS`` (or
 ``done``), so the workflow logic can be tested on the SDK test server without
 a VM.
@@ -10,7 +10,7 @@ a VM.
 ``run_task`` is the one activity that heartbeats.  Heartbeat details carry the
 last acked ``seq`` of the guest event log; on a retry the new attempt reads
 ``activity.info().heartbeat_details`` and resumes from that seq instead of
-re-running a model turn (PLAN 4.5).
+re-running a model turn.
 """
 
 from __future__ import annotations
@@ -82,7 +82,7 @@ SESSION_CONFIG_KEYS = ("wall_clock_s", "answer_wait_s", "max_tasks_per_run",
 
 @dataclass
 class SessionConfig:
-    """Per-tenant knobs of a session workflow (PLAN 10: ``wall_clock_s``,
+    """Per-tenant knobs of a session workflow (``wall_clock_s``,
     ``answer_wait_s``, ``max_tasks_per_run`` come from the tenant entry)."""
 
     max_tasks_per_run: int = 50
@@ -106,8 +106,8 @@ class SessionConfig:
     def from_tenant(cls, tenant_entry: dict[str, Any]) -> SessionConfig:
         """Config from a ``tenants.json`` entry; missing (or null) keys keep the
         defaults.  Reads the ``SESSION_CONFIG_KEYS``: each an int >= 1, but
-        ``answer_wait_s`` 0 = the guest never parks on a question (deny path,
-        D12; a park that happens anyway escalates at once)."""
+        ``answer_wait_s`` 0 = the guest never parks on a question (deny path;
+        a park that happens anyway escalates at once)."""
         cfg = cls()
         for key in SESSION_CONFIG_KEYS:
             value = tenant_entry.get(key)
@@ -241,7 +241,7 @@ async def run_task(inp: RunTask) -> RunResult:
     """Drive one task through the guest; heartbeat the last acked seq."""
     info = activity.info()
     # Details of the LAST heartbeat the server accepted from the previous
-    # attempt.  The real body resumes the guest from this seq (PLAN 4.5).
+    # attempt.  The real body resumes the guest from this seq.
     seq = int(info.heartbeat_details[0]) if info.heartbeat_details else 0
     rec = _record("run_task", inp)
     script = SCRIPTS.get(inp.input_id, Script())

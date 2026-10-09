@@ -1,5 +1,5 @@
 """inbox — classify a host control message as the `input` event it becomes
-(PLAN.md section 5 "input" row, invariant 4 of docs/REPLAY.md; docs/GUEST.md).
+(invariant 4 of docs/REPLAY.md; docs/GUEST.md).
 
   Inbox(state).classify(control_msg) -> (dedupe, input_body)
 

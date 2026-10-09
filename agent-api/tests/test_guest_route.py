@@ -1,7 +1,7 @@
-"""The guest avatar route on the harness engine (M6, PLAN.md 8 "Guest tenant
-(avatar)"): LocalSandbox runs the real guest, a scripted upstream LLM sits
-behind the :5010 proxy, the real avatar_control skill answers on the host
-side. The page's wire stays `token` / `avatar_command` / `done`."""
+"""The guest avatar route on the harness engine: LocalSandbox runs the real
+guest, a scripted upstream LLM sits behind the :5010 proxy, the real
+avatar_control skill answers on the host side. The page's wire stays
+`token` / `avatar_command` / `done`."""
 import json
 from pathlib import Path
 

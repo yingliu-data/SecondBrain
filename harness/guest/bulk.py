@@ -1,5 +1,5 @@
-"""guest.bulk — the :5001 bulk channel from the guest's side (PLAN.md 4.1,
-docs/PROTOCOL.md section 7, docs/M3-CONTRACTS.md sections 4–5).
+"""guest.bulk — the :5001 bulk channel from the guest's side
+(docs/PROTOCOL.md).
 
   BulkClient(connector, session_id, port=5001, timeout_s=60)
     put(kind, path, data: bytes, sha256=None) -> None   spill | workspace | manifest

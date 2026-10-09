@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""harness/image/build_snapshot.py -- build the BASE snapshot (docs/IMAGE.md, M3-CONTRACTS §1).
+"""harness/image/build_snapshot.py -- build the BASE snapshot (docs/IMAGE.md).
 
     build_snapshot.py build-base [--cache DIR] [--idle-timeout S] [--settle S]
                                  [--fixed-delay S] [--keep-build-dir]

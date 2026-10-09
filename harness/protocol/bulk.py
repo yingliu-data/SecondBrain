@@ -1,4 +1,4 @@
-"""bulk — the :5001 bulk channel framing (PLAN.md 4.1, 4.5, docs/PROTOCOL.md §7).
+"""bulk — the :5001 bulk channel framing (docs/PROTOCOL.md).
 
 Pure data: no sockets, no threads, no clock. The guest's `guest/bulk.py` and
 the host's bulk server both lean on this module for what a line means.
@@ -24,7 +24,7 @@ One transfer per connection. The guest always connects (it never listens):
                | {"ok":false,"error":str}
         payload: the host's ACKED guest events with seq > after_seq, JSONL,
         one canonical event per line, in seq order (the log return on
-        resume, PROTOCOL.md §6).
+        resume).
 
 Lines are UTF-8 JSON terminated by "\n", at most MAX_HEADER bytes.
 

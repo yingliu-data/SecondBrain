@@ -1,5 +1,5 @@
 """eventlog — the guest's local event buffer and the log-writer thread
-(PLAN.md ground rule "the host is the canonical store"; docs/GUEST.md).
+(the host is the canonical store; docs/GUEST.md).
 
 EventLog(dir)
   JSONL segments `events/000001.jsonl`, `events/000002.jsonl`, ... of at most

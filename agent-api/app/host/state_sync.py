@@ -1,4 +1,4 @@
-"""state_sync — the canonical store of a session's events (PLAN.md 1, 4.2, 5).
+"""state_sync — the canonical store of a session's events.
 
   StateSync(session_dir)
     .accept(event) -> ack_seq     validate, append to events/NNNNNN.jsonl, fsync,
@@ -22,22 +22,22 @@ N+1..2N in 000002.jsonl), so the segment of a seq is a function of the seq.
 
 Runs. A fresh guest (hello{resume: false}) begins with its own
 `session_start` at seq 1, so it opens a new run; a resumed guest (a parked
-snapshot restored, or a death resume with the log return, M3) continues the
+snapshot restored, or a death resume with the log return) continues the
 current run's seq. Each run is therefore its own log under
 `events/rNNNN/` (segments inside) with its own folded State; `begin_run()`
 opens the next one. What must hold across runs - the input_ids seen and the
 settle of each task - is folded from every run at load (`seen_inputs`,
 `settled`), so a redelivered input is answered without a guest. The host
 log `events/host-NNNNNN.jsonl` is one per session, across runs. With one
-long-lived guest per session (M3) there is one run and the layout is the
-plan's `events/000001.jsonl` one directory down.
+long-lived guest per session there is one run, so the layout is a single
+`events/000001.jsonl` log one directory down.
 
 Projections. The event log is the only record of the conversation and the
-trace: the `history.jsonl` / `logs/trace.jsonl` projections retired in M6
+trace: the `history.jsonl` / `logs/trace.jsonl` projections are retired
 (readers fold the log: app.session.eventlog). What remains is the memory
 projection below.
 
-Migrated runs (M6-CONTRACTS section 4). `migrated_run` is True while the
+Migrated runs. `migrated_run` is True while the
 current run is one `app.session.migrate --events` wrote from a legacy
 history (its session_start has `migrated: true`) and no guest has continued
 it yet (it still ends with the migration's checkpoint). The worker's first
@@ -47,7 +47,7 @@ never had a guest; its own allowlist holds only the legacy tools), then
 hello{resume: true} makes the guest fold the migrated run (the log return),
 so the prior conversation is in context and the run continues its seqs.
 
-Memory projection (D23, PLAN.md 7). A guest `memory{scope: session}` event
+Memory projection. A guest `memory{scope: session}` event
 whose `derived_from` is a compaction turn of this run (read from the fold:
 `state.turns[derived_from]`) is the summary the guest folded its prefix from;
 the host writes it to `{session_dir}/memory/{slug}.md` through MemoryStore
@@ -292,7 +292,7 @@ class StateSync:
         under the lock and the files are parsed outside it, stopping at that
         seq: a line being appended meanwhile is never parsed. Every stored
         event is acked (the host acks only after the append), so this is the
-        log return (M3-CONTRACTS §4) the bulk server calls from its thread."""
+        log return the bulk server calls from its thread."""
         through = None
         if run is None:
             with self._lock:
@@ -412,7 +412,7 @@ class StateSync:
         if event["type"] == "memory":
             self._project_memory(event["body"])
 
-    # ------------------------------------------------------------ memory (D23)
+    # ------------------------------------------------------------ memory
     def _project_memory(self, body: dict) -> None:
         """Write or remove the session-tier file of a compaction summary."""
         derived_from = body["derived_from"]

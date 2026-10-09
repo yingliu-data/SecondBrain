@@ -1,6 +1,6 @@
 """Guest avatar page — unauthenticated, rate-limited, skill-restricted.
 
-guest_profile(): the guest tenant (PLAN.md 8 "Guest tenant (avatar)"):
+guest_profile(): the guest tenant:
 `auth: origin`, `local_skills: ["avatar_control"]`, no guest built-ins, one
 tool round (max_tools 2, then a final turn without tools), never parks on a
 question. It runs on the same harness engine as every tenant (routes/guest.py).

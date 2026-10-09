@@ -1,4 +1,4 @@
-"""guest.coordinator — the single writer (PLAN.md section 6; docs/GUEST.md).
+"""guest.coordinator — the single writer (docs/GUEST.md).
 
     Coordinator(cfg, state, inbound, log_writer, transport, provider, ops, clock,
                 *, hooks=None, image_version="dev", workflow_run_id=None)
@@ -18,7 +18,7 @@ as clock{host_hello} and clock{host_heartbeat}. `ts` on the envelope is
 clock.now_iso() and is never read back. Ids are derive_id(user, tenant,
 session_id, seq, kind).
 
-Sync mode only (M1): a turn starts when nothing is running and nothing is
+Sync mode only: a turn starts when nothing is running and nothing is
 awaited. The wake rules:
   - the task's first turn starts on the task input (no wake event: the task is
     the wake, as in the goldens);
@@ -36,11 +36,11 @@ settle{failed}; finish_reason "length" → no tool runs, settle{done} with the
 partial text; question deadline → guard_decision{deny, unanswered}, three →
 settle{escalated}; doom loop (same name+args three times) → a question.
 
-Sides: guest tools go to ops.submit (mcp: ops.submit_mcp, M4); host/device calls wait for
+Sides: guest tools go to ops.submit (mcp: ops.submit_mcp); host/device calls wait for
 side_result with cfg.limits.op_timeout_s[side]; the `question` built-in waits
 for ui_response. One task per run(): run() returns the settle body.
 
-M2 (docs/GUEST.md "M2 contracts"):
+Streaming, token estimate, compaction, budget, memory:
   - streaming: every regular turn calls the provider with
     stream=config.stream_enabled(cfg) and an on_delta that sends live
     delta{session_id, turn_id, kind, index, text} per fragment straight from
@@ -84,13 +84,13 @@ M2 (docs/GUEST.md "M2 contracts"):
   - turn_start.workspace_tree_id = ops.workspace_tree_id() (None when the
     operation manager has no such method, as the test fakes).
 
-M1 deviations from the plan, still in place:
+Known gaps:
   - an op timeout has no clock kind in the schema, so it is recorded as
     op_state{timeout, duration_ms} without a clock event;
-  - malformed tool arguments get an error result straight away (the repair
-    turn is M1b).
+  - malformed tool arguments get an error result straight away (there is no
+    repair turn yet).
 
-M3 (docs/M3-CONTRACTS.md sections 3–5, docs/GUEST.md "M3"):
+Park, resume and restore:
   - park{reason}: honoured when no provider call is in flight and no guest
     operation runs (host/device/mcp calls and open questions do not hold it
     back). Until then no new turn starts (it is deferred like a turn on a
@@ -121,7 +121,7 @@ M3 (docs/M3-CONTRACTS.md sections 3–5, docs/GUEST.md "M3"):
   - run() may be called again after a settle: each call handles one task
     (the guest stays up for the next one).
 
-M4 (docs/M4-CONTRACTS.md section 3, docs/GUEST.md "M4"):
+MCP calls:
   - an mcp-side call is a guest operation: op_state{running, side_ref:
     "gateway:<upstream>"} -> ops.submit_mcp (POST /mcp tools/call over
     :5011, header X-SB-Call: call_id) -> the ("op", ...) result -> op_state
@@ -144,7 +144,7 @@ M4 (docs/M4-CONTRACTS.md section 3, docs/GUEST.md "M4"):
     gateway's answer to it is the call's result. Repeatable: every round is
     one more input_required + question on the same call_id. A suspended call
     holds no park (it is "asked").
-  - park (M4-CONTRACTS 3.3): an in-flight mcp call does not hold a park
+  - park: an in-flight mcp call does not hold a park
     either (the forwarder owns it). Parking (and a park grace that kills
     guest ops) first detaches every in-flight mcp op (ops.detach_mcp: the
     connection is closed, nothing is reported); its op timer is not paused
@@ -156,7 +156,7 @@ M4 (docs/M4-CONTRACTS.md section 3, docs/GUEST.md "M4"):
     is lost, even after a park; one in input_required waits for its answer
     (attempt and input_request come from the folded op_state).
 
-M5 (docs/M5-CONTRACTS.md section 4, docs/GUEST.md "M5"):
+Questions that park the task:
   - limits.answer_wait_s > 0: a question deadline (or a zero timeout without
     UI) is no deny: _question_expired keeps the question open (_waiting, no
     timer) and requests a park with reason "question"; _park writes
@@ -211,8 +211,8 @@ LOST_CONTENT = "error: operation lost (VM restarted)"
 PAUSED_ON_PARK = ("wall_clock", "question_deadline", "op_timeout", "idle_timer")
 HOST_CLOCK_KINDS = ("host_hello", "host_heartbeat")   # clock events in host time, not the guest's
 RESUMED = "resumed"               # clock kind written first on every wake from a park (ends its stretch)
-PARK_QUESTION = "question"        # M5: parked.reason of a park on an unanswered question
-ESCALATED = "escalated"           # M5: the abort reason that settles escalated
+PARK_QUESTION = "question"        # parked.reason of a park on an unanswered question
+ESCALATED = "escalated"           # the abort reason that settles escalated
 
 
 class FatalProtocolError(RuntimeError):
@@ -343,7 +343,7 @@ class Coordinator:
         self._call_counts: dict[str, int] = {}
         self._pending_inputs: list[str] = []   # input_ids staged since the last turn start
 
-        # context (M2)
+        # context
         self._correction = 1.0                 # usage.prompt_tokens / raw estimate
         self._turn_raw: int | None = None      # raw estimate of the turn in flight
         self._tokens_before: int | None = None # of the running compaction turn
@@ -360,13 +360,13 @@ class Coordinator:
         self.acked_seq = 0
         self.last_cseq = 0                # highest control cseq this loop has processed
 
-        # M3: park, resume, settle manifest
+        # park, resume, settle manifest
         self.workspace = workspace
         self.bulk = bulk
         self._paused: dict[str, tuple] = {}           # token -> (kind, remaining s) while parked
         self._park_reason: str | None = None          # the host's park waiting for its moment
-        self._question_park_pending = False           # M5: a park on the oldest of _waiting is due
-        self._waiting: set[str] = set()               # M5: questions past their deadline, parked on
+        self._question_park_pending = False           # a park on the oldest of _waiting is due
+        self._waiting: set[str] = set()               # questions past their deadline, parked on
         self.parked = False                           # parked: idle until the link comes back
         self._session_start: dict | None = None       # the event (head of the checkpoint chain)
         self._last_checkpoint_hash: str | None = None
@@ -637,13 +637,13 @@ class Coordinator:
         return min(self._waiting, key=self._question_seq)
 
     def _request_question_park(self, message: str) -> None:
-        """M5: park on the oldest question past its deadline at the loop's
+        """Park on the oldest question past its deadline at the loop's
         next _maybe_park (a pending host park is folded into it)."""
         self._question_park_pending = True
         self.log(message, level="info", question_id=self._oldest_waiting())
 
     def _park_next_waiting(self) -> None:
-        """M5: another question went past its deadline while the task was
+        """Another question went past its deadline while the task was
         parked on the one just answered: park on that one next."""
         if self._waiting and self.settled is None and not self.parked and not self._question_park_pending:
             self._request_question_park("another question is unanswered: parking for it")
@@ -751,7 +751,7 @@ class Coordinator:
             extra["duration_ms"] = duration
         self._finish_call(call_id, state, content, spill_ref=spill_ref, **extra)
 
-    # ------------------------------------------------------------ mcp (M4)
+    # ------------------------------------------------------------ mcp
     # _mcp_calls[call_id] = {args, attempt, state, timer_ms, input_response, started_ms}:
     #   attempt   the POST in flight or last sent (rpc id <call_id>#<attempt>)
     #   state     "inflight" (a POST runs in ops), "detached" (park: the
@@ -825,7 +825,7 @@ class Coordinator:
                           duration_ms=max(0, self.clock.now_ms() - mcp["started_ms"]))
 
     def _on_op_input(self, call_id: str, request: dict) -> None:
-        """The gateway needs input: suspend the op and ask (module doc, M4)."""
+        """The gateway needs input: suspend the op and ask (module doc)."""
         mcp = self._mcp_calls.get(call_id)
         call = self.state.open_calls.get(call_id)
         if mcp is None or call is None or "result" in call or call_id not in self._turn_pending:
@@ -861,7 +861,7 @@ class Coordinator:
 
     def _detach_mcp(self) -> None:
         """Park: close every in-flight mcp connection without cancelling the
-        op (the forwarder keeps the call, M4-CONTRACTS 3.3)."""
+        op (the forwarder keeps the call)."""
         try:
             detached = self.ops.detach_mcp()
         except Exception as exc:    # noqa: BLE001
@@ -960,7 +960,7 @@ class Coordinator:
         self._begin_turn("regular", request, at=at)
 
     def _start_compaction(self, tokens_before: int) -> None:
-        """The compaction turn (M2): its request is the system block, the
+        """The compaction turn: its request is the system block, the
         committed prefix and the instruction; includes_through_seq is the
         previous turn's, so it commits nothing and the range it summarises is
         exactly the committed prefix."""
@@ -1305,8 +1305,8 @@ class Coordinator:
         self._question_expired(qid)
 
     def _question_expired(self, qid: str) -> None:
-        """A question's deadline passed unanswered. answer_wait_s > 0 (M5,
-        D12): the task parks on it (the question stays open; an input-required
+        """A question's deadline passed unanswered. answer_wait_s > 0:
+        the task parks on it (the question stays open; an input-required
         mcp op stays suspended, no cancel); the park itself happens at the
         loop's next _maybe_park, never in the middle of a round. Otherwise the
         question is denied (three denials escalate)."""
@@ -1434,7 +1434,7 @@ class Coordinator:
         self._tokens_before = None
 
     def _abort(self, reason: str) -> None:
-        """abort{reason} (M5): "escalated" settles escalated (the workflow's
+        """abort{reason}: "escalated" settles escalated (the workflow's
         answer_wait_s ran out), anything else settles aborted; the answer is
         empty and detail carries the reason. settle.reason stays "abort"
         (main exits on it)."""
@@ -1467,7 +1467,7 @@ class Coordinator:
         self.settled = body
 
     def _settle_manifest(self) -> dict:
-        """M3 section 5: the workspace manifest; changed files and the
+        """The workspace manifest; changed files and the
         manifest go to the host on :5001 first (when there is a client)."""
         if self.workspace is None:
             return {}
@@ -1478,7 +1478,7 @@ class Coordinator:
             self.log(f"workspace manifest failed: {exc}", level="warning")
             return {}
 
-    # ------------------------------------------------------------ park (M3)
+    # ------------------------------------------------------------ park
     def _guest_running(self) -> set:
         """Calls of the round that run as guest operations (not host-side
         calls waiting for side_result, not questions waiting for an answer,
@@ -1549,7 +1549,7 @@ class Coordinator:
         self._resume_timers()
         self._reattach_mcp()
 
-    # ------------------------------------------------------------ resume from the log (M3)
+    # ------------------------------------------------------------ resume from the log
     def restore(self, events: list) -> None:
         """Fold the log the host returned (hello{resume: true}, bulk get) into
         the state and rebuild the loop's own bookkeeping from it, as the live
@@ -1693,7 +1693,7 @@ class Coordinator:
 
     def _resume_restored(self, restored: dict) -> None:
         """After restore(): record the host's time, settle what the dead guest
-        left open and wake the task (module doc, M3)."""
+        left open and wake the task (module doc)."""
         if restored["after_park"]:            # a wake from a park: its stretch ends here
             self.emit("clock", {"kind": RESUMED, "at": self.clock.now_ms()})
             self._restore_clocks(restored)
@@ -1749,13 +1749,13 @@ class Coordinator:
         for call_id in self._side_calls:
             self._arm_op_timeout(call_id)
         due = self._restored_question_deadlines(restored["question_left_ms"])
-        # a fresh process never re-attaches (M4-CONTRACTS 3.3): in-flight mcp calls are lost
+        # a fresh process never re-attaches: in-flight mcp calls are lost
         lost = [cid for cid, m in self._mcp_calls.items() if m["state"] == "inflight"]
         self._suppress_wake = True
         try:
             for cid in lost:
                 self._finish_call(cid, "lost", LOST_CONTENT)
-            for qid in due:             # M5: past their due time: the normal expiry path
+            for qid in due:             # past their due time: the normal expiry path
                 if self.settled is not None:
                     break
                 if self._questions[qid]["expired"]:

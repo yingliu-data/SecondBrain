@@ -1,5 +1,5 @@
-"""fake_gateway — the host forwarder + MCP gateway double on `{dir}/v.sock_5011`
-(docs/M4-CONTRACTS.md sections 3.1-3.3), for the guest tests.
+"""fake_gateway — the host forwarder + MCP gateway double on
+`{dir}/v.sock_5011`, for the guest tests.
 
     FakeGateway(dir, tools=None).start() / .stop()
     .requests          every POST /mcp: {"headers": {lower-case name: value}, "body": dict}

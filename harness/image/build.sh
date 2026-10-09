@@ -83,7 +83,7 @@ from guest import main as _main_module
 
 if hasattr(_main_module, "main"):
     sys.exit(_main_module.main())
-# M1 scaffolding: guest.main may still be a stub. Fail loudly but import-clean.
+# Scaffolding: guest.main may still be a stub. Fail loudly but import-clean.
 sys.stderr.write("guest.pyz: guest.main has no main() yet (stub build)\n")
 sys.exit(3)
 PY

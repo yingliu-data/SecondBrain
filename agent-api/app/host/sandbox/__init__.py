@@ -1,4 +1,4 @@
-"""sandbox — where the guest harness runs (PLAN.md D6a, D18).
+"""sandbox — where the guest harness runs.
 
 `Sandbox` is the interface the worker drives. Two backends:
 
@@ -48,7 +48,7 @@ class Sandbox(ABC):
     @abstractmethod
     def is_alive(self) -> bool: ...
 
-    # --- M3: snapshots (PLAN.md D18, docs/PROTOCOL.md §5–6) -----------------
+    # --- snapshots ------------------------------------------------------------
     # Default implementations: no snapshots (restore raises SandboxError, so
     # the worker falls back to start()).
 

@@ -1,4 +1,4 @@
-"""host — the host half of the actor (PLAN.md section 3, 8): one per session.
+"""host — the host half of the actor: one per session.
 
 endpoints.py   per-session Unix-socket listeners for the vsock ports; Firecracker's
                host-side vsock sockets ({uds}_{port}) and the test double are the same code
@@ -10,13 +10,13 @@ gateway_forwarder.py  :5011 -> mcp-gateway (POST /mcp only), identity headers, h
 uds_http.py    the threaded HTTP server llm_proxy and gateway_forwarder share
 state_sync.py  ack after append; events/ segments in the session dir; projections
 stream.py      events -> SSE (token, tool_call, avatar_command, question, done, seq, error)
-sandbox/       firecracker.py (boot, kill; snapshots in M3), local.py (guest subprocess, tests)
+sandbox/       firecracker.py (boot, kill, snapshots), local.py (guest subprocess, tests)
 
-Every tenant runs this engine (M6: the in-process legacy loop, AGENT_ENGINE
+Every tenant runs this engine (the in-process legacy loop, AGENT_ENGINE
 and the per-tenant `engine` switch are gone).
 
 Dependencies: agent-api imports the stdlib-only `protocol` package and runs
 the guest from `secondbrain-harness` (pyproject: path ../harness, editable).
-The Docker image must `COPY ../harness` next to the app in M1's image step
-(the Dockerfile is not edited here); HARNESS_GUEST_ROOT points at it.
+The Docker image must `COPY ../harness` next to the app; HARNESS_GUEST_ROOT
+points at it.
 """

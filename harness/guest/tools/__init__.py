@@ -16,7 +16,7 @@ The schemas are written for a 14B model: short, imperative descriptions,
 `required` lists and `additionalProperties: false` everywhere. Every `path`
 argument is relative to the workspace and must stay inside it after
 normalisation (no absolute paths, no `..` escapes). `question` has no
-implementation: the coordinator handles it (PLAN.md D12).
+implementation: the coordinator handles it.
 
 Pure: no I/O here; the implementations live in guest.tools.builtin.
 """
@@ -40,7 +40,7 @@ class ToolSpec:
     is_question: bool = False
 
 
-# Tools whose operations must run serially per file (PLAN.md section 8).
+# Tools whose operations must run serially per file.
 SERIALISED = ("write", "edit", "apply_patch")
 
 # Argument keys that name workspace paths.

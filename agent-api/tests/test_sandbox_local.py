@@ -1,4 +1,4 @@
-"""LocalSandbox M3 emulation (docs/M3-CONTRACTS.md §2): snapshot = freeze the
+"""LocalSandbox emulation of snapshots: snapshot = freeze the
 parked guest process (SIGSTOP) keeping its memory, restore(session) = SIGCONT,
 restore(base) = a fresh guest. A stand-in `guest.main` counts in memory and
 appends the counter to a file, so "same process, same state" is observable."""

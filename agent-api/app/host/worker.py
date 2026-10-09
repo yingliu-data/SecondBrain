@@ -1,5 +1,5 @@
-"""worker — the host half of one session (PLAN.md 3, 4, 8; M1: direct call,
-Temporal activities in M5).
+"""worker — the host half of one session (a direct call, or
+Temporal activities).
 
   Worker(session, tenant, registry, sandbox, sinks=None)
     .act(task_input) -> settle body     task_input = {input_id, text, kind?,
@@ -17,7 +17,7 @@ A redelivered input (an input_id already seen) is sent again anyway - the
 guest dedupes - and the caller attaches to the running stream; one that
 already settled gets its answer replayed from the stored settle, no guest.
 
-M3 (harness/docs/M3-CONTRACTS.md): one long-lived guest per session.
+One long-lived guest per session.
   vm_state      none -> booting -> running -> parking -> parked -> booting ...
   boot          a fresh session restores the BASE snapshot when the sandbox
                 has one (else a rootfs start) and sends hello{resume: false}
@@ -36,7 +36,7 @@ M3 (harness/docs/M3-CONTRACTS.md): one long-lived guest per session.
   host events   vm{op: boot|restore|snapshot|destroy, source: rootfs|base|
                 session, ms}; workflow{parked|resume|idle|heartbeat ...}
 
-M5 (harness/docs/M5-CONTRACTS.md): two drivers over one task API. The
+Two drivers over one task API. The
 Temporal activities (activities.py) are one; act() is the other, in-process
 (the direct path). `answer_wait_s` (the tenant's, session_config, on either
 path) > 0: hello limits carry it, the guest parks
@@ -117,13 +117,13 @@ SETTLE_OUTCOMES = ENUMS["settle"]["outcome"]
 DROPPED_WHILE_PARKED = frozenset({"heartbeat", "park"})
 # unacked at a death resume: NOT numbered again after the new hello
 NOT_CARRIED = frozenset({"hello", "heartbeat", "park"})
-# M5: the only controls that wake a guest parked on a question (send_control)
+# the only controls that wake a guest parked on a question (send_control)
 QUESTION_PARK_WAKERS = ("ui_response", "abort")
 
 
 def wake_order(item: tuple[str, dict]) -> bool:
-    """Sort key of the held controls a wake sends: `ui_response` first
-    (M3-CONTRACTS §3.5), the rest in the order they were held."""
+    """Sort key of the held controls a wake sends: `ui_response` first,
+    the rest in the order they were held."""
     return item[0] != "ui_response"
 
 
@@ -146,7 +146,7 @@ def strip_current_time(prompt: str) -> str:
     """The system block is fixed per session: remove the {current_time}
     placeholder (and a "Current time:" label with it); a line that held
     nothing else is dropped. The guest puts the time in its per-turn
-    preamble (PLAN.md 7)."""
+    preamble."""
     out = []
     for line in prompt.splitlines():
         had = bool(line.strip())
@@ -230,18 +230,18 @@ class Worker:
         self._current: tuple[str, asyncio.Future, float] | None = None
         self.last_hello: dict | None = None
         self.closed = False
-        # M3: park, resume, idle, death
+        # park, resume, idle, death
         self.bulk: BulkServer | None = None
-        # M4: the :5011 forwarder (per listener) and its worker-lived relay
-        # (held calls survive the listener closing around a park, §3.3)
+        # the :5011 forwarder (per listener) and its worker-lived relay
+        # (held calls survive the listener closing around a park)
         self.gateway: GatewayForwarder | None = None
         self.gateway_relay: GatewayRelay | None = None
         # the session's gateway entries from the first successful fetch:
         # pins are fixed per session, a resume hello reuses them
         self.gateway_entries: list[dict] | None = None
-        # M5: the tenant's (either path); > 0 = a question deadline parks the
+        # the tenant's (either path); > 0 = a question deadline parks the
         # task, the driver waits this long for the answer (0 = the guest
-        # denies, M1-M4 behaviour)
+        # denies)
         self.answer_wait_s = session_config(tenant).answer_wait_s
         self._changed = asyncio.Event()             # replaced (and set) on every change
         # none | booting | running | parking | parked; the session snapshot
@@ -282,11 +282,11 @@ class Worker:
         if input_id is not None:
             self._sink_input[id(q)] = input_id
         for call in self.device_calls.open_for(self.session_key):
-            # PLAN.md 8: an open device call is re-emitted to the stream that attaches
+            # an open device call is re-emitted to the stream that attaches
             q.put_nowait(sse("tool_call", call))
         current = self.current_input_id
         if input_id is None or current is None or input_id == current:
-            # M5 §3: so is an open question (the phone gets it on reconnect);
+            # so is an open question (the phone gets it on reconnect);
             # not to the stream of an input queued behind the asking task
             for question in self.open_questions():
                 q.put_nowait(sse("question", question))
@@ -320,7 +320,7 @@ class Worker:
         for q in list(self.sinks):
             q.put_nowait(None)
 
-    # ------------------------------------------------------------ M5: the task API
+    # ------------------------------------------------------------ the task API
     @property
     def vm_state(self) -> str:
         return self._vm_state
@@ -417,7 +417,7 @@ class Worker:
         """`aw`'s result. With `input_id`: the parked outcome as soon as the
         guest is parked on a question of that input. With `wall_clock_s`:
         asyncio.TimeoutError once it (+5 s) ran out; the clock stops while
-        the task is parked on a question (M5, D12: the workflow's answer
+        the task is parked on a question (the workflow's answer
         timer bounds that wait)."""
         left = None if wall_clock_s is None else wall_clock_s + 5
         while True:
@@ -508,7 +508,7 @@ class Worker:
         return status
 
     def abort(self, reason: str) -> str:
-        """abort{reason}: the guest settles the running task itself (M5 §4);
+        """abort{reason}: the guest settles the running task itself;
         send_control's status."""
         self._ensure_plumbing()
         status = self.send_control("abort", {"reason": reason})
@@ -571,7 +571,7 @@ class Worker:
     # ------------------------------------------------------------ hello
     def tool_entries(self) -> list[dict]:
         """hello.config.tools: host/device tools, then the gateway's mcp
-        entries verbatim (M4-CONTRACTS §4, fetched by load_gateway_entries)
+        entries verbatim (fetched by load_gateway_entries)
         except one named like a host tool. Guest built-ins are implicit."""
         host = self.host_tool_entries()
         names = {e["name"] for e in host}
@@ -601,7 +601,7 @@ class Worker:
 
     def host_tool_entries(self) -> list[dict]:
         """Host/device tools: the allowlist applied to the registry's
-        skills, each with its OpenAI schema (keyword prefilter retired, D16)."""
+        skills, each with its OpenAI schema (keyword prefilter retired)."""
         allowed = self.tenant.allowed_skill_names()
         server = self.registry.get_server_tool_names(allowed)
         device = self.registry.get_device_tool_names(allowed)
@@ -636,7 +636,7 @@ class Worker:
         }
 
     def attachments(self, text: str) -> list[dict]:
-        """Recalled memory bodies for the input's preamble (D23)."""
+        """Recalled memory bodies for the input's preamble."""
         cb = ContextBuilder(user_id=self.user, session=self.session,
                             base_prompt=self.tenant.system_prompt)
         recalled = cb.user_memory.recall(text) + cb.session_memory.recall(text)
@@ -652,20 +652,20 @@ class Worker:
             "op_timeout_s": {"guest": 120, "host": HARNESS_HOST_TOOL_TIMEOUT_S,
                              "device": TOOL_TIMEOUT, "mcp": 300},
             "spill_threshold": HARNESS_SPILL_THRESHOLD,
-            # M2: the guest compacts when its estimate exceeds window - reserve
+            # the guest compacts when its estimate exceeds window - reserve
             # (the token budget is a proxy knob, not a guest limit)
             "context_window_tokens": HARNESS_CONTEXT_WINDOW_TOKENS,
             "reserve_tokens": HARNESS_RESERVE_TOKENS,
-            # M3: running guest ops get this long after `park`, then killed
+            # running guest ops get this long after `park`, then killed
             "park_grace_s": self.park_grace_s,
-            # M5: > 0 = a question deadline parks the task (either driver)
+            # > 0 = a question deadline parks the task (either driver)
             "answer_wait_s": int(self.answer_wait_s),
         }
 
     def build_hello(self, resume: bool = False) -> dict:
         params: dict = {"max_tokens": self.tenant.max_tokens or LLM_MAX_TOKENS,
                         "temperature": LLM_TEMPERATURE,
-                        "stream": LLM_STREAM}      # D17: false = one call per turn
+                        "stream": LLM_STREAM}      # false = one call per turn
         if not LLM_ENABLE_THINKING:
             params["chat_template_kwargs"] = {"enable_thinking": False}
         config = {
@@ -706,8 +706,8 @@ class Worker:
                       wait holds the task; a woken guest would not park
                       again): the others wait for that wake
           "dropped"   not sent at all: a `side_result` for a call the guest
-                      declared lost (logged `input{dedupe: late}`, PLAN.md
-                      5), or a heartbeat / park to a parked guest
+                      declared lost (logged `input{dedupe: late}`),
+                      or a heartbeat / park to a parked guest
           "no_guest"  no guest run can take it (never booted, or gone)"""
         if type == "side_result" and body.get("call_id") in self._lost_calls:
             self.sync.host_event("input", {"kind": "side_result", "call_id": body.get("call_id"),
@@ -804,7 +804,7 @@ class Worker:
     def _close_guest_ports(self) -> None:
         """No :5000/:5001/:5011 listener while the guest is parked: its
         idle-wait loop must not reconnect before the snapshot (sandbox
-        finding). Held gateway calls keep running in the relay (§3.3)."""
+        finding). Held gateway calls keep running in the relay."""
         if self.endpoints is None:
             return
         self.endpoints.close_port(self.ports["control"])
@@ -891,7 +891,7 @@ class Worker:
         on :5001 and continues the run's seq; the unacked controls of the
         previous guest are numbered again after the hello. Base snapshot
         restore when the sandbox has one, else a rootfs boot (start).
-        M6: a fresh boot whose current run is a migrated legacy history no
+        A fresh boot whose current run is a migrated legacy history no
         guest continued yet (StateSync.migrated_run) is a resume: the guest
         folds the migrated run, so the prior conversation is in context."""
         carried: list[tuple[str, dict]] = []
@@ -946,11 +946,11 @@ class Worker:
 
     # ------------------------------------------------------------ park / wake
     async def park(self, reason: str = "requested", *, idle: bool = False) -> bool:
-        """Park the guest (M3-CONTRACTS §3): send `park`, wait for the acked
+        """Park the guest: send `park`, wait for the acked
         `parked`, snapshot the VM to {session}/vm/snapshot. True when parked.
         The next act()/ui_response/side_result restores it.
 
-        idle=True (the idle timer, D18): only while no task runs, and the VM
+        idle=True (the idle timer): only while no task runs, and the VM
         is destroyed afterwards (also a guest that could not park)."""
         self._ensure_plumbing()
         async with self._vm_lock:
@@ -1006,7 +1006,7 @@ class Worker:
 
     async def _adopt_park(self, reason: str, question_id: str | None = None,
                           input_id: str | None = None) -> None:
-        """The guest parked on its own (M5 §4: a question deadline with
+        """The guest parked on its own (a question deadline with
         answer_wait_s > 0): snapshot it; a question park is what
         wait_outcome() reports for the input."""
         question = ({"input_id": input_id, "question_id": question_id}
@@ -1064,7 +1064,7 @@ class Worker:
             self.session_idle_s, lambda: self._spawn(self._idle_park()))
 
     async def _idle_park(self) -> None:
-        """session_idle_s after a settle: park + snapshot + destroy (D18)."""
+        """session_idle_s after a settle: park + snapshot + destroy."""
         self._idle_handle = None
         if self.closed:
             return
@@ -1130,7 +1130,7 @@ class Worker:
         return await self._drive(input_id, task)
 
     async def _drive(self, input_id: str, task: asyncio.Task) -> dict:
-        """`task`'s result, as the session workflow drives it (M5 §4): at a
+        """`task`'s result, as the session workflow drives it: at a
         question park the stream stays open (the question went out) and the
         answer is awaited up to answer_wait_s (POST /chat answer_to ->
         answer() wakes the guest, the task runs on); none in time -> abort
@@ -1316,7 +1316,7 @@ class Worker:
                 self._channel.close()
             self._channel = ch
             self._link_up.set()
-            # PROTOCOL.md 4: the host answers with its ack of seq, then resends
+            # the host answers with its ack of seq, then resends
             # everything the guest has not acked (its handshake ack arrives as a
             # normal ack; the guest's inbox drops what it already delivered).
             ch.send(ack(self.session_id, ack_seq=self.sync.last_seq))
@@ -1338,7 +1338,7 @@ class Worker:
             if self.vm_state == "running":
                 self.vm_state = "none"  # an idle guest went away (exit at settle)
             return
-        # death mid-task (M3-CONTRACTS §4)
+        # death mid-task
         if self.vm_state == "parking":
             self.vm_state = "running"   # the waiting park() gives up
             self._parked_evt.set()      # ... at once
@@ -1373,7 +1373,7 @@ class Worker:
         before = self.sync.last_seq
         if ev.get("type") == "parked" and ev.get("seq") == before + 1:
             # before the ack: once it is acked the guest closes and idle-waits,
-            # and must find no listener (M3-CONTRACTS §3, sandbox finding)
+            # and must find no listener (sandbox finding)
             self._close_guest_ports()
         try:
             acked = self.sync.accept(ev)

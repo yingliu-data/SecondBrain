@@ -1,6 +1,6 @@
 """GatewayForwarder on the :5011 Unix socket against a fake gateway over TCP:
 header stamping and stripping, POST /mcp only, streaming, outage, and the
-held calls of M4-CONTRACTS §3.3 (survive a dropped guest and a park)."""
+held calls (survive a dropped guest and a park)."""
 import json
 import socket
 import threading
@@ -100,7 +100,7 @@ def test_unreachable_gateway_is_502_and_a_host_event(tmp_path):
         ep.close()
 
 
-# ---------------------------------------------------------------- held calls (§3.3)
+# ---------------------------------------------------------------- held calls
 def raw_post(path, headers: dict, body: dict) -> socket.socket:
     """Send one POST /mcp on a raw Unix socket and return it (unread)."""
     raw = json.dumps(body).encode()

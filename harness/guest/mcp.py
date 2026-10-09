@@ -1,5 +1,4 @@
-"""guest.mcp — the MCP client over :5011 (PLAN.md section 8 "MCP side",
-docs/M4-CONTRACTS.md section 3; docs/GUEST.md "M4").
+"""guest.mcp — the MCP client over :5011 (docs/GUEST.md).
 
     McpClient(connector, port=5011, *, path="/mcp", host="gateway.local")
         .start(call_id, name, arguments, *, attempt=0, input_response=None,
@@ -18,14 +17,14 @@ docs/M4-CONTRACTS.md section 3; docs/GUEST.md "M4").
     answer_content(schema, answer) -> dict
     input_response(request_state, answer, schema) -> dict
 
-Wire (M4-CONTRACTS 3.1): HTTP/1.1 `POST /mcp` over the connector's socket
+Wire: HTTP/1.1 `POST /mcp` over the connector's socket
 (the vsock to the host forwarder; the Unix-socket double in tests) — the same
 ConnectorConnection guest.provider uses for :5010. The body is one JSON-RPC
 request `{"jsonrpc": "2.0", "id", "method": "tools/call", "params": {name,
 arguments[, _meta]}}` with `Content-Type: application/json` and `Accept:
 application/json, text/event-stream`. The gateway is stateless: no
 `initialize`, no session header. Every POST carries `X-SB-Call: <call_id>`
-(M4-CONTRACTS 3.3: the host forwarder holds the call across a park, keyed by
+(the host forwarder holds the call across a park, keyed by
 it); a re-attach after a park re-sends the same request with
 `X-SB-Reattach: 1` and a 410 answer means the forwarder lost the call
 (McpError.status 410: the caller records the op lost). A JSON body is the JSON-RPC response; an SSE

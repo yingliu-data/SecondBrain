@@ -1,5 +1,4 @@
-"""M5 guest: questions park the task, escalation via abort (docs/M5-CONTRACTS.md
-section 4, PLAN.md D12).
+"""Guest questions: questions park the task, escalation via abort.
 
 Coordinator scenarios with the fakes of test_guest_coordinator (manual clock),
 then guest.main as a subprocess against FakeHost / FakeLLM / FakeGateway.

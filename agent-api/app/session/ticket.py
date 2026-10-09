@@ -3,7 +3,7 @@
 One ticket per operation (``chat.turn``, ``llm.chat_completion``, ``tool.X``).
 Tickets are append-only: ``start()`` writes the open record, ``finish()``
 rewrites it atomically with the final state / summary / manifest. The
-ticket file is the record (M6: no trace.jsonl rows any more).
+ticket file is the record (no trace.jsonl rows any more).
 """
 from __future__ import annotations
 

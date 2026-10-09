@@ -38,7 +38,7 @@ def test_state_forward_only(session):
 
 
 def test_history_comes_from_the_event_log(session):
-    """M6: no history.jsonl; read_history folds every run's inputs + settles."""
+    """No history.jsonl; read_history folds every run's inputs + settles."""
     store(session, LogBuilder().start().text_task("in_1", "hello", "hi there").events)
     store(session, LogBuilder().start().text_task("in_2", "again", "sure").events, new_run=True)
     msgs = session.read_history()
@@ -76,7 +76,7 @@ def test_ticket_lifecycle(session):
     assert record["state"] == "success"
     assert record["completed_at"]
     assert session.read_meta()["last_ticket_id"] == ticket.ticket_id
-    assert not session.trace_jsonl.exists()      # M6: the ticket file is the record
+    assert not session.trace_jsonl.exists()      # the ticket file is the record
 
 
 def test_manifest_detects_tamper(session):

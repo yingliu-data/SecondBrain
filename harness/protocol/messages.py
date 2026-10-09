@@ -1,5 +1,5 @@
 """messages — vsock control-channel envelopes and ack/resend bookkeeping
-(PLAN.md sections 4.2–4.5, docs/PROTOCOL.md).
+(docs/PROTOCOL.md).
 
 Pure data structures: no sockets, no threads, no clock, no randomness. The
 guest's `guest/transport` reads and writes the lines; the host's vsock server
@@ -179,7 +179,7 @@ def live(type: str, body: dict) -> dict:
 
 
 def handshake(session_id: str, last_ack_cseq: int) -> dict:
-    """The guest's first message on a new control connection (PLAN 4.5): its
+    """The guest's first message on a new control connection: its
     ack of the highest contiguous cseq it has delivered. The host answers
     with its own ack of `seq` and both sides resend from ack + 1."""
     return ack(session_id, ack_cseq=last_ack_cseq)
@@ -247,7 +247,7 @@ class Outbox:
     Numbers are minted from 1 and never reused; they belong to the session
     and survive reconnects and VM restores. A pushed message stays here
     until the peer acks it; everything after the peer's ack is the resend
-    list after a reconnect (PLAN 4.5)."""
+    list after a reconnect."""
 
     def __init__(self, session_id: str, field: str = "seq"):
         self.session_id = _check_session_id(session_id)
@@ -296,8 +296,8 @@ class Outbox:
 
     def resume_from(self, n: int) -> None:
         """Continue a stream whose messages 1..n the peer already holds (a
-        fresh process taking over a session after a log return, PROTOCOL.md
-        section 6): the next message is n + 1. Only on an unused Outbox."""
+        fresh process taking over a session after a log return): the next
+        message is n + 1. Only on an unused Outbox."""
         _check_ack_value(self.field, n)
         if self.highest_sent or self._pending:
             raise ProtocolError(f"resume_from({n}) on an outbox that already sent "
@@ -336,7 +336,7 @@ class Inbox:
     def resume_from(self, n: int) -> None:
         """Treat 1..n as delivered: the next expected number is n + 1. A
         fresh guest process learns its cseq floor from the resume hello's own
-        cseq (docs/M3-CONTRACTS.md section 4). Only before anything was
+        cseq. Only before anything was
         delivered."""
         _check_ack_value(self.field, n)
         if self.last_delivered:

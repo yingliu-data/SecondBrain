@@ -1,5 +1,5 @@
 """replay — load, fold and verify a session's event logs from disk
-(PLAN.md sections 12-14; docs/M6-CONTRACTS.md section 1; docs/REPLAY.md).
+(docs/REPLAY.md).
 
     python -m protocol.replay replay <target>...         fold, print a state summary + state_hash
     python -m protocol.replay verify <target>...         validate + fold + checkpoint chain

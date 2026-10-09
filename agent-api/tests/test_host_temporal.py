@@ -1,4 +1,4 @@
-"""M5: POST /chat over the session workflow (harness/docs/M5-CONTRACTS.md).
+"""POST /chat over the session workflow.
 
 The REAL flows.SessionWorkflow on the Temporal time-skipping test server
 (the same environment flows/flows/tests/conftest.py starts), the real host
@@ -259,7 +259,7 @@ async def test_question_parks_then_answer_resumes(h, monkeypatch):
                                                           "question_id": st.question_id}
     parked = h.host_events("parked")
     assert parked[-1]["reason"] == "question" and parked[-1]["question_id"] == st.question_id
-    # an attaching stream gets the open question again (M5 §3)
+    # an attaching stream gets the open question again
     sink = w.attach("in_q1")
     item = sink.get_nowait()
     w.detach(sink)
@@ -407,7 +407,7 @@ async def test_tenant_workflow_entry_and_doc(tmp_path):
                         "wall_clock_s": 300,
                         "schedules": [{"cron": "0 7 * * *", "prompt": "Morning brief",
                                        "session": "daily"}]},
-                       # M6: an `engine` is ignored, every tenant's schedules run
+                       # an `engine` is ignored, every tenant's schedules run
                        {"name": "b", "api_key": "kb", "engine": "legacy",
                         "schedules": [{"cron": "0 8 * * *", "prompt": "also"}]}]}
     p = tmp_path / "t.json"

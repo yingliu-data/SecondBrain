@@ -9,7 +9,7 @@ connects to. One listener code path serves both.
   Endpoints(session_dir, ports)    create/unlink/chmod the listeners
     .accept_control(timeout)       blocking accept on :5000 (call from a thread)
     .listener(port)                the raw listening socket (the LLM proxy takes :5010)
-    .close_port(port) .reopen(port)  M3: no listener while the guest is parked
+    .close_port(port) .reopen(port)  no listener while the guest is parked
     .close()                       close and unlink everything
 
   ControlChannel(sock, loop, inbound)
@@ -99,7 +99,7 @@ class Endpoints:
         return self.accept(5000, timeout)
 
     def close_port(self, port: int) -> None:
-        """Stop listening on one port (M3: between the acked `parked` and the
+        """Stop listening on one port (between the acked `parked` and the
         snapshot, so the guest's idle-wait loop finds no listener and stays
         idle; a pending, not yet accepted connection is dropped with it)."""
         lst = self._listeners.pop(port, None)

@@ -1,5 +1,5 @@
-"""bench.async_tools — the async tool-call measurement (PLAN.md D6, section 13
-M6; docs/M6-CONTRACTS.md section 5; docs/ASYNC-TOOLS.md).
+"""bench.async_tools — the async tool-call measurement
+(docs/ASYNC-TOOLS.md).
 
     python -m bench.async_tools --llm-url http://127.0.0.1:8000 --model Qwen/Qwen3-14B \
         [--tasks bench/tasks.json] [--runs N] [--only id,id] [--json] [--out results.json]

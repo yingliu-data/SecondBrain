@@ -1,5 +1,5 @@
 """config — the guest's configuration, built from `hello` and nothing else
-(PLAN.md ground rule "config arrives in the first vsock message"; docs/GUEST.md).
+(the config arrives in the first vsock message; docs/GUEST.md).
 
   from_hello(body) -> GuestConfig
 
@@ -10,19 +10,19 @@
 and `config` carries `model`, `params`, `tools` (host/device/mcp entries,
 turned into the effective list by protocol.allowlist.effective_tools),
 `limits` (merged over the Limits defaults), `hooks`, `async_tools`,
-`question_timeout_s`, `ui_attached`, `ports` (M4: `gateway`, default 5011;
+`question_timeout_s`, `ui_attached`, `ports` (`gateway`, default 5011;
 a port name this guest does not know is logged and ignored).
-M4: each tools entry may also carry `schema` (OpenAI function def; a bare
+Each tools entry may also carry `schema` (OpenAI function def; a bare
 `description` stands in when there is none), kept as `tool_schemas`, and
 `timeout_s`, kept as `tool_timeouts` (the op timeout of that tool's calls;
 part of config_hash). session_start.tools stays {name, side, pin}. A `schema` key on the body or
 the config must equal protocol.SCHEMA_VERSION.
 
-M2 (docs/GUEST.md "M2 contracts"): `params.stream` (bool, default True; the
+Streaming and compaction: `params.stream` (bool, default True; the
 coordinator reads it with `stream_enabled(cfg)`) and the limits
 `context_window_tokens` (32768) and `reserve_tokens` (4096: the compaction
-threshold is window - reserve). M3: `park_grace_s` (30): how long running
-guest operations may finish after a `park` before they are killed. M5:
+threshold is window - reserve). Park: `park_grace_s` (30): how long running
+guest operations may finish after a `park` before they are killed. Questions:
 `answer_wait_s` (int >= 0, default 0): > 0 means the host waits that long for
 an answer (the Temporal path), so a question deadline parks the task
 (`parked{reason: question, question_id}`) instead of denying it. The token budget is the host proxy's knob
@@ -64,10 +64,10 @@ class Limits:
     spill_quota_bytes: int = 50_000_000
     grace_s: float = 1.0
     idle_wake_s: int = 600
-    context_window_tokens: int = 32768   # M2: the model's context length
-    reserve_tokens: int = 4096           # M2: headroom kept for the response
-    park_grace_s: float = 30.0           # M3: guest ops get this long after `park`, then killed
-    answer_wait_s: int = 0               # M5: > 0 = a question deadline parks the task (D12)
+    context_window_tokens: int = 32768   # the model's context length
+    reserve_tokens: int = 4096           # headroom kept for the response
+    park_grace_s: float = 30.0           # guest ops get this long after `park`, then killed
+    answer_wait_s: int = 0               # > 0 = a question deadline parks the task
 
 
 @dataclass
@@ -86,13 +86,12 @@ class GuestConfig:
     ports: dict            # {"control": 5000, "bulk": 5001, "llm": 5010, "gateway": 5011}
     resume: bool
     at: int                # host clock at hello, ms
-    # M4: what hello.config.tools entries carry beyond {name, side, pin}
+    # what hello.config.tools entries carry beyond {name, side, pin}
     tool_schemas: dict = field(default_factory=dict)    # name -> OpenAI function def
     tool_timeouts: dict = field(default_factory=dict)   # name -> timeout_s (mcp op timeout)
 
     def op_timeout_for(self, name: str, side: str):
-        """The op timeout of one call: the entry's timeout_s (M4-CONTRACTS
-        section 4), else limits.op_timeout_s[side]."""
+        """The op timeout of one call: the entry's timeout_s, else limits.op_timeout_s[side]."""
         t = self.tool_timeouts.get(name)
         if t:
             return float(t)
@@ -165,7 +164,7 @@ def _check_schema(container: dict, name: str) -> None:
 
 
 def stream_enabled(cfg) -> bool:
-    """`params.stream`, default True (D17: LLM_STREAM=false on the host sets it false)."""
+    """`params.stream`, default True (LLM_STREAM=false on the host sets it false)."""
     return bool((getattr(cfg, "params", None) or {}).get("stream", True))
 
 

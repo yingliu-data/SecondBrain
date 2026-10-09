@@ -1,5 +1,5 @@
 """A legacy session migrated to an event log continues under the harness
-engine (M6-CONTRACTS §4): the worker's first boot sends hello{resume: true},
+engine: the worker's first boot sends hello{resume: true},
 the real guest (LocalSandbox subprocess) takes the migrated run as its log
 return and folds it, so the next answer's LLM request carries the migrated
 conversation; the run continues r0000's seqs and still verifies.

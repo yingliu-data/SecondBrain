@@ -2,10 +2,10 @@
 on the session's Unix sockets) and a scripted upstream LLM behind the :5010
 proxy.
 
-Streaming (M2, D17): the token assertions check that the token texts
+Streaming: the token assertions check that the token texts
 concatenate to the answer, whatever the fragment boundaries, so they hold
-with the M1 guest (one whole-text delta), the M2 guest (one delta per
-upstream chunk) and `LLM_STREAM=false` (word-wise from llm_response)."""
+with a non-streaming guest (one whole-text delta), a streaming guest (one
+delta per upstream chunk) and `LLM_STREAM=false` (word-wise from llm_response)."""
 import asyncio
 import json
 from pathlib import Path

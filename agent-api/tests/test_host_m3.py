@@ -1,4 +1,4 @@
-"""M3 host half (harness/docs/M3-CONTRACTS.md): the :5001 bulk server, park
+"""Host half of snapshots, park and resume: the :5001 bulk server, park
 and resume, the idle timer, base-snapshot boot, death resume with the log
 return, vm host events. The guest side is the contract-speaking FakeGuest
 (host_fakes.py) over the real Unix-socket endpoints."""
@@ -415,7 +415,7 @@ async def test_second_death_in_a_task_fails_it(session):
     assert result["outcome"] == "failed" and "died again" in result["answer"]
     assert any(s.startswith("event: error") for s in sse) and sse[-1] == DONE
     assert len(sandbox.guests) == 2                          # max_resumes = 1
-    # M6: the host's failure is in the host log (no history.jsonl projection)
+    # The host's failure is in the host log (no history.jsonl projection)
     assert any(h["type"] == "workflow" and h["body"].get("kind") == "completed"
                and h["body"].get("outcome") == "failed" for h in w.sync.read_host())
     # the next task starts fresh (a new run); its resume budget is its own

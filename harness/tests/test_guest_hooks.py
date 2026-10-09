@@ -1,5 +1,5 @@
-"""guest.hooks — the chains and the purity rule (PLAN.md section 14: a hook
-reading time() makes the purity test fail)."""
+"""guest.hooks — the chains and the purity rule (a hook reading time() makes
+the purity test fail)."""
 from __future__ import annotations
 
 import os

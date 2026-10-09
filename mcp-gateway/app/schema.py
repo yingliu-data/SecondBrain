@@ -1,7 +1,7 @@
 """Tool definition and format conversion (moved from agent-api app/mcp/schema.py).
 
 Names everywhere are `{upstream}__{tool}` (`protocol.mcp.namespaced`).
-`tool_defn` is the canonical MCP definition a pin hashes (M4-CONTRACTS.md §5);
+`tool_defn` is the canonical MCP definition a pin hashes;
 `defn_to_openai` turns a definition into the OpenAI function format of the
 hello entries.
 """

@@ -1,4 +1,4 @@
-"""gateway_forwarder — :5011 → mcp-gateway (PLAN.md 8–9, M4-CONTRACTS §1–2, §3.3).
+"""gateway_forwarder — :5011 → mcp-gateway.
 
 A threaded HTTP/1.1 relay on the session's :5011 Unix socket (uds_http.py,
 the same server as the LLM proxy). It proxies **only `POST /mcp`** to
@@ -17,12 +17,12 @@ Content-Type and Mcp-* headers). The read timeout is
 MCP_GATEWAY_CALL_TIMEOUT_S, above the longest upstream timeout_s (a call can
 run 45 minutes). A gateway that cannot be reached is a 502 JSON body (uds_http.error_body) and a
 `gateway{op: error, source: forwarder}` host event (the gateway cannot log
-its own outage, PLAN.md 14).
+its own outage).
 
 One relay path. Every request runs in its own thread, independent of the
 guest's connection, and its answer (buffered, JSON or text/event-stream
 alike) is kept in the worker-lived GatewayRelay table `{key: running |
-done(status, body)}`. The key is the request's `X-SB-Call` (§3.3: long calls
+done(status, body)}`. The key is the request's `X-SB-Call` (long calls
 survive a park); a request without one (tools/list, ...) gets an internal
 key that no guest can name, so it is never re-attachable and its entry goes
 when the guest leaves. The handler blocks on the guest's connection and the
@@ -34,7 +34,7 @@ entry's wake pipe together (no polling). For an `X-SB-Call` entry:
     request
   - an entry is dropped once its answer was written to a guest; a later
     first send (no X-SB-Reattach) with that call_id is a new request (the
-    `sb/input_response` re-send, §3.2)
+    `sb/input_response` re-send)
   - an unknown call_id with `X-SB-Reattach: 1` → 410, never re-executed
   - the worker discards the entry of a call the guest declared `lost`
 The relay outlives the forwarder: closing :5011 around a park stops

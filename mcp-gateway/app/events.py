@@ -1,4 +1,4 @@
-"""Gateway events → agent-api (M4-CONTRACTS.md §7). Fire-and-forget: a
+"""Gateway events → agent-api. Fire-and-forget: a
 failed post is logged and never fails the call."""
 from __future__ import annotations
 

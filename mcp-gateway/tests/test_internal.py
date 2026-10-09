@@ -74,7 +74,7 @@ async def test_tenant_without_policy_gets_meta_only(upstream, harness):
 
 @pytest.mark.parametrize("path,method", [("/internal/call", "POST"), ("/internal/upstreams/fake/tools", "GET")])
 async def test_legacy_routes_are_gone(upstream, harness, path, method):
-    """M6: the legacy engine's routes were deleted with the engine."""
+    """The legacy engine's routes were deleted with the engine."""
     async with harness(make_config(upstream.url)) as gw:
         r = await gw.internal(method, path, json={"name": "fake__add", "arguments": {}})
         assert r.status_code in (404, 405)

@@ -1,4 +1,4 @@
-"""M4 guest: mcp-side calls over :5011 (docs/M4-CONTRACTS.md sections 3-4).
+"""MCP guest: mcp-side calls over :5011.
 
 guest.main as a subprocess with FakeHost (:5000, :5001), FakeLLM (:5010) and
 FakeGateway (:5011, the forwarder + gateway double): a promoted tool, a call

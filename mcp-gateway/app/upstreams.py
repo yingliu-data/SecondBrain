@@ -12,8 +12,8 @@ fail at once instead of reconnecting.
 
 `UpstreamCall` runs one tools/call in its own asyncio task so it can outlive
 the guest's HTTP request: when the upstream elicits, the callback parks on a
-future and the gateway answers the guest with `sb/input_required`
-(M4-CONTRACTS.md §3.2); the next POST feeds the answer in.
+future and the gateway answers the guest with `sb/input_required`;
+the next POST feeds the answer in.
 """
 from __future__ import annotations
 

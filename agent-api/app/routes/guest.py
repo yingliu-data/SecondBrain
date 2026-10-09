@@ -1,6 +1,6 @@
 """Guest chat endpoint — unauthenticated (auth: origin), avatar_control only.
 
-M6 (PLAN.md 8 "Guest tenant (avatar)"): the route's own loop is gone; the
+The route's own loop is gone; the
 input goes through the same harness chat path as every tenant
 (routes/chat.turn_stream) with the guest tenant profile (app/auth/guest.py).
 This route keeps only what is the page's: the Origin check, the page's

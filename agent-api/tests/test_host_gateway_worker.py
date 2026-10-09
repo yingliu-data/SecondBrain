@@ -1,4 +1,4 @@
-"""M4 worker side: hello tool entries from the gateway (up, down, cached for
+"""Worker side of the MCP gateway: hello tool entries from the gateway (up, down, cached for
 resume), the :5011 forwarder's
 lifecycle, and `lost` discarding a held call."""
 import asyncio

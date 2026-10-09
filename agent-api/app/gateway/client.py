@@ -1,4 +1,4 @@
-"""The gateway's /internal/* routes as agent-api calls them (M4-CONTRACTS §2–4, §8).
+"""The gateway's /internal/* routes as agent-api calls them.
 
   identity_headers(user, tenant, session)   X-SB-User / X-SB-Tenant / X-SB-Session
   auth_headers(token)                       Authorization: Bearer (none when empty)
@@ -90,7 +90,7 @@ def _tool_list(data, path: str) -> list[dict]:
 async def fetch_session_tools(user: str, tenant: str, session: str, *,
                               base_url: str = MCP_GATEWAY_URL, token: str = INTERNAL_TOKEN,
                               timeout_s: float = MCP_GATEWAY_TOOLS_TIMEOUT_S) -> list[dict]:
-    """The session's pinned tool surface, hello-entry shaped (§4), verbatim."""
+    """The session's pinned tool surface, hello-entry shaped, verbatim."""
     path = "/internal/tools"
     data = await _request("GET", path, base_url=base_url, timeout_s=timeout_s,
                           headers={**auth_headers(token), **identity_headers(user, tenant, session)})

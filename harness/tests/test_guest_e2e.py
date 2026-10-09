@@ -8,7 +8,7 @@ text delta, sent by the provider); a cut stream retried by the provider
 tool answered by the fake host's side_results; a host-side `remember` whose
 side_result names the memory fact; a redelivered task (the same input_id twice, on the wire
 and as a fresh control) runs one turn; a dropped link mid-turn produces no
-duplicate events and the log replays; M2: a 40-turn session with a window
+duplicate events and the log replays; a 40-turn session with a window
 small enough to compact several times, whose log replays and whose prefix
 stays bounded.
 """
@@ -371,7 +371,7 @@ def test_drop_link_mid_turn_no_duplicate_events_and_log_replays(guest_factory):
     assert [e["seq"] for e in local] == seqs
 
 
-# ---------------------------------------------------------------- M2: compaction over 40 turns
+# ---------------------------------------------------------------- compaction over 40 turns
 ROUNDS = 40
 
 

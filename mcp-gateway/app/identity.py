@@ -1,4 +1,4 @@
-"""Identity headers and the internal bearer (M4-CONTRACTS.md §1, §2)."""
+"""Identity headers and the internal bearer."""
 from __future__ import annotations
 
 import hmac
@@ -32,7 +32,7 @@ def request_identity(request: Request) -> Identity:
 
 def bearer_ok(authorization: str | None, token: str) -> bool:
     if not token:
-        return True  # dev only (§1)
+        return True  # dev only
     if not authorization or not authorization.startswith("Bearer "):
         return False
     return hmac.compare_digest(authorization[len("Bearer "):].encode(), token.encode())

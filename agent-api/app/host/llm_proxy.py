@@ -1,4 +1,4 @@
-"""llm_proxy — :5010 → vLLM (PLAN.md 4.1, D7, D17).
+"""llm_proxy — :5010 → vLLM.
 
 A threaded HTTP/1.1 server on the session's :5010 Unix socket. It forwards
 `POST /v1/chat/completions` to LLM_URL with httpx, passes the upstream status
@@ -19,7 +19,7 @@ the guest's connection too (the guest's provider treats that as transient and
 retries), and a guest that leaves mid-stream ends the relay; either way the
 usage event records `error: "stream ended: ..."`.
 
-Budget (GUEST.md M2): `token_budget` (HARNESS_TOKEN_BUDGET, 0 = unlimited) is
+Budget: `token_budget` (HARNESS_TOKEN_BUDGET, 0 = unlimited) is
 the session's allowance of `total_tokens` summed over its calls. Once the
 running total reaches it, every further call is answered
 `402 {"error": "budget_exhausted"}` before forwarding (also recorded as a

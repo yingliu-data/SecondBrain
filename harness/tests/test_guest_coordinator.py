@@ -117,7 +117,7 @@ class FakeTransport:
     def send_ack(self, cseq):
         self.acks.append(cseq)
 
-    # park (M3): every event counts as acked at once; park() is recorded
+    # park: every event counts as acked at once; park() is recorded
     def wait_acked(self, seq, timeout=None):
         return True
 
@@ -189,7 +189,7 @@ class FakeOps:
     def running(self):
         return set(self._running)
 
-    # M4 mcp surface (no mcp calls run in these scenarios)
+    # mcp surface (no mcp calls run in these scenarios)
     def detach_mcp(self):
         return set()
 
@@ -440,7 +440,7 @@ def test_emit_rejects_an_event_the_fold_rejects():
 
 # ---------------------------------------------------------------- text answer
 def test_text_answer_settles_with_the_golden_shape():
-    # stream: false (the M1 shape): the provider sends one whole-text delta
+    # stream: false (the non-streaming shape): the provider sends one whole-text delta
     scn = Scenario(cfg=make_cfg(params={"temperature": 0, "stream": False}),
                    script=[text("2 + 2 = 4.", usage={"prompt_tokens": 120, "completion_tokens": 9,
                                                      "total_tokens": 129})])
@@ -658,10 +658,10 @@ def test_malformed_arguments_get_an_error_result_without_running():
 
 
 def test_malformed_arguments_error_result_then_the_next_turn_repairs_the_call():
-    """PLAN 14 "malformed tool arguments → one repair turn, then an error
-    result", as the guest does it today (coordinator docstring, M1
-    deviations): the malformed call gets its error result at once, the next
-    turn shows the model that error, and a corrected call in that turn runs."""
+    """Malformed tool arguments, as the guest handles them today (no repair
+    turn; coordinator docstring, "Known gaps"): the malformed call gets its
+    error result at once, the next turn shows the model that error, and a
+    corrected call in that turn runs."""
     scn = Scenario(script=[tool_calls([("bad", "bash", '{"command": ')]),
                            tool_calls([("good", "bash", {"command": "echo fixed"})]),
                            text("done")],
@@ -990,7 +990,7 @@ def test_second_hello_is_fatal():
 
 
 def test_park_between_tasks_parks_at_once_and_the_link_resumes_it():
-    """M3: no turn in flight -> checkpoint + parked straight away; a task
+    """No turn in flight -> checkpoint + parked straight away; a task
     that lands while parked waits for the link to come back."""
     scn = Scenario(script=[text("ok")])
     scn.control("park", {"reason": "idle"})
@@ -1108,7 +1108,7 @@ def test_every_scenario_log_is_json_serialisable():
     assert state_hash(state) == state_hash(scn.state)
 
 
-# ================================================================ M2: streaming
+# ================================================================ streaming
 def test_streamed_deltas_are_live_in_order_and_llm_response_is_verbatim():
     full = text("The answer is four.")
     scn = Scenario(script=[Streamed(full, [{"kind": "reasoning", "index": 0, "text": "think "},
@@ -1164,7 +1164,7 @@ def test_stream_off_relays_the_providers_one_whole_text_delta():
     check_log(scn)
 
 
-# ================================================================ M2: token estimate
+# ================================================================ token estimate
 def test_estimate_and_correction_follow_usage():
     from guest.context import estimate_tokens
     scn = Scenario(script=[tool_calls([("c1", "bash", {"command": "x"})], usage={"prompt_tokens": 2000, "completion_tokens": 5}),
@@ -1183,7 +1183,7 @@ def test_estimate_and_correction_follow_usage():
     check_log(scn)
 
 
-# ================================================================ M2: compaction
+# ================================================================ compaction
 BIG = "x" * 1500
 LONG_TASK = "cat the big file and tell me what is in it. " * 4
 
@@ -1383,7 +1383,7 @@ def test_replay_through_two_compactions_matches_the_coordinator_state():
     assert replayed.compacted_through == ranges[-1][1]
 
 
-# ================================================================ M2: budget
+# ================================================================ budget
 def test_budget_error_settles_failed_without_retry():
     scn = Scenario(script=[budget_error(), text("never")])
     scn.task("x")
@@ -1396,7 +1396,7 @@ def test_budget_error_settles_failed_without_retry():
     check_log(scn)
 
 
-# ================================================================ M2: workspace tree id
+# ================================================================ workspace tree id
 class TreeOps(FakeOps):
     def __init__(self, *a, tree=None, **kw):
         super().__init__(*a, **kw)
@@ -1437,7 +1437,7 @@ def test_tree_id_is_none_without_the_method_or_when_it_fails():
     check_log(scn2)
 
 
-# ================================================================ M2: memory from tools
+# ================================================================ memory from tools
 MEMORY_TOOLS = [{"name": "remember", "side": "host", "pin": None}, {"name": "forget", "side": "host", "pin": None}]
 
 
@@ -1516,7 +1516,7 @@ def test_memory_event_only_for_an_ok_result_with_a_valid_fact():
     check_log(scn)
 
 
-# ================================================================ M2: overflow mid-stream
+# ================================================================ overflow mid-stream
 def test_mid_stream_overflow_compacts_and_the_retried_turn_streams_afresh():
     # an overflow raised by the provider mid-stream (an error chunk) is the same
     # ProviderError.overflow; the retried turn is a new turn with its own deltas

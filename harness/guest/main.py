@@ -1,5 +1,5 @@
 """main — the guest process: idle-wait, connect out, hello, run, settle
-(PLAN.md section 3 layout, docs/GUEST.md "Lifecycle", docs/M3-CONTRACTS.md).
+(docs/GUEST.md "Lifecycle").
 
   python3 -m guest.main --connect unix:DIR | vsock[:CID] --log-dir DIR
                         --workspace DIR [--idle-wait vsock]
@@ -10,7 +10,7 @@ fatal protocol error (first control is not a hello, unusable hello, the
 coordinator's FatalProtocolError on a second hello, a resume whose log could
 not be fetched or folded), 3 hello timeout.
 
-Idle-wait (the snapshot point, M3-CONTRACTS section 1): with `--idle-wait
+Idle-wait (the snapshot point): with `--idle-wait
 vsock` the transport polls :5000 every IDLE_POLL_S (50 ms), silently, until
 the host answers (Transport.wait_awake). The base snapshot is taken in this
 loop. Then `--mount-workspace DEV` mounts DEV on the workspace (`mount -o
@@ -23,7 +23,7 @@ a GuestConfig; run_session(cfg, ...) builds the log writer, provider,
 operation manager and coordinator and runs the session. With hello{resume:
 true} run_session first fetches the host's log on :5001 (bulk get, after_seq
 0), rebuilds the local event buffer from it, continues seq after it and hands
-it to Coordinator.restore (M3-CONTRACTS section 4).
+it to Coordinator.restore.
 
 One lifecycle: the guest stays up after a settle and takes the next task (a
 session-long VM); after a park it returns to idle-wait. It ends when the host

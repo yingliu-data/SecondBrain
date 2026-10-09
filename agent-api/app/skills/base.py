@@ -6,7 +6,7 @@ from contextvars import ContextVar
 _current_session: ContextVar = ContextVar("current_session", default=None)
 _current_user_id: ContextVar = ContextVar("current_user_id", default="")
 # The tenant and the session id the request runs under: the gateway skill
-# stamps them as identity headers (M4-CONTRACTS §2, §8).
+# stamps them as identity headers.
 _current_tenant: ContextVar = ContextVar("current_tenant", default="")
 _current_session_id: ContextVar = ContextVar("current_session_id", default="")
 

@@ -1,6 +1,6 @@
-"""activities — the real bodies of the session workflow's activities (M5).
+"""activities — the real bodies of the session workflow's activities.
 
-harness/docs/M5-CONTRACTS.md §2: same names and payloads as the stubs in
+Same names and payloads as the stubs in
 flows/activities.py; flows.worker.build_worker registers them (bound
 methods of one HostActivities) next to flows' own `signal_session` glue.
 They drive the Worker's task API, as act() does on the direct path.
@@ -57,7 +57,7 @@ def ticket_id_for(ref: SessionRef, input_id: str) -> str:
 
 def _floor_seq(details: Any) -> int:
     """The previous attempt's last heartbeat {last_seq} (a floor only: the
-    SDK throttles heartbeats, M0 spike)."""
+    SDK throttles heartbeats)."""
     try:
         d = details[0] if details else None
         return int(d.get("last_seq", 0)) if isinstance(d, dict) else int(d or 0)
@@ -157,7 +157,7 @@ class HostActivities:
         await self._started(w, "deliver", iid, outcome=inp.outcome)
         if iid not in w.sync.settled and inp.outcome in ("escalated", "aborted"):
             # no guest settle (the answer timer, an abort while parked): wake
-            # the guest and let it settle the task itself (M5 §4)
+            # the guest and let it settle the task itself
             await w.abort_and_wait(iid, inp.outcome, reattach=True,
                                    question_id=inp.question_id if inp.outcome == "escalated"
                                    else None)

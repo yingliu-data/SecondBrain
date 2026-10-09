@@ -1,4 +1,4 @@
-"""Gateway settings (env) and `gateway.json` (M4-CONTRACTS.md §1, §6)."""
+"""Gateway settings (env) and `gateway.json`."""
 from __future__ import annotations
 
 import json

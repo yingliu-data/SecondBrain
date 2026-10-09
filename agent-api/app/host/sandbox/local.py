@@ -10,7 +10,7 @@ of Firecracker's `vm/workspace.img`: the host's copy `{session_dir}/workspace`
 is written only by the bulk server (the guest's settle uploads), so a bulk put
 never lands in the directory the guest walks.
 
-M3 emulation of snapshots (docs/M3-CONTRACTS.md §2–4):
+Emulation of snapshots:
 
   restore(session_dir)             BASE: a fresh guest process (= start()); the
                                    worker sends hello, or hello{resume} after a death
@@ -24,7 +24,7 @@ M3 emulation of snapshots (docs/M3-CONTRACTS.md §2–4):
   restore(session_dir, snapdir)    SIGCONT the frozen process: same memory, same
                                    seq; its idle loop reconnects. SandboxError when
                                    the process is gone (the worker falls back to
-                                   the death path, §4). The marker is consumed.
+                                   the death path). The marker is consumed.
   has_snapshot(None)               True: the "base" is the guest code itself
   has_snapshot(snapdir)            marker present and its process still frozen
 
@@ -185,7 +185,7 @@ class LocalSandbox(Sandbox):
     def returncode(self) -> int | None:
         return None if self.proc is None else self.proc.poll()
 
-    # --------------------------------------------------------------- M3
+    # --------------------------------------------------------------- snapshots
 
     def restore(self, session_dir: Path, snapshot_dir: Path | None = None) -> None:
         if self.is_alive():

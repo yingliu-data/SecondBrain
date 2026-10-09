@@ -36,7 +36,7 @@ MSG_QUARANTINED = "tool definition changed since this session started (quarantin
 MSG_NOT_AVAILABLE = "tool not available in this session"
 MSG_EXPIRED = "input request expired"
 
-# The three meta tools (M4-CONTRACTS.md §3.1), as MCP definitions, and their pins.
+# The three meta tools, as MCP definitions, and their pins.
 META_DEFNS: dict[str, dict] = {
     SEARCH_TOOLS: {
         "name": SEARCH_TOOLS,
@@ -161,7 +161,7 @@ class Gateway:
         return max((self.config.upstreams[u].timeout_s for u in ups), default=DEFAULT_META_TIMEOUT_S)
 
     async def _surface(self, ident: Identity) -> list[tuple[str, dict, str, int]]:
-        """§4: promoted tools then the meta tools, as (name, defn, pin, timeout_s).
+        """Promoted tools then the meta tools, as (name, defn, pin, timeout_s).
         Posts the `list` event."""
         sp = await self.session(ident)
         out = []

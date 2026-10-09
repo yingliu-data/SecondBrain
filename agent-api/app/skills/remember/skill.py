@@ -143,7 +143,7 @@ class RememberSkill(BaseSkill):
             return f"Error: missing required field {e}"
         except ValueError as e:
             return f"Error: {e}"
-        # sha256 of the stripped body text (D23, docs/GUEST.md: one memory
+        # sha256 of the stripped body text (docs/GUEST.md: one memory
         # hash definition everywhere, sha256_hex(body.strip())); the harness
         # records it in the `memory` event
         digest = hashlib.sha256(rec.body.strip().encode("utf-8")).hexdigest()

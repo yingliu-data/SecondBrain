@@ -12,13 +12,13 @@ LLM_TEMPERATURE = float(os.environ.get("LLM_TEMPERATURE", 0.7))
 # schemas) thinking mode reliably describes tools instead of calling them,
 # so it is off by default (same reason avatar_control's planner disables it).
 LLM_ENABLE_THINKING = os.environ.get("LLM_ENABLE_THINKING", "false").lower() in ("1", "true", "yes")
-LLM_STREAM = os.environ.get("LLM_STREAM", "true").lower() in ("1", "true", "yes")   # D17: stream: true through the proxy
+LLM_STREAM = os.environ.get("LLM_STREAM", "true").lower() in ("1", "true", "yes")   # stream: true through the proxy
 
 # ── API ──
 API_SECRET_KEY = os.environ["API_SECRET_KEY"]
 TENANTS_FILE = os.environ.get("TENANTS_FILE", "data/tenants.json")
 
-# ── MCP gateway (harness/docs/M4-CONTRACTS.md) ──
+# ── MCP gateway ──
 # Remote MCP servers are reached only through the mcp-gateway service (their
 # URLs, tokens and SSRF checks live in its gateway.json). Empty = no gateway:
 # no MCP tools, the forwarder answers 502.
@@ -68,7 +68,7 @@ Rules:
 """
 
 # ── Agent engine ──
-# M6: every tenant runs the harness engine (the guest harness in a sandbox per
+# Every tenant runs the harness engine (the guest harness in a sandbox per
 # session, driven by app/host/). AGENT_ENGINE and the in-process legacy loop
 # are gone; a tenant's `engine` in tenants.json is ignored with a warning.
 
@@ -81,10 +81,10 @@ HARNESS_GUEST_ROOT = os.environ.get(
     os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "harness")),
 )
 HARNESS_SANDBOX = os.environ.get("HARNESS_SANDBOX", "local")       # "local" | "firecracker"
-HARNESS_PORTS = {"control": 5000, "bulk": 5001, "llm": 5010,      # fixed (PROTOCOL.md 1)
-                 "gateway": 5011}                                 # M4: MCP gateway forwarder
+HARNESS_PORTS = {"control": 5000, "bulk": 5001, "llm": 5010,      # fixed
+                 "gateway": 5011}                                 # MCP gateway forwarder
 HARNESS_HELLO_TIMEOUT_S = int(os.environ.get("HARNESS_HELLO_TIMEOUT_S", 30))   # guest connect
-# host → guest heartbeat; also run_task's Temporal heartbeat (M5: the
+# host → guest heartbeat; also run_task's Temporal heartbeat (the
 # workflow's heartbeat timeout is 120 s; an abort reaches the activity on one)
 HARNESS_HEARTBEAT_S = int(os.environ.get("HARNESS_HEARTBEAT_S", 60))
 HARNESS_KEEPALIVE_S = int(os.environ.get("HARNESS_KEEPALIVE_S", 15))            # SSE comment
@@ -94,21 +94,21 @@ HARNESS_QUESTION_TIMEOUT_S = int(os.environ.get("HARNESS_QUESTION_TIMEOUT_S", 30
 HARNESS_HOST_TOOL_TIMEOUT_S = int(os.environ.get("HARNESS_HOST_TOOL_TIMEOUT_S", 120))
 HARNESS_SPILL_THRESHOLD = int(os.environ.get("HARNESS_SPILL_THRESHOLD", 2000))
 HARNESS_SEGMENT_EVENTS = int(os.environ.get("HARNESS_SEGMENT_EVENTS", 1000))   # events per segment
-# M3: the guest outlives a settle (one long-lived guest per session, one log
-# run); the idle timer parks it. "true" restores the M1/M2 guest-per-task runs.
+# The guest outlives a settle (one long-lived guest per session, one log
+# run); the idle timer parks it. "true" restores the old guest-per-task runs.
 HARNESS_STOP_AT_SETTLE = os.environ.get("HARNESS_STOP_AT_SETTLE", "false").lower() in ("1", "true", "yes")
-# M3 snapshots, park and resume (harness/docs/M3-CONTRACTS.md)
+# Snapshots, park and resume
 HARNESS_SESSION_IDLE_S = float(os.environ.get("HARNESS_SESSION_IDLE_S", 1800))  # idle -> park + snapshot + destroy
 HARNESS_PARK_GRACE_S = float(os.environ.get("HARNESS_PARK_GRACE_S", 30))        # hello limit park_grace_s
 HARNESS_PARK_TIMEOUT_S = float(os.environ.get("HARNESS_PARK_TIMEOUT_S", 60))    # park sent -> acked `parked` (> park_grace_s)
 HARNESS_MAX_RESUMES = int(os.environ.get("HARNESS_MAX_RESUMES", 1))             # death resumes per task
 HARNESS_BULK_MAX_BYTES = int(os.environ.get("HARNESS_BULK_MAX_BYTES", 64 * 1024 * 1024))  # one :5001 put
 HARNESS_TOKEN_BUDGET = int(os.environ.get("HARNESS_TOKEN_BUDGET", 0))        # total_tokens per session; 0 = unlimited
-# Context window the guest plans against (M2 compaction trigger: estimate > window - reserve).
+# Context window the guest plans against (compaction trigger: estimate > window - reserve).
 HARNESS_CONTEXT_WINDOW_TOKENS = int(os.environ.get("HARNESS_CONTEXT_WINDOW_TOKENS", 32768))
 HARNESS_RESERVE_TOKENS = int(os.environ.get("HARNESS_RESERVE_TOKENS", 4096))
 
-# ── Temporal (M5, harness/docs/M5-CONTRACTS.md) ──
+# ── Temporal ──
 # Set -> POST /chat of a harness tenant goes through the session workflow
 # (flows.SessionWorkflow); unset -> the direct path (Worker.act).
 TEMPORAL_ADDRESS = os.environ.get("TEMPORAL_ADDRESS", "")

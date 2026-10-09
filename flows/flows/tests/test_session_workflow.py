@@ -1,4 +1,4 @@
-"""SessionWorkflow behaviour on the Temporal test server (PLAN section 10)."""
+"""SessionWorkflow behaviour on the Temporal test server."""
 
 from __future__ import annotations
 

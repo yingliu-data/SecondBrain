@@ -1,5 +1,5 @@
-"""M4 agent-api side outside the worker: POST /internal/gateway-events,
-tenants.json compatibility (M6: `mcp_servers` accepted and ignored)."""
+"""The agent-api side of the MCP gateway outside the worker: POST /internal/gateway-events,
+tenants.json compatibility (`mcp_servers` accepted and ignored)."""
 import json
 
 import pytest
@@ -83,7 +83,7 @@ def test_empty_token_means_no_check(api, monkeypatch):
 
 # ---------------------------------------------------------------- tenants
 def test_tenants_file_loads_old_fields_and_ignores_mcp_servers(tmp_path):
-    """M6: the top-level map (even one the old schema would reject) and the
+    """The top-level map (even one the old schema would reject) and the
     tenant list are accepted and ignored; the gateway owns MCP access."""
     doc = {"mcp_servers": {"wcc-events": {"url": "http://h/mcp", "auth_token": "x",
                                           "timeout_s": 2700, "tool_defs_ttl_s": 60,

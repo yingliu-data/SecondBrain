@@ -1,4 +1,4 @@
-"""fold — fold(events) -> State, pure (PLAN.md sections 5, 7, 12; docs/REPLAY.md).
+"""fold — fold(events) -> State, pure (docs/REPLAY.md).
 
 Public contract (other modules import these names):
   class FoldError(ValueError)              .seq = the offending seq; str() = "seq N: ..."
@@ -82,7 +82,7 @@ class State:
     committed: list = field(default_factory=list)
     staged_suffix: list = field(default_factory=list)
     open_calls: dict = field(default_factory=dict)         # call_id -> {name, side, turn_id, state, seq, result?,
-                                                           #   attempt?, input_request? (M4 mcp ops)}
+                                                           #   attempt?, input_request? (mcp ops)}
     placeholders: set = field(default_factory=set)         # call_ids shown as placeholders
     queues: dict = field(default_factory=lambda: {"follow_up": [], "steer": []})  # kind -> [seq]
     open_questions: dict = field(default_factory=dict)     # question_id -> {deadline, call_id, answered, seq}
@@ -315,7 +315,7 @@ def _op_state(state: State, event: dict) -> None:
         call["duration_ms"] = body["duration_ms"]
     if "attempt" in body:
         call["attempt"] = body["attempt"]
-    # M4: a suspended mcp op carries what its re-send needs; any other state clears it
+    # a suspended mcp op carries what its re-send needs; any other state clears it
     if suspended:
         call["input_request"] = body["input_request"]
     else:

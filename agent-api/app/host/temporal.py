@@ -1,4 +1,4 @@
-"""temporal — the Temporal client and worker of this agent-api (M5, D22).
+"""temporal — the Temporal client and worker of this agent-api.
 
   start(activities, tenants_doc)   connect (TEMPORAL_ADDRESS), run
                                    flows.worker.build_worker on this loop with

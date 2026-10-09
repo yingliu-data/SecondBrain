@@ -1,4 +1,4 @@
-"""protocol.messages — envelope, ack and resend rules (PLAN.md 4.2–4.5)."""
+"""protocol.messages — envelope, ack and resend rules."""
 import json
 
 import pytest

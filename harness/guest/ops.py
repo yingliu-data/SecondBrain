@@ -42,13 +42,13 @@ and `spill` carries path/sha256/bytes. `limits.spill_quota_bytes` bounds the
 total bytes spilled in the session (files already in the spill dir count);
 over quota no file is written and the note says so.
 
-M3: with a `bulk` client (guest.bulk.BulkClient) every spill file is also put
+With a `bulk` client (guest.bulk.BulkClient) every spill file is also put
 on :5001 as kind "spill", path `.spill/{call_id}.txt` (protocol.bulk.spill_path),
 from the operation's worker thread before the result is posted; `spill` then
 carries `bulk_path` (that path). An upload failure is logged only. The
 coordinator records the `bulk` event and `spill_ref` with `bulk_path`.
 
-M4 (docs/GUEST.md "M4"): mcp-side calls run here too, each on its own
+MCP: mcp-side calls run here too, each on its own
 daemon thread (a gateway call may take many minutes; it must not hold a pool
 worker), through the guest.mcp client:
   submit_mcp(call_id, name, args, *, attempt=0, input_response=None,
@@ -246,7 +246,7 @@ class OperationManager:
                  mcp=None):
         self.workspace = Path(workspace)
         self.bulk = bulk
-        self.mcp = mcp                            # guest.mcp.McpClient (M4)
+        self.mcp = mcp                            # guest.mcp.McpClient
         self.limits = limits
         self.inbound = inbound
         self.spill_threshold = int(getattr(limits, "spill_threshold", DEFAULT_SPILL_THRESHOLD))
@@ -318,7 +318,7 @@ class OperationManager:
             self._pool.submit(self._report_immediate, job, "Error: aborted before it ran")
         return aborted
 
-    # ------------------------------------------------------------ mcp (M4)
+    # ------------------------------------------------------------ mcp
 
     def submit_mcp(self, call_id: str, name: str, args: dict, *, attempt: int = 0,
                    input_response: dict | None = None, timeout_s=None,
@@ -357,7 +357,7 @@ class OperationManager:
         threading.Thread(target=run, name=f"mcp-send-{call_id}", daemon=True).start()
 
     def detach_mcp(self) -> set[str]:
-        """Park (M4-CONTRACTS 3.3): close every in-flight mcp connection and
+        """Park: close every in-flight mcp connection and
         forget the jobs without reporting them; the host forwarder keeps the
         calls and the coordinator re-attaches them after the resume."""
         with self._lock:

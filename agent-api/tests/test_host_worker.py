@@ -185,7 +185,7 @@ async def test_guest_death_fails_the_task_with_error_and_done(session):
                 return True
             g._on_input = die
 
-    # max_resumes=0: the M1 behaviour (M3's death resume: test_host_m3.py)
+    # max_resumes=0: no death resume (that is covered in test_host_m3.py)
     w = Worker(session, FakeTenant(), FakeRegistry(), Dying([]), device_calls=DeviceCalls(),
                **worker_kwargs(max_resumes=0))
     sink = w.attach()
@@ -193,7 +193,7 @@ async def test_guest_death_fails_the_task_with_error_and_done(session):
     sse = await drain(sink)
     assert result["outcome"] == "failed" and "exited before settling" in result["answer"]
     assert any(s.startswith("event: error") for s in sse) and sse[-1] == DONE
-    # M6: the host's failure is in the host log (no history.jsonl projection)
+    # The host's failure is in the host log (no history.jsonl projection)
     assert any(h["type"] == "workflow" and h["body"].get("kind") == "completed"
                and h["body"].get("outcome") == "failed" for h in w.sync.read_host())
     await w.close()
@@ -240,7 +240,7 @@ async def test_workers_registry_and_prompt_stripping(session):
     assert strip_current_time("x {current_time} y") == "x  y"
 
 
-# ---------------------------------------------------------------- M2: hello keys, streaming
+# ---------------------------------------------------------------- hello keys, streaming
 @pytest.mark.asyncio
 async def test_hello_carries_the_m2_stream_and_limit_keys(session, monkeypatch):
     import app.host.worker as worker_mod
@@ -249,11 +249,11 @@ async def test_hello_carries_the_m2_stream_and_limit_keys(session, monkeypatch):
     w = Worker(session, FakeTenant(), FakeRegistry(), sandbox, device_calls=DeviceCalls(),
                **worker_kwargs())
     hello = w.build_hello()
-    assert hello["config"]["params"]["stream"] is True               # D17 default
+    assert hello["config"]["params"]["stream"] is True               # default
     limits = hello["config"]["limits"]
     assert limits["context_window_tokens"] == 32768 and limits["reserve_tokens"] == 4096
     assert "token_budget" not in limits                             # a proxy knob only
-    assert limits["park_grace_s"] == 30                             # M3
+    assert limits["park_grace_s"] == 30
     # the env flip, the window, and the budget the proxy is built with
     monkeypatch.setattr(worker_mod, "LLM_STREAM", False)
     monkeypatch.setattr(worker_mod, "HARNESS_CONTEXT_WINDOW_TOKENS", 8192)
@@ -268,7 +268,7 @@ async def test_hello_carries_the_m2_stream_and_limit_keys(session, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_streamed_deltas_reach_the_sink_verbatim_once(session):
-    """M2 streaming: the guest's content fragments are the tokens, the
+    """Streaming: the guest's content fragments are the tokens, the
     response is not re-emitted, reasoning never shows; a non-streamed turn's
     whole-text delta goes out word-wise, once."""
     sandbox = FakeSandbox([{"text": "Hello, wörld", "deltas": ["Hel", "lo, wör", "ld"],

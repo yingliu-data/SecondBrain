@@ -100,7 +100,7 @@ def test_ports_merge_over_defaults():
 
 
 def test_tool_entries_keep_schema_description_and_timeout():
-    """M4-CONTRACTS section 4: schema/description/timeout_s of hello tool
+    """schema/description/timeout_s of hello tool
     entries reach the model and the op timeout; session_start.tools does not
     carry them."""
     from guest.context import tool_schemas
@@ -225,7 +225,7 @@ def test_bad_flags_and_body():
         from_hello(body)
 
 
-# ---------------------------------------------------------------- M2: window, stream
+# ---------------------------------------------------------------- window, stream
 def test_m2_limit_defaults():
     limits = Limits()
     assert (limits.context_window_tokens, limits.reserve_tokens) == (32768, 4096)

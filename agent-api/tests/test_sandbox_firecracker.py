@@ -332,7 +332,7 @@ def test_real_mkfs_makes_a_sparse_ext4_image(fake_fc, session_dir, tmp_path):
 
 def test_short_session_dir_gets_absolute_api_socket(fake_fc, fake_mkfs, tmp_path):
     """With a path that fits sun_path, the API socket is absolute; the vsock
-    uds_path is always relative (it is recorded in snapshots, M3)."""
+    uds_path is always relative (it is recorded in snapshots)."""
     with tempfile.TemporaryDirectory(prefix="fc-", dir="/tmp") as short:
         session_dir = Path(short) / "default_s1"
         session_dir.mkdir()

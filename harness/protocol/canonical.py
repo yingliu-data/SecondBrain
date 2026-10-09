@@ -1,4 +1,4 @@
-"""canonical — canonical JSON, hashing and derived ids (PLAN.md section 5).
+"""canonical — canonical JSON, hashing and derived ids.
 
 Canonical form: sorted keys, no whitespace, every str NFC-normalised (keys
 included), numbers as Python prints them: ints as digits, floats by their

@@ -62,7 +62,7 @@ services:
       - RATE_LIMIT_PER_MINUTE=30
       - MCP_GATEWAY_URL=http://mcp-gateway:8090
       - INTERNAL_TOKEN=${INTERNAL_TOKEN}          # shared bearer with mcp-gateway (both directions)
-      # M5: harness tenants run through the Temporal session workflow (and the
+      # Harness tenants run through the Temporal session workflow (and the
       # worker runs in this process); unset TEMPORAL_ADDRESS -> direct path.
       - TEMPORAL_ADDRESS=temporal:7233
       - TEMPORAL_NAMESPACE=secondbrain
@@ -77,9 +77,9 @@ services:
       # Read-write so `python -m app.host.sandbox.firecracker build-base` can
       # (re)build base/ in place (harness/docs/RUNBOOK-M3.md).
       - ~/data/SecondBrain/vm:/var/lib/secondbrain/vm
-    # Firecracker microVMs for engine `harness` (PLAN.md section 3, D18). KVM is
+    # Firecracker microVMs for engine `harness`. KVM is
     # required; vhost-vsock is not used by Firecracker's (userspace) vsock but is
-    # kept per the plan -- `modprobe vhost_vsock` on the host first (RUNBOOK-M1 §2).
+    # kept -- `modprobe vhost_vsock` on the host first (harness/docs/RUNBOOK-M1.md).
     devices:
       - /dev/kvm:/dev/kvm
       - /dev/vhost-vsock:/dev/vhost-vsock
@@ -93,7 +93,7 @@ services:
     #   docker compose --profile local-llm up -d llm
     # agent-api will auto-start it via the docker.sock mount if it goes down.
 
-  # -- MCP gateway (harness M4) ----------------------------------------------
+  # -- MCP gateway -----------------------------------------------------------
   # One MCP server for the guest (POST /mcp via agent-api's forwarder), one
   # client per upstream MCP server, per-tenant policy, per-session pins
   # (harness/docs/GATEWAY.md). Config: ./mcp-gateway/data/gateway.json
@@ -126,7 +126,7 @@ services:
       retries: 3
       start_period: 10s
 
-  # -- Temporal (harness M5: session workflows, timers, schedules) ----------
+  # -- Temporal (session workflows, timers, schedules) ----------------------
   # Dev server with a SQLite file on the bind mount and the UI bundled
   # (harness/docs/FLOWS.md). gRPC 7233 is reachable only on llm_internal
   # (agent-api: temporal:7233), never published; the UI is on 127.0.0.1:8233

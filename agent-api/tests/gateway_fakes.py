@@ -1,4 +1,4 @@
-"""A fake mcp-gateway on 127.0.0.1 (TCP) for the M4 host tests.
+"""A fake mcp-gateway on 127.0.0.1 (TCP) for the host gateway tests.
 
 Records every request as {method, path, headers (lower-cased), body};
 `answered` counts the POST /mcp answers fully written.

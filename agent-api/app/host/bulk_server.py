@@ -1,5 +1,4 @@
-"""bulk_server — the host side of the :5001 bulk channel (PLAN.md 4.1,
-docs/PROTOCOL.md §6–7, harness/docs/M3-CONTRACTS.md §4–5).
+"""bulk_server — the host side of the :5001 bulk channel (docs/PROTOCOL.md).
 
 One transfer per connection; the guest always connects. The framing is
 `protocol.bulk` (header line, raw payload, reply line):
@@ -19,7 +18,7 @@ One transfer per connection; the guest always connects. The framing is
   get   log        -> the host's ACKED guest events with seq > after_seq of
                       the current run, canonical JSONL in seq order, plus
                       `last_seq` = the last returned event's seq, or after_seq
-                      when none (the log return on resume, M3-CONTRACTS §4)
+                      when none (the log return on resume)
 
   BulkServer(listener, session_dir, session_id, read_log, on_put=None)
     .start() / .stop()       an accept thread; one short-lived thread per transfer

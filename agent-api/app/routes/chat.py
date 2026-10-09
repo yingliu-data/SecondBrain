@@ -1,5 +1,5 @@
-"""POST /api/v1/chat — one input through the harness engine (every tenant,
-M6): the session workflow when Temporal is up, else the direct path
+"""POST /api/v1/chat — one input through the harness engine (every tenant):
+the session workflow when Temporal is up, else the direct path
 (Worker.act). `turn_stream` is shared with the guest avatar route."""
 import asyncio
 import logging
@@ -28,14 +28,14 @@ router = APIRouter()
 
 
 def _harness_store() -> DirStore:
-    """The directory session store: the only one the harness engine runs on
-    (M6-CONTRACTS §3). Anything else stops agent-api at import (startup)."""
+    """The directory session store: the only one the harness engine runs on.
+    Anything else stops agent-api at import (startup)."""
     store = create_session_store()
     if not isinstance(store, DirStore):
         raise RuntimeError(
             f"SESSION_BACKEND={SESSION_BACKEND!r} is not supported: the harness engine "
             f"needs the directory session store (SESSION_BACKEND=dir, the default). "
-            f"The legacy engine that ran on sqlite/memory was removed in M6; migrate "
+            f"The legacy engine that ran on sqlite/memory was removed; migrate "
             f"old sqlite sessions with app/session/migrate.py.")
     return store
 
@@ -108,7 +108,7 @@ async def _drain(worker, sink, task: asyncio.Future | None = None):
 async def _answer_stream(worker, task_id: str | None, answer_to: str, message: str,
                          input_id: str):
     """An answer to question `answer_to` as ui_response to the worker's
-    live or parked guest (a parked one is restored first, M3), then the
+    live or parked guest (a parked one is restored first), then the
     stream of `task_id`, the task it belongs to; NO_QUESTION when there is
     no such task, no guest takes it, or the guest is parked on another
     question (Worker.answer refuses it)."""
@@ -132,7 +132,7 @@ async def _harness_turn(tenant: Tenant, session_id: str, message: str, input_id:
     alive. The task outlives a client disconnect; a redelivered `input_id`
     attaches to the running task or gets the stored answer again. An
     answer (`answer_to`) does not queue behind the session: it goes to the
-    running task as ui_response (a parked guest is restored first, M3) and
+    running task as ui_response (a parked guest is restored first) and
     streams that task, as on the workflow path."""
     worker = workers.get_or_create(tenant, session_id, _registry)
     session = worker.session
@@ -185,7 +185,7 @@ async def _slot_unless_parked(worker, input_id: str, task: asyncio.Future, slot)
 
 async def _workflow_turn(tenant: Tenant, session_id: str, message: str, input_id: str,
                          *, answer_to: str | None = None):
-    """One input through the session workflow (M5-CONTRACTS §3): a `task`
+    """One input through the session workflow: a `task`
     signal-with-start, or for `answer_to` the `answer` signal when the
     workflow is parked on that question (else ui_response to the live
     worker). The response streams the Worker's events for the task's

@@ -1,4 +1,4 @@
-"""fold, checkpoint chain, replay and the goldens (PLAN.md sections 5, 12, 14)."""
+"""fold, checkpoint chain, replay and the goldens."""
 from __future__ import annotations
 
 import json

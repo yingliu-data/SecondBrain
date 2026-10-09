@@ -1,4 +1,4 @@
-"""The guest-facing MCP server on `POST /mcp` (M4-CONTRACTS.md §3.1, §3.2).
+"""The guest-facing MCP server on `POST /mcp`.
 
 Low-level `mcp.server.lowlevel.Server` behind a stateless, JSON-response
 `StreamableHTTPSessionManager`: no `initialize` needed (stateless sessions

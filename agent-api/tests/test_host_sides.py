@@ -92,12 +92,12 @@ async def test_device_timeout_and_mcp_is_not_a_side_call():
     assert sent[-1][1]["ok"] is False and "timed out" in sent[-1][1]["content"]
     assert not dc.is_open("c1")
     n = len(sent)
-    # M4: the guest calls the gateway itself; never a side_result
+    # the guest calls the gateway itself; never a side_result
     assert sides.handle_tool_call(call_event("c2", "wcc__draft", "mcp")) is None
     assert len(sent) == n and not sides.tasks
 
 
-# ---------------------------------------------------------------- memory (D23)
+# ---------------------------------------------------------------- memory
 class RememberRegistry(FakeRegistry):
     """The real remember skill behind the registry interface."""
 

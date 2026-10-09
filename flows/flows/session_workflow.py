@@ -1,4 +1,4 @@
-"""SessionWorkflow: one long-lived Temporal workflow per session (PLAN D11, section 10).
+"""SessionWorkflow: one long-lived Temporal workflow per session.
 
 Deterministic workflow code.  Imports only the Temporal SDK, the stdlib and
 ``flows.activities`` (payload dataclasses).  Nothing here touches the VM, the
@@ -286,7 +286,7 @@ class SessionWorkflow:
                     result = await self._wait_answer_and_resume(task, qid)
             except ActivityError as err:
                 # prepare_vm/park_vm out of retries: this task failed; the
-                # workflow stays signalable for the next one (PLAN 10).
+                # workflow stays signalable for the next one.
                 workflow.logger.warning("task %s failed: %s", task.input_id, err)
                 result = RunResult(outcome="failed", question_id=live.question_id)
             try:

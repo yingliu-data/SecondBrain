@@ -1,8 +1,8 @@
 """Shared test hooks.
 
-CI log verification (PLAN.md 13 M6 exit, 15 "replay: every golden and CI log
-replays after the run"; docs/M6-CONTRACTS.md section 1). Every test is
-followed by `protocol.replay` over every event log it produced:
+CI log verification (every golden and CI log replays after the run).
+Every test is followed by `protocol.replay` over every event log it
+produced:
 
   - the events each FakeHost received (the host's copy of the guest's log),
     replayed in memory with fold.replay (validate_log + fold + checkpoints);

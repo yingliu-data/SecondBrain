@@ -1,5 +1,5 @@
 """The plan_movement planner's own LLM call (one non-streamed chat completion
-against LLM_URL). M6: the legacy LLMProvider is gone; this host skill is the
+against LLM_URL). The legacy LLMProvider is gone; this host skill is the
 only in-process LLM caller left (the guest's calls go through the :5010
 proxy, app/host/llm_proxy.py)."""
 from __future__ import annotations

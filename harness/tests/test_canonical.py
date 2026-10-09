@@ -1,4 +1,4 @@
-"""protocol.canonical — canonical JSON, hashing, derived ids (PLAN.md section 5)."""
+"""protocol.canonical — canonical JSON, hashing, derived ids."""
 import hashlib
 import json
 import re

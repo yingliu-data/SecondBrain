@@ -12,7 +12,7 @@ async def tool_result_endpoint(request: Request, tenant: Tenant = Depends(verify
     """A device tool's result. The open call lives in DeviceCalls, not in the
     stream, so it survives a dropped SSE connection. Unknown or terminal call
     ids — and calls of another tenant's sessions (the session_key prefix) —
-    are 409 (PLAN.md 14)."""
+    are 409."""
     body = await request.json()
     call_id = body.get("tool_call_id")
     result = body.get("result", "")[:2000]

@@ -1,8 +1,8 @@
-"""allowlist — effective tool list and sides from hello (PLAN.md D16, 4.3, 8).
+"""allowlist — effective tool list and sides from hello.
 
 Public contract (other modules import these names):
   SIDES = ("guest", "host", "device", "mcp")
-  GUEST_BUILTINS: tuple of guest tool names (PLAN.md section 8)
+  GUEST_BUILTINS: tuple of guest tool names
   effective_tools(hello_config) -> list[dict]   [{name, side, pin}] sorted by name
   is_allowed(tools, name, side) -> bool
   tool_entry_errors(entry, index) -> list[str]  shape of one {name, side, pin}

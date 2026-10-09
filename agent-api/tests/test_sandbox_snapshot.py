@@ -1,4 +1,4 @@
-"""FirecrackerSandbox M3: snapshot, restore, base-snapshot build (docs/M3-CONTRACTS.md §1–2).
+"""FirecrackerSandbox: snapshot, restore, base-snapshot build.
 
 Same fake binary as test_sandbox_firecracker.py: `/snapshot/create` writes the
 files at the paths it is given (relative paths resolve against its cwd, like

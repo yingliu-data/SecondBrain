@@ -1,4 +1,4 @@
-"""M3 units: the coordinator's park, restore and determinism (fakes from
+"""Park/resume units: the coordinator's park, restore and determinism (fakes from
 test_guest_coordinator), the transport's hello floor / seed / park, the bulk
 client against FakeHost's :5001, the workspace manifest, mount_workspace and
 the Outbox/Inbox resume_from."""

@@ -48,7 +48,7 @@ def test_parse_args_and_connectors(tmp_path):
     with pytest.raises(SystemExit):
         parse_args(["--connect", "vsock"])          # --log-dir and --workspace required
     with pytest.raises(SystemExit):
-        parse_args(args(tmp_path, "--idle-wait", "/tmp/go"))   # the M1 file form is gone
+        parse_args(args(tmp_path, "--idle-wait", "/tmp/go"))   # the file form is gone
 
 
 # ---------------------------------------------------------------- hello phase

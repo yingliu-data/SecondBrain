@@ -72,7 +72,7 @@ def test_duplicate_key_rejected(tmp_path):
 
 
 def test_mcp_servers_accepted_and_ignored(tmp_path):
-    """M6: agent-api no longer validates MCP server names (gateway.json does)."""
+    """agent-api no longer validates MCP server names (gateway.json does)."""
     doc = {"mcp_servers": {"bad__name": {"url": "http://x/mcp"}},
            "tenants": [{"name": "a", "api_key": "x", "mcp_servers": ["ghost"],
                         "local_skills": []}]}

@@ -1,8 +1,8 @@
-"""events — event schema and validation (PLAN.md section 5, 12; docs/EVENTS.md).
+"""events — event schema and validation (docs/EVENTS.md).
 
 Public contract (other modules import these names):
   SCHEMA_VERSION = 1
-  EVENT_TYPES: frozenset of the 18 type names in PLAN.md section 5
+  EVENT_TYPES: frozenset of the 18 event type names
   REQUIRED_BODY / OPTIONAL_BODY / ENUMS: the per-type body schema
   MIN_INT / STR_LISTS / OPEN_ENUMS: the per-type shape rules beyond types
   TERMINAL_OP_STATES, OP_INPUT_REQUIRED, UNANSWERED
@@ -39,7 +39,7 @@ EVENT_TYPES = frozenset({
     "error", "settle",
 })
 
-# guard_decision.reason values (PLAN.md section 6); reason is free text, not an
+# guard_decision.reason values; reason is free text, not an
 # enum, but the fold counts this one.
 UNANSWERED = "unanswered"
 
@@ -116,22 +116,22 @@ REQUIRED_BODY: dict[str, dict[str, tuple]] = {
 }
 
 OPTIONAL_BODY: dict[str, dict[str, tuple]] = {
-    # M6: a run converted from a legacy history.jsonl (app.session.migrate --events)
+    # a run converted from a legacy history.jsonl (app.session.migrate --events)
     "session_start": {"migrated": BOOL},
     "input": {"question_id": STR, "answer": STR},
     "llm_response": {"response_id": OPT_STR},
-    # M4: `attempt` = the gateway POST of an mcp call (0 = the first);
+    # `attempt` = the gateway POST of an mcp call (0 = the first);
     # `input_request` {request_state, schema} only with state input_required
     "op_state": {"duration_ms": INT, "pid": INT, "side_ref": STR, "attempt": INT,
                  "input_request": DICT},
     "tool_result": {"spill_ref": OPT_STR, "rewrite": OPT_STR, "late": BOOL},
     "error": {"ref": STR},
-    # M5: the question a `parked{reason: "question"}` waits on (D12), the
+    # the question a `parked{reason: "question"}` waits on, the
     # task's wall clock used up to the park (ms; absent when no task runs),
     # and what each open question's deadline had left ({question_id: ms},
     # 0 = due; restore re-arms them)
     "parked": {"question_id": STR, "wall_used_ms": INT, "question_left_ms": DICT},
-    # M5: clock{question_deadline} names the question whose deadline passed
+    # clock{question_deadline} names the question whose deadline passed
     "clock": {"ref": STR},
 }
 
@@ -160,7 +160,7 @@ ENUMS: dict[str, dict[str, frozenset]] = {
     "settle": {"outcome": frozenset({"done", "failed", "timeout", "escalated", "aborted"})},
 }
 
-# clock.kind: a fixed set plus the open `grace_*` family (PLAN.md section 5).
+# clock.kind: a fixed set plus the open `grace_*` family.
 CLOCK_KINDS = frozenset({
     "host_hello", "host_heartbeat", "turn_clock", "idle_timer",
     "question_deadline", "wall_clock", "resumed",
@@ -190,7 +190,7 @@ STR_LISTS: dict[str, tuple[str, ...]] = {
 }
 
 TERMINAL_OP_STATES = frozenset({"done", "failed", "timeout", "lost", "killed"})
-# M4: an mcp op suspended on a gateway input request (not terminal: the
+# an mcp op suspended on a gateway input request (not terminal: the
 # re-send after the answer is op_state{running, attempt + 1})
 OP_INPUT_REQUIRED = "input_required"
 

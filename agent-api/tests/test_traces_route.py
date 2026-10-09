@@ -1,4 +1,4 @@
-"""Trace endpoints (M6-CONTRACTS §2): rows built from the session's event
+"""Trace endpoints: rows built from the session's event
 log (every run), tenant scoping, since_minutes / limit; a migrated legacy
 session is covered the same way."""
 import hashlib

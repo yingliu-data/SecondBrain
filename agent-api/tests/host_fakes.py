@@ -2,7 +2,7 @@
 protocol over the session's Unix sockets, a Sandbox that runs it in a
 thread, a fake registry of skills, and a scripted upstream LLM over TCP.
 
-M3 (harness/docs/M3-CONTRACTS.md): the FakeGuest honours `park` (at a turn
+Park and resume: the FakeGuest honours `park` (at a turn
 boundary, or at once while it waits on a host-originated result): it emits
 checkpoint + parked, waits for the acks, closes its socket and idle-waits
 in memory until the FakeSandbox restores it from the session "snapshot"; it
@@ -62,7 +62,7 @@ class FakeGuest:
     hello's tools; host/device/mcp calls wait for side_result, guest calls
     get `guest_result`). Events are shaped like the goldens. A text turn
     may carry `deltas`: live `delta` fragments sent before the llm_response,
-    of `delta_kind` ("content", default: M2 streaming; "text": the
+    of `delta_kind` ("content", default: streaming; "text": the
     non-streamed whole-message delta), and `reasoning` fragments."""
 
     def __init__(self, script, *, guest_result="ok", exit_after_settle=True,
@@ -88,7 +88,7 @@ class FakeGuest:
         self.thread: threading.Thread | None = None
         self.error: BaseException | None = None
         self.turn_n = 0
-        # M3
+        # park, resume, death
         self.die = die
         self.resume_text = resume_text
         self.ipc: Path | None = None
@@ -195,7 +195,7 @@ class FakeGuest:
                 "prev_hash": prev[-1] if prev else head}
 
     def _do_park(self) -> None:
-        """M3-CONTRACTS §3: checkpoint, parked, wait acked, close, idle-wait;
+        """Park: checkpoint, parked, wait acked, close, idle-wait;
         on restore reconnect and handshake. Keeps every in-memory counter."""
         reason, self._park_req = self._park_req, None
         cp = self.emit("checkpoint", self._checkpoint_body())
@@ -278,7 +278,7 @@ class FakeGuest:
         self.live("ready", {"at": int(time.time() * 1000)})
 
     def _log_return(self) -> None:
-        """M3-CONTRACTS §4.4: bulk get of the acked log, fold, op_state{lost}."""
+        """Death resume: bulk get of the acked log, fold, op_state{lost}."""
         events, self.seq = BulkClient(UnixConnector(self.ipc), self.session_id).get_log(0)
         self.returned = events
         settled = {e["body"]["input_id"] for e in events if e["type"] == "settle"}
@@ -414,7 +414,7 @@ class FakeSandbox(Sandbox):
     """Runs a FakeGuest in a thread for every start(); a new FakeGuest
     (fresh seq) per run, like a fresh guest process.
 
-    M3: `base=True` offers a base snapshot (restore(dir, None) spawns a new
+    `base=True` offers a base snapshot (restore(dir, None) spawns a new
     guest, like a restore of the idle image); snapshot() waits for the guest
     to idle-wait after `parked` and keeps it as the session snapshot (META.json
     in snapshot_dir); restore(dir, snapshot_dir) wakes that same guest.

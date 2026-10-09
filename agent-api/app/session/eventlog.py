@@ -1,4 +1,4 @@
-"""eventlog — what agent-api reads from a session's event log (M6-CONTRACTS §2).
+"""eventlog — what agent-api reads from a session's event log.
 
   load_runs(session_root) -> list[list[event]]   every run, in order
                                                  (protocol.replay.load_session)
@@ -6,7 +6,7 @@
   conversation(runs) -> list[{role, content}]    user text + settled answers
 
 The event log is canonical; `history.jsonl` and `logs/trace.jsonl` are no
-longer written (the projections kept for one release retired in M6). Trace
+longer written (the projections kept for one release are retired). Trace
 rows keep the shape the projection had: {ts, event, detail, duration_ms?},
 with `ts` the event's own envelope ts. Event -> row:
 

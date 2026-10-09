@@ -1,6 +1,6 @@
 """protocol.replay — load_session / verify_session and the replay/verify CLI
-(docs/M6-CONTRACTS.md section 1; PLAN.md 14 "replay mismatch or broken
-checkpoint chain → hard error naming the seq")."""
+(a replay mismatch or a broken checkpoint chain is a hard error naming
+the seq)."""
 from __future__ import annotations
 
 import json

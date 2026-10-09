@@ -1,4 +1,4 @@
-"""Per-tenant tool policy (M4-CONTRACTS.md §6).
+"""Per-tenant tool policy.
 
 Globs (fnmatch, case-sensitive) match the namespaced `{upstream}__{tool}`
 name. Deny wins over allow. A tenant absent from `tenants`, or an upstream not
@@ -51,7 +51,7 @@ class Policy:
 
 class ConcurrencyLimiter:
     """Running upstream calls per session. A call held for input releases its
-    slot (§3.2) and re-takes it on resume without a limit check, so an
+    slot and re-takes it on resume without a limit check, so an
     answered question is never refused."""
 
     def __init__(self):

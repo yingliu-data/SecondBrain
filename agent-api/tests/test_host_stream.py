@@ -14,7 +14,7 @@ def ev(seq, type, body):
 
 
 def test_final_text_matches_legacy_word_wise_tokens():
-    # what app/agent/loop.py streamed for a final answer (deleted in M6)
+    # what app/agent/loop.py streamed for a final answer (since deleted)
     legacy = [f"event: token\ndata: {json.dumps({'text': w + ' '})}\n\n"
               for w in "Hello there, wörld 1 2".split(" ")] + ["event: done\ndata: {}\n\n"]
     p = Projector()
@@ -114,7 +114,7 @@ def settle(seq, answer):
 
 
 def test_streamed_content_deltas_are_tokens_verbatim_and_suppress_the_response():
-    """M2 (D17): one token per fragment, boundaries as the model made them;
+    """One token per fragment, boundaries as the model made them;
     reasoning and tool_call fragments never reach the client; the turn's
     llm_response and the settle add no text."""
     p = Projector()

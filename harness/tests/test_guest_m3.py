@@ -1,6 +1,6 @@
-"""M3 end to end: guest.main as a subprocess, FakeHost (:5000 + :5001 bulk)
+"""Park and resume end to end: guest.main as a subprocess, FakeHost (:5000 + :5001 bulk)
 and FakeLLM (:5010) — park, resume, death and log return, the settle
-manifest, spill uploads and the vsock idle-wait (docs/M3-CONTRACTS.md).
+manifest, spill uploads and the vsock idle-wait.
 
 Every scenario checks that the host's copy of the log validates, folds and
 that its checkpoints verify (fold.replay), and that seq runs gapless across

@@ -22,7 +22,7 @@ the current connection; pause_acks()/resume_acks(); redeliver(msg) writes a
 control line again (a duplicate on the wire); wait_for(type, timeout) and the
 other wait_* helpers block on the state the guest produces.
 
-M3:
+Park and bulk:
   - bulk (default on): a :5001 server (`{dir}/v.sock_5001`) speaking
     protocol/bulk.py: puts are verified (bytes, sha256) and kept in
     `bulk_files[(kind, path)]` (latest bytes) and `bulk_puts` (headers, in
@@ -35,7 +35,7 @@ M3:
     snapshot); `listen()` opens the listener again (the restore).
   - a side result of HOLD (or a callable returning HOLD) is not answered:
     the test sends the side_result itself later.
-  - gateway (M4): `gateway=True` (or a FakeGateway) also serves :5011, the
+  - gateway: `gateway=True` (or a FakeGateway) also serves :5011, the
     forwarder + MCP gateway double; mcp tool calls never get a side_result.
   - a guest killed and replaced: wait_connected(count=n) for the new one,
     then send("hello", {..., "resume": True}) with the next cseq.
@@ -87,7 +87,7 @@ class FakeHost:
         self._listener: socket.socket | None = None
         self._thread: threading.Thread | None = None
 
-        # M3
+        # bulk channel, park
         self.bulk = bulk
         self.bulk_path = os.path.join(self.dir, f"v.sock_{BULK_PORT}")
         self.bulk_files: dict = {}          # (kind, path) -> bytes (latest put)
@@ -99,7 +99,7 @@ class FakeHost:
         self._bulk_listener: socket.socket | None = None
         self._bulk_thread: threading.Thread | None = None
 
-        # M4: the forwarder + gateway double on :5011 (tests/fakes/fake_gateway.py)
+        # the forwarder + gateway double on :5011 (tests/fakes/fake_gateway.py)
         if gateway is True:
             from tests.fakes.fake_gateway import FakeGateway
             gateway = FakeGateway(self.dir)

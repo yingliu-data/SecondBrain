@@ -52,11 +52,11 @@ def tenant_registry(tenants_file):
 
 
 # --------------------------------------------------------------------------- #
-# CI log verification (M6-CONTRACTS section 1; the same hook as
-# harness/tests/conftest.py): after every test, `protocol.replay` verifies
-# every session / log directory the test wrote under its tmp_path, and every
-# `events.before-resume-N` buffer a log return moved aside. A problem fails
-# the test (a teardown error naming the log and the seq). A test that writes
+# CI log verification (the same hook as harness/tests/conftest.py): after
+# every test, `protocol.replay` verifies every session / log directory the
+# test wrote under its tmp_path, and every `events.before-resume-N` buffer
+# a log return moved aside. A problem fails the test (a teardown error
+# naming the log and the seq). A test that writes
 # a broken log on purpose opts out with `@pytest.mark.no_log_verify("why")`.
 
 _BEFORE_RESUME = re.compile(r"^events\.before-resume-\d+$")

@@ -1,7 +1,7 @@
 [project]
 name = "mcp-gateway"
 version = "0.1.0"
-description = "SecondBrain MCP gateway: one MCP server for the guest, one client per upstream, policy, pins (harness M4)"
+description = "SecondBrain MCP gateway: one MCP server for the guest, one client per upstream, policy, pins"
 requires-python = ">=3.12"
 dependencies = [
     "mcp>=1.28,<2",
@@ -23,7 +23,7 @@ package = false
 
 [tool.uv.sources]
 # Non-editable so the Docker image (which copies harness/ next to this dir)
-# installs it the same way. Only `protocol.canonical` is used (pins, §5).
+# installs it the same way. Only `protocol.canonical` is used (pins).
 secondbrain-harness = { path = "../harness", editable = true }
 
 [tool.pytest.ini_options]

@@ -21,7 +21,7 @@ class Tenant(BaseModel):
     guest avatar page, routes/guest.py). An origin tenant is never matched
     by an API key.
 
-    M6: every tenant runs the harness engine. An `engine` key is accepted
+    Every tenant runs the harness engine. An `engine` key is accepted
     and ignored with a warning; `mcp_servers` is accepted and ignored too
     (the mcp-gateway's gateway.json owns MCP access), except that a tenant
     listing MCP servers without `local_skills` still gets no local skills.
@@ -39,7 +39,7 @@ class Tenant(BaseModel):
     max_tokens: int | None = None          # None -> LLM default
     exclude_builtins: list[str] = []       # guest built-ins this tenant's sessions do not get
     is_default: bool = False
-    # M5 (Temporal session workflow): flows.SESSION_CONFIG_KEYS, read by
+    # Temporal session workflow: flows.SESSION_CONFIG_KEYS, read by
     # SessionConfig.from_tenant (None keeps the flows default);
     # `schedules` = [{cron, prompt, session, tz?}]
     wall_clock_s: int | None = None
@@ -62,7 +62,7 @@ class Tenant(BaseModel):
             data = dict(data)
             engine = data.pop("engine")
             logger.warning("tenant %s: `engine: %s` ignored (every tenant runs the harness "
-                           "engine since M6)", data.get("name"), engine)
+                           "engine)", data.get("name"), engine)
         return data
 
     @field_validator("exclude_builtins")

@@ -1,5 +1,5 @@
 """mcp — wire constants and names shared by the guest, the host forwarder, the
-gateway and agent-api (docs/M4-CONTRACTS.md). Stdlib only, pure data.
+gateway and agent-api. Stdlib only, pure data.
 
 One definition each, so a rename breaks every side's unit tests instead of
 only the end-to-end run.
@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 
-# --- tool names: {upstream}__{tool} (M4-CONTRACTS 3.1) ------------------------
+# --- tool names: {upstream}__{tool} -----------------------------------------
 NAMESPACE_SEP = "__"
 META_TOOLS = ("search_tools", "describe_tool", "call_tool")
 CALL_TOOL = "call_tool"
@@ -29,16 +29,16 @@ def valid_upstream_name(name) -> bool:
     return isinstance(name, str) and bool(name) and NAMESPACE_SEP not in name and ":" not in name
 
 
-# --- input required relay (M4-CONTRACTS 3.2) -----------------------------------
+# --- input required relay ----------------------------------------------------
 INPUT_REQUIRED = "sb/input_required"
 INPUT_RESPONSE = "sb/input_response"
 ACTIONS = ("accept", "decline", "cancel")
 
-# --- forwarder-held calls (M4-CONTRACTS 3.3) -----------------------------------
+# --- forwarder-held calls -----------------------------------------------------
 CALL_HEADER = "X-SB-Call"
 REATTACH_HEADER = "X-SB-Reattach"
 
-# --- identity (M4-CONTRACTS 2) -------------------------------------------------
+# --- identity -----------------------------------------------------------------
 USER_HEADER = "X-SB-User"
 TENANT_HEADER = "X-SB-Tenant"
 SESSION_HEADER = "X-SB-Session"

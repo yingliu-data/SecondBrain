@@ -1,4 +1,4 @@
-"""Print a `gateway.json` from agent-api's `tenants.json` (M4-CONTRACTS.md §6).
+"""Print a `gateway.json` from agent-api's `tenants.json`.
 
     python -m app.migrate_config tenants.json > gateway.json
 

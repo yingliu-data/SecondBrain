@@ -97,7 +97,7 @@ def recent_traces(since_minutes: int = 10, limit: int = 200,
                   tenant: Tenant = Depends(verify)):
     """Trace rows across all of this tenant's sessions — answers 'which
     tools ran in the last N minutes'. Built from each session's event log
-    (every run; M6-CONTRACTS §2). Requires the dir backend. A plain def:
+    (every run). Requires the dir backend. A plain def:
     FastAPI runs the file reads in its threadpool, off the event loop."""
     if not _is_dir_store():
         raise HTTPException(501, "Traces require SESSION_BACKEND=dir")
@@ -126,7 +126,7 @@ def session_traces(session_id: str, since_minutes: int | None = None,
     return {"traces": session.read_trace(since=_since(since_minutes), limit=limit)}
 
 
-# ── M5: the session workflow (harness/docs/M5-CONTRACTS.md §3) ──
+# ── the session workflow ──
 
 def _session_or_404(tenant: Tenant, session_id: str,
                     not_dir: str = "Requires SESSION_BACKEND=dir"):

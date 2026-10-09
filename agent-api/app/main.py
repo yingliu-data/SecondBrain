@@ -66,7 +66,7 @@ async def _start_guest_cleanup():
 
 @app.on_event("startup")
 async def _start_temporal():
-    # M5 (harness/docs/M5-CONTRACTS.md): TEMPORAL_ADDRESS set -> the session
+    # TEMPORAL_ADDRESS set -> the session
     # workflow's worker runs on this loop with the real activities, and the
     # tenants' schedules are ensured, in the background: startup never waits
     # for Temporal, the direct path serves /chat until (unless) it is up.

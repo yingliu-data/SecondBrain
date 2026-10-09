@@ -1,9 +1,10 @@
-"""guest.hooks — the before_tool / after_tool chains (PLAN.md D5, section 8).
+"""guest.hooks — the before_tool / after_tool chains.
 
     before_tool(state, call) -> ("allow" | "deny" | "ask", reason)
     after_tool(state, call, content) -> str | None        a rewrite, or None
-    Hooks                                                 ordered chains; M2 registers
-                                                          sanitize / avatar rewrites
+    Hooks                                                 ordered chains (nothing registers
+                                                          a hook yet: the host sanitizes
+                                                          its results in app/host/sides.py)
     Hooks.check_purity(state, call, content) -> None      runs both chains with the
                                                           clock, environment, randomness,
                                                           files and sockets patched to
@@ -14,16 +15,16 @@
 
 `call` is the tool_call body ({turn_id, call_id, name, side, args, ...}).
 
-M1 ships the pass-through defaults: the before chain is empty and answers
+The defaults pass everything through: the before chain is empty and answers
 ("allow", "placeholder_pass"); the after chain is empty and rewrites nothing.
-The coordinator still records a guard_decision for every call (D5), so the
+The coordinator still records a guard_decision for every call, so the
 log shows the slot even while the policy is a placeholder.
 
 Purity rule: a hook is a pure function of (state, call, content). It never
 reads the clock, the environment, randomness, a file or the network, and it
 never calls the LLM, a tool or the gateway. Replay re-runs nothing, so a hook
 that depended on anything outside its arguments would make the log lie.
-PLAN.md section 14: "a hook reading time() → purity test fails".
+A hook reading time() fails the purity test.
 
 How the rule is enforced (tests/test_guest_hooks.py): `check_purity` runs the
 registered chains on a sample call inside `purity_guard()`, which patches the
@@ -140,7 +141,7 @@ class Hooks:
         self._before: list = []
         self._after: list = []
 
-    # registration (M2: sanitize, avatar rewrite)
+    # registration
     def register_before(self, fn) -> None:
         self._before.append(fn)
 

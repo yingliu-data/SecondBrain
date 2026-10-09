@@ -143,7 +143,7 @@ def test_build_request_without_tools_for_the_wrap_up_turn():
 
 
 def test_prefix_bytes_identical_between_consecutive_turns():
-    """REPLAY.md invariant 2, M1 note: the serialized prefix part of turn N+1
+    """REPLAY.md invariant 2: the serialized prefix part of turn N+1
     starts with the whole request of turn N (system + every message it saw)."""
     cfg = make_cfg([{"name": "calendar", "side": "device", "pin": None}])
     preambles: dict = {}
@@ -256,7 +256,7 @@ def test_format_time(ms, expected):
     assert context.format_time(ms) == expected
 
 
-# ---------------------------------------------------------------- M2: estimate, compaction request, memory lines
+# ---------------------------------------------------------------- estimate, compaction request, memory lines
 def test_estimate_tokens_is_ceil_chars_over_four():
     import math
     cfg = make_cfg()

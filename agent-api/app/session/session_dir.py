@@ -11,7 +11,7 @@ Layout::
         tickets/             # append-only per-operation records (Phase 3)
         logs/
 
-M6: the conversation and the trace are read from the event log
+The conversation and the trace are read from the event log
 (app.session.eventlog); `history.jsonl` and `logs/trace.jsonl` are no longer
 written. A legacy session's `history.jsonl` is converted to an event log run
 by `python -m app.session.migrate --events`.
@@ -55,7 +55,7 @@ class SessionDir:
 
     @property
     def history_jsonl(self) -> Path:
-        """Legacy conversation file (pre-M6); only migrate --events reads it."""
+        """Legacy conversation file; only migrate --events reads it."""
         return self.root / "history.jsonl"
 
     @property
@@ -80,7 +80,7 @@ class SessionDir:
 
     @property
     def trace_jsonl(self) -> Path:
-        """Legacy trace file (pre-M6); only migrate --events reads it."""
+        """Legacy trace file; only migrate --events reads it."""
         return self.logs / "trace.jsonl"
 
     @classmethod

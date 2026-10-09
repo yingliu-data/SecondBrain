@@ -101,7 +101,7 @@ def test_segments_rotate_and_read_replays_equal(session):
 
 
 def test_no_history_or_trace_projection_files(session):
-    """M6: history.jsonl and logs/trace.jsonl are no longer written; the
+    """history.jsonl and logs/trace.jsonl are no longer written; the
     conversation and the trace are read from the event log."""
     sync = StateSync(session)
     sync.ticket_id = "tk_1"
@@ -209,7 +209,7 @@ def test_host_event_log_and_runs(session):
     assert json.loads(json.dumps(again.state.to_canonical()))  # canonicalisable
 
 
-# ---------------------------------------------------------------- memory (D23)
+# ---------------------------------------------------------------- memory
 def compaction_run(summary="Goal: greet. Progress: said hi.", sha=None):
     """A text task, then a compaction turn (clock, turn_start{compaction},
     llm_response, compaction, memory{session, write}) as the guest emits it."""

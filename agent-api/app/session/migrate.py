@@ -1,6 +1,6 @@
 """Session migrations.
 
-1. conversations.db rows → session directories (one-time, pre-M6):
+1. conversations.db rows → session directories (one-time, legacy store):
 
      python -m app.session.migrate [--db data/conversations.db] [--root data/sessions]
 
@@ -10,7 +10,7 @@
    Writes each conversation as a legacy `history.jsonl`; run step 2 next.
    Idempotent: existing session dirs are skipped. SQLite is left untouched.
 
-2. legacy `history.jsonl` → event log run `events/r0000` (M6-CONTRACTS §4):
+2. legacy `history.jsonl` → event log run `events/r0000`:
 
      python -m app.session.migrate --events [--dry-run] <sessions_root>
 

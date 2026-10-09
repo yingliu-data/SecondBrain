@@ -1,5 +1,5 @@
 """POST /internal/gateway-events — the gateway's events into the session's
-host log (M4-CONTRACTS §7).
+host log.
 
 Body `{user, tenant, session_id, op, tool?, upstream?, ok?, ms?, error?}`,
 bearer INTERNAL_TOKEN (empty token = no check). The event is appended as a

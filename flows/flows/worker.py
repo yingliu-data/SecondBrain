@@ -1,4 +1,4 @@
-"""Temporal worker bootstrap (PLAN D22): one task queue, ``flows.TASK_QUEUE``.
+"""Temporal worker bootstrap: one task queue, ``flows.TASK_QUEUE``.
 
 ``start_worker`` is what agent-api calls at startup on its own asyncio loop
 (behind ``AGENT_ENGINE=harness``), passing its real activity bodies.  The

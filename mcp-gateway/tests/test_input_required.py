@@ -1,4 +1,4 @@
-"""§3.2: the elicitation relay — held upstream call, sb/input_required,
+"""The elicitation relay — held upstream call, sb/input_required,
 sb/input_response resume, expiry, cancel, concurrency while held."""
 import asyncio
 

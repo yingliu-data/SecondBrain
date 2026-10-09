@@ -7,9 +7,9 @@
 # Jobs: mount the pseudo filesystems, run the guest harness, and on exit or on
 # the host's SendCtrlAltDel (SIGINT here) sync the workspace and reboot, which
 # makes Firecracker exit. No network, no clock source: the guest learns the
-# time from `hello.at` (PLAN.md section 4.3).
+# time from `hello.at`.
 #
-# M3 (docs/M3-CONTRACTS.md §1): init does NOT mount /dev/vdb. The guest starts
+# Init does NOT mount /dev/vdb. The guest starts
 # in `--idle-wait vsock` (polling connect to CID 2:5000, silently) -- the point
 # the BASE snapshot is taken at -- and mounts /dev/vdb on /workspace itself
 # (`--mount-workspace /dev/vdb`) once a host listener answers. A cold boot and

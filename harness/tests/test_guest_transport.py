@@ -1,5 +1,5 @@
 """guest.transport over Unix sockets against tests/fakes/fake_host.FakeHost
-(docs/PROTOCOL.md sections 3 and 4)."""
+(docs/PROTOCOL.md)."""
 import queue
 import socket
 import time

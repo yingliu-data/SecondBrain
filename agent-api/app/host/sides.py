@@ -1,4 +1,4 @@
-"""sides — host-originated operations (PLAN.md 8): a `tool_call` event whose
+"""sides — host-originated operations: a `tool_call` event whose
 side is not `guest` is a request to the host; the worker carries it out and
 answers with a `side_result` control message `{call_id, side, content, ok,
 memory?}`.
@@ -8,15 +8,15 @@ memory?}`.
           `remember`/`forget` result adds `memory: {scope, op: write|remove,
           slug, sha256}` to the side_result (the guest emits its `memory`
           event from it verbatim) and the same dict, plus call_id, is logged
-          as a `memory` host event (D23: sha256 = sha256_hex(body.strip())
+          as a `memory` host event (sha256 = sha256_hex(body.strip())
           from the skill's result JSON, "" for a removal)
   device  SSE `tool_call{id, name, arguments}` (projected by stream.py from
           the event) and a DeviceCalls entry that `POST /api/v1/tool-result`
           resolves; the entry lives in the registry, not the stream, so it
           survives a dropped SSE connection
   mcp     not the host's: the guest calls the gateway itself over :5011
-          (gateway_forwarder.py); an mcp call never becomes a side_result
-          (PLAN.md 8), so handle_tool_call returns None as for guest
+          (gateway_forwarder.py); an mcp call never becomes a side_result,
+          so handle_tool_call returns None as for guest
 
   DeviceCalls              call_id -> open call; `resolve(call_id, result)`
                            is False for an unknown or terminal id (409 at

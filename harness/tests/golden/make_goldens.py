@@ -1,4 +1,4 @@
-"""make_goldens — deterministic generator of the three M0 golden logs.
+"""make_goldens — deterministic generator of the three golden logs.
 
 Run:  cd harness && python3 tests/golden/make_goldens.py
 Writes text_answer.jsonl, device_tool_late_duplicate.jsonl and

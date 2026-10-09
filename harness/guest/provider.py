@@ -1,4 +1,4 @@
-"""guest.provider — the LLM call over :5010 (PLAN.md D7, D17; docs/GUEST.md).
+"""guest.provider — the LLM call over :5010 (docs/GUEST.md).
 
     Provider(connector, port=5010, model=..., timeout_s=..., retries=3, *,
              backoff_s=(1, 2, 4), sleep=time.sleep, enable_thinking=False)

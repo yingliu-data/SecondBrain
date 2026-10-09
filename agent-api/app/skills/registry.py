@@ -97,7 +97,7 @@ class SkillRegistry:
 
     def get_active_tool_definitions(self, allowed: set[str] | None = None) -> list[dict]:
         """Tool definitions of every visible skill (the harness offers them all:
-        the keyword prefilter retired with the legacy loop, D16)."""
+        the keyword prefilter retired with the legacy loop)."""
         defs = []
         for name, skill in self._skills.items():
             if self._visible(name, allowed):

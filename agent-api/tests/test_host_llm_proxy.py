@@ -67,7 +67,7 @@ def test_unknown_path_and_unreachable_upstream(tmp_path):
         ep.close()
 
 
-# ---------------------------------------------------------------- streaming (M2)
+# ---------------------------------------------------------------- streaming
 def sse_events(text: str) -> list:
     """The JSON payloads of `data:` events in SSE text (without [DONE])."""
     return [json.loads(d) for d in iter_sse_data(text.splitlines(keepends=True))]

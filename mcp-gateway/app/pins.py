@@ -1,4 +1,4 @@
-"""Per-session pin tables (M4-CONTRACTS.md §5).
+"""Per-session pin tables.
 
 `{state_dir}/pins/{user}/{tenant}/{session}.json`:
 

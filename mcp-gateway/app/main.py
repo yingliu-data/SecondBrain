@@ -24,13 +24,13 @@ logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO").upper())
 for _noisy in ("mcp.server.lowlevel.server", "mcp.server.streamable_http"):
     logging.getLogger(_noisy).setLevel(logging.WARNING)
 
-# Routes whose callers must stamp X-SB-User/Tenant/Session (§2).
+# Routes whose callers must stamp X-SB-User/Tenant/Session.
 IDENTITY_PATHS = {"/mcp", "/internal/tools"}
 
 
 class AuthMiddleware:
-    """Bearer on every route but /healthz (§1); identity headers on
-    IDENTITY_PATHS (§2), trusted only together with the bearer. The parsed
+    """Bearer on every route but /healthz; identity headers on
+    IDENTITY_PATHS, trusted only together with the bearer. The parsed
     Identity goes in the scope state (`identity.request_identity`)."""
 
     def __init__(self, app: ASGIApp, token: str):

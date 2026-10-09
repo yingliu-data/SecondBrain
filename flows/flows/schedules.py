@@ -1,4 +1,4 @@
-"""Temporal Schedules from ``tenants.json`` (PLAN section 10, "Schedules").
+"""Temporal Schedules from ``tenants.json``.
 
 Each tenant may carry::
 

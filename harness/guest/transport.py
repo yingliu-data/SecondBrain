@@ -1,5 +1,5 @@
 """transport — the :5000 control channel from the guest's side
-(PLAN.md 4.1–4.5, docs/PROTOCOL.md, docs/GUEST.md).
+(docs/PROTOCOL.md, docs/GUEST.md).
 
 The guest never listens. A `Connector` opens an outbound stream to a port:
 `VsockConnector(cid=2)` over AF_VSOCK in the microVM, `UnixConnector(dir)`
@@ -19,7 +19,7 @@ gives the host side of a guest-initiated vsock connection).
                  are kept in the Outbox until acked; live messages and acks are
                  fire-and-forget and dropped while the link is down.
 
-Reconnect (PROTOCOL.md section 4): on a new connection with a known session the
+Reconnect (see docs/PROTOCOL.md): on a new connection with a known session the
 first line is the handshake (ack of the highest contiguous cseq delivered);
 the host answers with its ack of seq; `resend_plan` applies it and yields what
 to resend; the resend goes out before anything newer (a connection generation
@@ -28,11 +28,10 @@ the Outbox already covers them); then ("link", "up") is posted.
 
 The session_id is learned from the first control message (hello) when the
 transport is built without one. A fresh transport takes the hello's own cseq
-as its floor (a resumed session's hello is not cseq 1: docs/M3-CONTRACTS.md
-section 4); controls that arrive before the hello with a higher cseq are gaps
-and are never delivered.
+as its floor (a resumed session's hello is not cseq 1); controls that
+arrive before the hello with a higher cseq are gaps and are never delivered.
 
-Idle-wait (M3, the snapshot point): built with `idle=True`, the link thread
+Idle-wait (the snapshot point): built with `idle=True`, the link thread
 tries to connect every `idle_poll_s` (IDLE_POLL_S, 50 ms), silently and
 without backoff, and stays in that loop until the host has sent a first line
 on a connection (any connect error, or a reset before that, e.g. the vsock
@@ -208,7 +207,7 @@ class Transport:
         return self._up_event.wait(timeout)
 
     def park(self) -> None:
-        """Close the connection and return to the idle-wait loop (M3 park):
+        """Close the connection and return to the idle-wait loop (park):
         state, Outbox and Inbox are kept; the next connection that succeeds
         opens with the handshake and resends whatever is unacked."""
         with self._lock:

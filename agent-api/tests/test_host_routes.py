@@ -1,4 +1,4 @@
-"""The chat routes on the harness engine (every tenant, M6): chat streams
+"""The chat routes on the harness engine (every tenant): chat streams
 the Worker's sink; tool-result goes to DeviceCalls (409 for unknown ids and
 for another tenant's calls)."""
 import hashlib
@@ -56,7 +56,7 @@ def client(tmp_path, users_root, monkeypatch):
 
 
 def test_example_tenants_all_load_without_an_engine(tmp_path):
-    """M6: every tenant runs on harness; tenants.json.example has no
+    """Every tenant runs on harness; tenants.json.example has no
     `engine` any more and still loads (mcp_servers accepted and ignored)."""
     from pathlib import Path
 

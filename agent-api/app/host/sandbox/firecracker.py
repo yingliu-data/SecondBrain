@@ -1,18 +1,18 @@
-"""sandbox/firecracker — one Firecracker microVM per session (PLAN.md D6a, D18, M1, M3).
+"""sandbox/firecracker — one Firecracker microVM per session.
 
-M1: boot from the read-only rootfs over the Firecracker API with a vsock device
-and a per-session `/workspace` drive, stop, kill. M3 (docs/M3-CONTRACTS.md §1–2):
-full snapshots (`snapshot`), restore from the shared BASE snapshot or from a
-per-session snapshot (`restore`, `has_snapshot`), and the base-snapshot build
+Boot from the read-only rootfs over the Firecracker API with a vsock device
+and a per-session `/workspace` drive, stop, kill; full snapshots (`snapshot`),
+restore from the shared BASE snapshot or from a per-session snapshot
+(`restore`, `has_snapshot`), and the base-snapshot build
 (`build_base_snapshot`, `python -m app.host.sandbox.firecracker build-base`,
 `harness/image/build_snapshot.py`). The jailer is still a follow-up.
 
 Standard library plus `subprocess` only: this module must stay httpx-free so it
 can move (an OpenShell runtime would be a second backend behind the same
-methods, PLAN.md section 11), and so `harness/image/build_snapshot.py` can load
+methods), and so `harness/image/build_snapshot.py` can load
 it without the agent-api package.
 
-Per-session files (all under the session directory, PLAN.md section 3):
+Per-session files (all under the session directory):
 
     {session_dir}/vm/firecracker.sock   Firecracker API socket (host side only)
     {session_dir}/vm/workspace.img      ext4 image, /dev/vdb in the guest, /workspace
@@ -115,7 +115,7 @@ DEFAULT_BOOT_ARGS = "console=ttyS0 reboot=k panic=1 pci=off init=/sbin/harness-i
 # (read-only because the rootfs drive is), so the boot args carry no root=.
 # The guest's `--idle-wait vsock --mount-workspace /dev/vdb` comes from
 # harness-init, not from the boot args: a cold boot and the base-snapshot boot
-# are the same boot (M3-CONTRACTS §1).
+# are the same boot.
 
 # The configuration sequence `start()` sends. Tests assert this exact order.
 API_ORDER = (
@@ -204,7 +204,7 @@ class FirecrackerConfig:
     api_timeout_s: float = 10.0      # per API request and for the socket to appear
     stop_grace_s: float = 5.0        # SendCtrlAltDel -> SIGKILL
     extra_args: list[str] = field(default_factory=list)
-    # --- M3 ---
+    # --- snapshots ---
     vm_cache: str = DEFAULT_VM_CACHE        # HARNESS_VM_CACHE: base/ lives here
     image_version: str | None = None        # HARNESS_IMAGE_VERSION; None -> image_version(cfg)
     firecracker_version: str | None = None  # HARNESS_FIRECRACKER_VERSION; None -> `--version`
@@ -380,7 +380,7 @@ class FirecrackerSandbox(_SandboxBase):
         self.guest_cid: int | None = None
         self._proc: subprocess.Popen | None = None
         self._last_returncode: int | None = None
-        # M3: {op, source, ms} for the worker's `vm` host event (§6)
+        # {op, source, ms} for the worker's `vm` host event
         self.last_vm_event: dict | None = None
         # resolved once (the first snapshot check), not per check
         self._image_ver: str | None = None
@@ -389,7 +389,7 @@ class FirecrackerSandbox(_SandboxBase):
     # ------------------------------------------------------------ interface
 
     def start(self, session_dir) -> None:
-        """Cold boot from the rootfs (M1; the M3 fallback when no snapshot)."""
+        """Cold boot from the rootfs (the fallback when no snapshot)."""
         if self.is_alive():
             raise SandboxError("sandbox already started")
         self._proc = None
@@ -651,7 +651,7 @@ class FirecrackerSandbox(_SandboxBase):
             "/vm": {"state": "Paused"},
             "/snapshot/create": {
                 "snapshot_type": "Full",
-                # relative to the Firecracker cwd ({session_dir}/vm), M3-CONTRACTS §2
+                # relative to the Firecracker cwd ({session_dir}/vm)
                 "snapshot_path": os.path.relpath(str(staging / SNAPSHOT_STATE_NAME), str(self.vm_dir)),
                 "mem_file_path": os.path.relpath(str(staging / SNAPSHOT_MEM_NAME), str(self.vm_dir)),
             },
