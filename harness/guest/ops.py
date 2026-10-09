@@ -48,6 +48,29 @@ from the operation's worker thread before the result is posted; `spill` then
 carries `bulk_path` (that path). An upload failure is logged only. The
 coordinator records the `bulk` event and `spill_ref` with `bulk_path`.
 
+M4 (docs/GUEST.md "M4"): mcp-side calls run here too, each on its own
+daemon thread (a gateway call may take many minutes; it must not hold a pool
+worker), through the guest.mcp client:
+  submit_mcp(call_id, name, args, *, attempt=0, input_response=None,
+             timeout_s=None) -> None
+      one POST /mcp tools/call. Its outcome is posted as ("op", call_id,
+      result) like any operation (text -> content, isError -> ok False /
+      "failed", a gateway or connection error -> "failed", a socket timeout
+      -> "timeout", abort -> "killed"; spill applies), or, when the gateway
+      asks for input, as ("op_input", call_id, input_required) — the job is
+      then dropped (the operation is suspended: no thread, no connection) and
+      the coordinator re-submits it with the user's answer (attempt + 1).
+  detach_mcp() -> set[call_id]  park: close every in-flight mcp connection
+      and forget the jobs without reporting (the forwarder holds the calls;
+      the coordinator re-attaches with submit_mcp(..., reattach=True)). A
+      re-attach answered 410 is reported state "lost".
+  cancel(call_id)  drop a running mcp job without reporting it (the
+      coordinator's op timeout already recorded the outcome); closes its
+      connection.
+  send_mcp(call_id, name, args, *, attempt, input_response) fire-and-forget
+      re-send whose result nobody waits for (a cancel when the task ends).
+abort_all() closes every in-flight mcp connection (state "killed").
+
 Only `inbound.put` touches the coordinator; `State` is never read here.
 """
 from __future__ import annotations
@@ -88,6 +111,9 @@ class _Job:
     proc: subprocess.Popen | None = None
     killed: bool = False
     held: bool = False                # keys are in OperationManager._busy
+    mcp: object | None = None         # the in-flight guest.mcp.McpCall
+    cancelled: bool = False           # dropped by cancel()/detach_mcp(): report nothing
+    mcp_job: bool = False             # an mcp call (submit_mcp)
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
@@ -204,9 +230,11 @@ class _TreeCache:
 
 
 class OperationManager:
-    def __init__(self, workspace, limits, inbound: queue.Queue, pool_size: int = 4, bulk=None):
+    def __init__(self, workspace, limits, inbound: queue.Queue, pool_size: int = 4, bulk=None,
+                 mcp=None):
         self.workspace = Path(workspace)
         self.bulk = bulk
+        self.mcp = mcp                            # guest.mcp.McpClient (M4)
         self.limits = limits
         self.inbound = inbound
         self.spill_threshold = int(getattr(limits, "spill_threshold", DEFAULT_SPILL_THRESHOLD))
@@ -268,13 +296,120 @@ class OperationManager:
         for job in jobs:
             with job.lock:
                 job.killed = True
-                proc = job.proc
+                proc, call = job.proc, job.mcp
             aborted.add(job.call_id)
             if proc is not None:
                 _killpg(proc)
+            if call is not None:
+                call.close()
         for job in queued:
             self._pool.submit(self._report_immediate, job, "Error: aborted before it ran")
         return aborted
+
+    # ------------------------------------------------------------ mcp (M4)
+
+    def submit_mcp(self, call_id: str, name: str, args: dict, *, attempt: int = 0,
+                   input_response: dict | None = None, timeout_s=None,
+                   reattach: bool = False) -> None:
+        job = _Job(call_id=call_id, name=name, args=args if isinstance(args, dict) else {},
+                   keys=frozenset(), submitted=time.monotonic(), mcp_job=True)
+        with self._lock:
+            if call_id in self._jobs:
+                self._post(call_id, False, f"Error: duplicate call_id {call_id!r}", "failed",
+                           job.submitted, None)
+                return
+            self._jobs[call_id] = job
+        if self.mcp is None:
+            self._finish(job, False, "error: no gateway client in this guest", "failed")
+            return
+        threading.Thread(target=self._run_mcp, args=(job, attempt, input_response, timeout_s, reattach),
+                         name=f"mcp-{call_id}", daemon=True).start()
+
+    def cancel(self, call_id: str) -> None:
+        with self._lock:
+            job = self._jobs.pop(call_id, None)
+        if job is None:
+            return
+        with job.lock:
+            job.cancelled = job.killed = True
+            call = job.mcp
+        if call is not None:
+            call.close()
+
+    def send_mcp(self, call_id: str, name: str, args: dict, *, attempt: int,
+                 input_response: dict | None = None) -> None:
+        if self.mcp is None:
+            return
+
+        def run():
+            try:
+                self.mcp.call_tool(call_id, name, args, attempt=attempt,
+                                   input_response=input_response, timeout_s=30.0)
+            except Exception as e:   # noqa: BLE001 - nobody waits for this one
+                log.info("mcp re-send for %s (attempt %d) failed: %s", call_id, attempt, e)
+        threading.Thread(target=run, name=f"mcp-send-{call_id}", daemon=True).start()
+
+    def detach_mcp(self) -> set[str]:
+        """Park (M4-CONTRACTS 3.3): close every in-flight mcp connection and
+        forget the jobs without reporting them; the host forwarder keeps the
+        calls and the coordinator re-attaches them after the resume."""
+        with self._lock:
+            jobs = [j for j in self._jobs.values() if j.mcp_job]
+            for j in jobs:
+                del self._jobs[j.call_id]
+        for j in jobs:
+            with j.lock:
+                j.cancelled = j.killed = True
+                call = j.mcp
+            if call is not None:
+                call.close()
+        return {j.call_id for j in jobs}
+
+    def _run_mcp(self, job: _Job, attempt: int, input_response, timeout_s, reattach=False) -> None:
+        from guest.mcp import GONE, McpError
+        try:
+            call = self.mcp.start(job.call_id, job.name, job.args, attempt=attempt,
+                                  input_response=input_response, reattach=reattach,
+                                  timeout_s=float(timeout_s) if timeout_s else None)
+            with job.lock:
+                aborted = job.killed
+                job.mcp = call
+            if aborted:
+                raise McpError("aborted")
+            result = call.run()
+        except McpError as e:
+            if job.cancelled:
+                return
+            if job.killed:
+                state = "killed"
+            elif e.status == GONE:
+                self._finish(job, False, "error: operation lost (the gateway forwarder no longer "
+                                         "holds this call)", "lost")
+                return
+            else:
+                state = "timeout" if e.timed_out else "failed"
+            self._finish(job, False, f"error: {e.message}", state)
+            return
+        except Exception as e:   # noqa: BLE001 - a client bug must not lose the call
+            if not job.cancelled:
+                self._finish(job, False, f"error: internal error in the mcp client: {e!r}", "failed")
+            return
+        if job.cancelled:
+            return
+        if job.killed:
+            self._finish(job, False, "error: aborted", "killed")
+            return
+        if result.input_required is not None:
+            with self._lock:
+                if self._jobs.get(job.call_id) is job:
+                    del self._jobs[job.call_id]
+            self.inbound.put(("op_input", job.call_id, result.input_required))
+            return
+        if result.is_error:
+            text = result.text if result.text.lower().startswith("error") else f"error: {result.text}"
+            self._finish(job, False, text, "failed")
+        else:
+            self._finish(job, True, result.text, "done")
 
     def running(self) -> set[str]:
         with self._lock:

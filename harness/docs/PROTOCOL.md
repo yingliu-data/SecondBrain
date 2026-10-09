@@ -133,7 +133,28 @@ Types: `ready`, `delta`, `log`, `bulk_ref`. No `seq`, no `session_id`.
   before the guest has fetched the log is ignored (logged). After the log
   return the guest's next event is the returned `last_seq + 1`.
 
-## 7. Bulk channel (:5001)
+## 7. Gateway channel (:5011)
+
+HTTP/1.1 from the guest to the host's gateway forwarder (docs/M4-CONTRACTS.md
+sections 3, 3.3), which proxies only `POST /mcp` to the MCP gateway and adds
+identity and the bearer. One connection per request.
+
+| Header / field | Value |
+|---|---|
+| request line | `POST /mcp` |
+| `Content-Type` | `application/json` |
+| `Accept` | `application/json, text/event-stream` |
+| `X-SB-Call` | the event-log `call_id` (every `tools/call`) |
+| `X-SB-Reattach` | `1` on a re-attach after a park only |
+| body | `{"jsonrpc": "2.0", "id": "<call_id>#<attempt>", "method": "tools/call", "params": {name, arguments[, _meta: {"sb/input_response": {request_state, action, content?}}]}}` |
+
+Answer: 200 with one JSON-RPC response (a JSON body, or an SSE body whose
+event carries it); `result` is an MCP `CallToolResult` (`content`, `isError`,
+optional `_meta["sb/input_required"]`). 410 on a re-attach: the forwarder no
+longer holds the call → the guest records it `lost`. No `initialize`, no
+`Mcp-Session-Id`. What the guest records: docs/GUEST.md "M4".
+
+## 8. Bulk channel (:5001)
 
 Framing: `protocol/bulk.py`. The guest connects; one transfer per connection;
 every line is UTF-8 JSON + `"\n"`, at most 64 KiB.

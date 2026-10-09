@@ -3,7 +3,7 @@
 The guest is one Python 3.12 process (`guest.main`), standard library only.
 It never listens: it connects out to CID 2 (or, in tests, to Unix sockets
 named `{dir}/v.sock_{port}`, the same names Firecracker gives the host side of
-guest-initiated vsock connections). Ports: 5000 control, 5001 bulk, 5010 LLM.
+guest-initiated vsock connections). Ports: 5000 control, 5001 bulk, 5010 LLM, 5011 gateway (M4).
 
 ## Threads and the one queue
 
@@ -79,7 +79,7 @@ Fatal protocol errors (`second hello`, unsupported schema): emit
 
 ## Sides
 
-A `tool_call` whose side is `host`, `device` or `mcp` is emitted and then
+A `tool_call` whose side is `host` or `device` (M4: not `mcp`, see "M4") is emitted and then
 **waits for `side_result`** from the host (control message
 `{call_id, side, content, ok}`); the coordinator turns it into `op_state` +
 `tool_result`. Timeouts per side from `cfg.limits.op_timeout_s[side]`.
@@ -256,3 +256,62 @@ Contracts: docs/M3-CONTRACTS.md. What the guest does, and the refinements:
   `settle.manifest` after a restore) and under 8 MiB is put as `workspace`,
   then the manifest as `manifest` `manifest.json` (canonical JSON: sorted keys,
   no spaces). Upload failures are logged; the settle still carries the manifest.
+
+## M4 as built (MCP over :5011)
+
+Contracts: docs/M4-CONTRACTS.md (sections 3.1-3.3 and 4). What the guest does:
+
+- **Config**: `ports.gateway` (default 5011). Each `hello.config.tools` entry
+  keeps its `schema` (OpenAI function def; a bare `description` stands in when
+  there is none) as `GuestConfig.tool_schemas` and its `timeout_s` as
+  `GuestConfig.tool_timeouts` (in `config_hash`). This also fixes M1-M3, where
+  `effective_tools` dropped host/device schemas and the model saw
+  empty-parameters tools. `session_start.tools` stays `{name, side, pin}`.
+  `cfg.op_timeout_for(name, side)` = the entry's `timeout_s`, else
+  `limits.op_timeout_s[side]`.
+- **Client** (`guest/mcp.py`, stdlib): `McpClient(connector, port)` posts one
+  JSON-RPC `tools/call` per request to `POST /mcp` over the connector socket
+  (the provider's `ConnectorConnection`), `Content-Type: application/json`,
+  `Accept: application/json, text/event-stream`, `X-SB-Call: <call_id>`, no
+  `initialize`. The JSON-RPC id is `<call_id>#<attempt>` (attempt = the
+  input-required rounds so far). A JSON body, or an SSE body carrying the
+  response, is accepted. Text items are joined with `\n`; `isError` → an
+  error result (`error: ` prefixed); connection errors, non-200 statuses and
+  JSON-RPC errors → `error: gateway ...`. Nothing is retried (a tools/call is
+  not idempotent; the forwarder's re-attach is the only re-send).
+- **Operation**: an mcp call is a guest operation (no `side_result`):
+  `op_state{running, side_ref: "gateway:<upstream>"}` (upstream = the prefix of
+  the promoted name or of `call_tool`'s target; `gateway` for the other meta
+  tools) → `OperationManager.submit_mcp` (its own daemon thread, not the pool)
+  → `("op", ...)` → `op_state` + `tool_result` (spill applies). Op timeout =
+  `op_timeout_for(name, "mcp")`; when it fires `ops.cancel` closes the
+  connection and the call is `op_state{timeout}`.
+- **Input required** (3.2): ops posts `("op_input", call_id, request)` and
+  forgets the job (no thread, no connection: the op is suspended, its op timer
+  cancelled and its remaining time kept). The coordinator emits
+  `question{call_id, text: message, options, deadline, input_request:
+  {request_state, schema}}` (options = the values of a single-property enum
+  schema, else free text; deadline = min(question_timeout_s, expires_in_s)).
+  `ui_response` → the same `tools/call` with `_meta["sb/input_response"]`
+  (`guest.mcp.input_response`: action `accept` with `content` mapped into the
+  schema — one property → `{prop: answer}` coerced to its enum/type; several →
+  a JSON-object answer as is, else the first required property; an answer of
+  exactly `decline` / `cancel` → that action), the op timer re-armed with what
+  it had left. Deadline → `clock{question_deadline}` + `guard_decision{deny,
+  unanswered}` (counts toward escalation) + the re-send with action `cancel`;
+  the gateway's answer is the result. Repeatable. No `op_state` is written for
+  the suspension (the log keeps `running` until the terminal state).
+  Escalation, abort and wall clock send a best-effort cancel for suspended
+  calls (`ops.send_mcp`).
+- **Park** (3.3): neither a suspended nor an in-flight mcp op holds a park.
+  Parking (and a park grace, before it kills guest ops) detaches in-flight mcp
+  ops (`ops.detach_mcp`: connection closed, nothing reported). Their op timer
+  keeps its absolute due time across the park. On the resume (`link up`) an
+  expired one is `op_state{timeout}`; the others re-send the same request with
+  `X-SB-Reattach: 1`; a 410 → `op_state{lost}` + `error: operation lost ...`
+  (never re-executed). A fresh process (restore after a death or after a
+  host-stopped park) never re-attaches: in-flight mcp calls are lost; a
+  suspended one (its question rebuilt from `question.input_request`, attempt =
+  the questions so far) waits for its answer and re-sends.
+- **Not done**: an mcp connection broken by a link loss without a park is an
+  error result (no automatic re-attach).

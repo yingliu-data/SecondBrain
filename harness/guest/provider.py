@@ -97,11 +97,12 @@ def _transient(exc: BaseException, what: str, status=None) -> ProviderError:
     return ProviderError(True, status, f"{what}: {exc.__class__.__name__}: {exc}")
 
 
-class _ConnectorConnection(http.client.HTTPConnection):
-    """An HTTPConnection whose socket is whatever the connector opens."""
+class ConnectorConnection(http.client.HTTPConnection):
+    """An HTTPConnection whose socket is whatever the connector opens (the
+    LLM proxy on :5010 here, the gateway forwarder on :5011 in guest.mcp)."""
 
-    def __init__(self, connector, port: int, timeout):
-        super().__init__("llm.local", timeout=timeout)
+    def __init__(self, connector, port: int, timeout, host: str = "llm.local"):
+        super().__init__(host, timeout=timeout)
         self._connector = connector
         self._port = port
 
@@ -338,7 +339,7 @@ class Provider:
 
     def _open(self, payload: bytes, accept: str):
         """Send the POST; return (conn, resp). Connection errors are transient."""
-        conn = _ConnectorConnection(self.connector, self.port, self.timeout_s)
+        conn = ConnectorConnection(self.connector, self.port, self.timeout_s)
         try:
             conn.request("POST", PATH, body=payload, headers={
                 "Content-Type": "application/json",
@@ -347,7 +348,7 @@ class Provider:
             })
             resp = conn.getresponse()
         except _TRANSIENT_EXC as exc:
-            _close(conn)
+            close_quietly(conn)
             raise _transient(exc, "connection error") from exc
         return conn, resp
 
@@ -375,7 +376,7 @@ class Provider:
         try:
             return self._json_response(resp)
         finally:
-            _close(conn)
+            close_quietly(conn)
 
     def _stream_once(self, payload: bytes, relay: DeltaRelay | None) -> dict:
         conn, resp = self._open(payload, "text/event-stream")
@@ -390,14 +391,14 @@ class Provider:
                 return data
             return assemble_chunks(self._chunks(resp), relay)
         finally:
-            _close(conn)
+            close_quietly(conn)
 
     @staticmethod
     def _chunks(resp) -> Iterator[dict]:
         """JSON chunks from the response's SSE lines; a cut or garbled stream
         is a transient ProviderError."""
         try:
-            for payload in iter_sse_data(_lines(resp)):
+            for payload in iter_sse_data(read_lines(resp)):
                 try:
                     chunk = json.loads(payload)
                 except ValueError as exc:
@@ -418,7 +419,7 @@ class Provider:
                 self.usage[k] += v
 
 
-def _lines(resp) -> Iterator[str]:
+def read_lines(resp) -> Iterator[str]:
     """Decoded lines of the body (readline never splits a UTF-8 sequence)."""
     while True:
         line = resp.readline()
@@ -427,7 +428,7 @@ def _lines(resp) -> Iterator[str]:
         yield line.decode("utf-8", "replace")
 
 
-def _close(conn) -> None:
+def close_quietly(conn) -> None:
     try:
         conn.close()
     except Exception:

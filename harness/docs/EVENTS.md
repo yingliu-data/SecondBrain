@@ -71,6 +71,17 @@ strings. Times (`at`, `deadline`) are int milliseconds since the epoch.
   `{"version": 1, "files": [{path, bytes, sha256, mode}], "total_bytes"}`
   (`protocol/bulk.py`), `{}` when the guest has no workspace.
 
+## M4 notes (what the guest writes)
+
+- An mcp call is a guest operation: `op_state{running, side_ref:
+  "gateway:<upstream>"}` (or `"gateway"`), then the terminal `op_state`
+  (`done`, `failed`, `timeout`, `killed`, `lost`) and its `tool_result`. No
+  `side_result` is involved.
+- `question.input_request` (optional dict, `{request_state, schema}`): the
+  question relays a gateway input request for `call_id`; one call may have
+  several such questions (one per round). The re-send after the answer is not
+  an event; the call stays one operation.
+
 ## Log rules (`validate_log`)
 
 Per-event rules (`validate_event`) run on every event first. The whole-log rules

@@ -36,7 +36,7 @@ settle{failed}; finish_reason "length" → no tool runs, settle{done} with the
 partial text; question deadline → guard_decision{deny, unanswered}, three →
 settle{escalated}; doom loop (same name+args three times) → a question.
 
-Sides: guest tools go to ops.submit; host/device/mcp calls wait for
+Sides: guest tools go to ops.submit (mcp: ops.submit_mcp, M4); host/device calls wait for
 side_result with cfg.limits.op_timeout_s[side]; the `question` built-in waits
 for ui_response. One task per run(): run() returns the settle body.
 
@@ -119,6 +119,38 @@ M3 (docs/M3-CONTRACTS.md sections 3–5, docs/GUEST.md "M3"):
     (changed files and the manifest put on :5001 when there is a bulk client).
   - run() may be called again after a settle: each call handles one task
     (the guest stays up for the next one).
+
+M4 (docs/M4-CONTRACTS.md section 3, docs/GUEST.md "M4"):
+  - an mcp-side call is a guest operation: op_state{running, side_ref:
+    "gateway:<upstream>"} -> ops.submit_mcp (POST /mcp tools/call over
+    :5011, header X-SB-Call: call_id) -> the ("op", ...) result -> op_state
+    + tool_result, as for any guest op. No side_result. Its op timeout is
+    cfg.op_timeout_for(name, "mcp") (the hello entry's timeout_s, else
+    limits.op_timeout_s.mcp), armed as the op_timeout timer; when it fires
+    ops.cancel() closes the connection and the call ends op_state{timeout}
+    + an error result.
+  - input required: ("op_input", call_id, request) -> the op is suspended
+    (no connection; its op timer is cancelled and the time it had left is
+    kept) -> question{call_id, text: message, options (single-enum schema)
+    or [], deadline: min(question_timeout_s, expires_in_s), input_request:
+    {request_state, schema}}. ui_response -> the same tools/call re-sent
+    with _meta["sb/input_response"] {request_state, action, content}
+    (guest.mcp.input_response), attempt + 1, the op timer re-armed with
+    what it had left. The question deadline -> clock{question_deadline} +
+    guard_decision{deny, unanswered} (counted towards escalation like any
+    question) and the re-send with action "cancel"; the gateway's answer to
+    it is the call's result. Repeatable: every round is one more question
+    on the same call_id. A suspended call holds no park (it is "asked").
+  - park (M4-CONTRACTS 3.3): an in-flight mcp call does not hold a park
+    either (the forwarder owns it). Parking (and a park grace that kills
+    guest ops) first detaches every in-flight mcp op (ops.detach_mcp: the
+    connection is closed, nothing is reported); its op timer is not paused
+    but keeps its absolute due time. On resume each detached op whose time
+    is up is recorded op_state{timeout}; the others are re-attached: the
+    same request re-sent with X-SB-Reattach: 1. A 410 answer is
+    op_state{lost} + an error result (never re-executed). A fresh process
+    (restore) never re-attaches: an in-flight mcp call in the returned log
+    is lost, even after a park; a suspended one waits for its answer.
 """
 from __future__ import annotations
 
@@ -137,6 +169,7 @@ from protocol.fold import State, apply, state_hash
 from guest import hooks as default_hooks
 from guest.config import stream_enabled
 from guest.context import build_compaction_request, build_request, estimate_tokens, system_hash
+from guest.mcp import input_response as mcp_input_response, question_options
 
 HARNESS_VERSION = "0.0.1"
 DOOM_LOOP_REPEATS = 3
@@ -293,6 +326,7 @@ class Coordinator:
         # waits
         self._side_calls: dict[str, dict] = {}        # call_id -> {side, started_ms}
         self._questions: dict[str, dict] = {}         # question_id -> {call_id, name, args, kind}
+        self._mcp_calls: dict[str, dict] = {}         # call_id -> the mcp op's bookkeeping (_start_mcp)
         self._timers: dict[str, tuple] = {}           # token -> (handle, kind, due ms)
         self._link_up = True
         self._turn_deferred = False
@@ -358,7 +392,9 @@ class Coordinator:
             self._arm("op_timeout", f"op:{call_id}", timeout)
 
     def _arm_question(self, qid: str) -> None:
-        timeout_s = getattr(self.cfg, "question_timeout_s", 0) or 0
+        timeout_s = (self._questions.get(qid) or {}).get("timeout_s")
+        if timeout_s is None:
+            timeout_s = getattr(self.cfg, "question_timeout_s", 0) or 0
         if timeout_s > 0:
             self._arm("question_deadline", f"question:{qid}", float(timeout_s))
 
@@ -382,6 +418,9 @@ class Coordinator:
         now = self.clock.now_ms()
         kept = {}
         for token, (_, kind, due) in list(self._timers.items()):
+            if kind == "op_timeout" and token.split(":", 1)[1] in self._mcp_calls:
+                self._cancel(token)          # keeps running across the park (its due_ms)
+                continue
             if kind in PAUSED_ON_PARK:
                 kept[token] = (kind, max(0, due - now) / 1000.0)
             self._cancel(token)
@@ -442,6 +481,8 @@ class Coordinator:
             self._on_llm(item[1], item[2])
         elif kind == "op":
             self._on_op(item[1], item[2])
+        elif kind == "op_input":
+            self._on_op_input(item[1], item[2])
         elif kind == "timer":
             self._on_timer(item[1], item[2])
         elif kind == "ack":
@@ -535,7 +576,11 @@ class Coordinator:
         if pending is None:
             return
         call_id = pending["call_id"]
-        if pending["kind"] == "ask":
+        if pending["kind"] == "mcp_input":
+            request = pending["input_request"]
+            self._mcp_send(call_id, mcp_input_response(request["request_state"], answer,
+                                                       request.get("schema") or {}))
+        elif pending["kind"] == "ask":
             # a guard "ask" (doom loop or a hook): continue runs the original call
             if answer.strip().lower() in ("continue", "yes", "y", "ok", "go", "proceed", "true"):
                 self._run_call(call_id, pending["name"], pending["args"], pending["side"])
@@ -606,12 +651,16 @@ class Coordinator:
             self.emit("clock", {"kind": "grace_park", "at": self.clock.now_ms()})
             self.log("park grace expired: killing guest operations", level="warning",
                      running=sorted(running))
+            self._detach_mcp()             # the forwarder keeps those; they are re-attached
             try:
                 self.ops.abort_all()       # each reports state "killed" -> op_state{killed}
             except Exception as exc:    # noqa: BLE001
                 self.log(f"abort_all failed: {exc}", level="warning")
         elif kind == "op_timeout":
             call_id = token.split(":", 1)[1]
+            if call_id in self._mcp_calls:
+                self._mcp_timeout(call_id)
+                return
             pending = self._side_calls.pop(call_id, None)
             if pending is None:
                 return
@@ -627,7 +676,7 @@ class Coordinator:
             self.log(f"op result for unknown or terminal call {call_id!r} ignored", level="warning")
             return
         state = result.get("state", "done" if result.get("ok") else "failed")
-        if state not in ("done", "failed", "timeout", "killed"):
+        if state not in ("done", "failed", "timeout", "killed", "lost"):
             state = "done" if result.get("ok") else "failed"
         content = result.get("content", "")
         content = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
@@ -643,6 +692,130 @@ class Coordinator:
         if isinstance(duration, int) and not isinstance(duration, bool) and duration >= 0:
             extra["duration_ms"] = duration
         self._finish_call(call_id, state, content, spill_ref=spill_ref, **extra)
+
+    # ------------------------------------------------------------ mcp (M4)
+    @staticmethod
+    def _gateway_ref(name: str, args: dict) -> str:
+        """op_state.side_ref of an mcp call: gateway:<upstream> (the target of
+        call_tool, the prefix of a promoted upstream__tool), else gateway."""
+        target = args.get("name") if name == "call_tool" and isinstance(args.get("name"), str) else name
+        return f"gateway:{target.split('__', 1)[0]}" if "__" in target else "gateway"
+
+    def _mcp_timeout_s(self, name: str):
+        fn = getattr(self.cfg, "op_timeout_for", None)
+        return fn(name, "mcp") if callable(fn) else _side_timeout(self.limits, "mcp")
+
+    def _new_mcp(self, call_id: str, name: str, args: dict) -> dict:
+        timeout = self._mcp_timeout_s(name)
+        now = self.clock.now_ms()
+        mcp = {"name": name, "args": args, "attempt": 0, "timeout_s": timeout or 0,
+               "remaining_s": timeout, "started_ms": now, "due_ms": None,
+               "input_response": None, "inflight": False, "detached": False}
+        self._mcp_calls[call_id] = mcp
+        return mcp
+
+    def _start_mcp(self, call_id: str, name: str, args: dict) -> None:
+        self.emit("op_state", {"call_id": call_id, "state": "running",
+                               "side_ref": self._gateway_ref(name, args)})
+        self._new_mcp(call_id, name, args)
+        self._mcp_send(call_id, None)
+
+    def _mcp_send(self, call_id: str, input_response, *, reattach: bool = False) -> None:
+        """One POST of the call: the first, a re-send with the user's answer
+        (the time the op had left re-armed), or a re-attach after a park
+        (same request, the op timer's due time unchanged)."""
+        mcp = self._mcp_calls[call_id]
+        now = self.clock.now_ms()
+        if not reattach:
+            mcp["input_response"] = input_response
+            if mcp["remaining_s"]:
+                mcp["due_ms"] = now + int(mcp["remaining_s"] * 1000)
+        mcp["inflight"], mcp["detached"] = True, False
+        remaining = None
+        if mcp["due_ms"] is not None:
+            remaining = max(0.001, (mcp["due_ms"] - now) / 1000.0)
+            self._arm("op_timeout", f"op:{call_id}", remaining)
+        try:
+            # the socket timeout is only a backstop behind the op timer
+            self.ops.submit_mcp(call_id, mcp["name"], mcp["args"], attempt=mcp["attempt"],
+                                input_response=mcp["input_response"], reattach=reattach,
+                                timeout_s=(remaining + 5.0) if remaining else None)
+        except Exception as exc:    # noqa: BLE001
+            self._finish_call(call_id, "failed", f"error: could not call the gateway: {exc}")
+
+    def _mcp_timeout(self, call_id: str) -> None:
+        mcp = self._mcp_calls[call_id]
+        try:
+            self.ops.cancel(call_id)
+        except Exception as exc:    # noqa: BLE001
+            self.log(f"ops.cancel failed: {exc}", level="warning")
+        self._finish_call(call_id, "timeout",
+                          f"error: mcp call {mcp['name']} timed out after {mcp['timeout_s']:g} s",
+                          duration_ms=max(0, self.clock.now_ms() - mcp["started_ms"]))
+
+    def _on_op_input(self, call_id: str, request: dict) -> None:
+        """The gateway needs input: suspend the op and ask (module doc, M4)."""
+        mcp = self._mcp_calls.get(call_id)
+        call = self.state.open_calls.get(call_id)
+        if mcp is None or call is None or "result" in call or call_id not in self._turn_pending:
+            self.log(f"input request for unknown or terminal call {call_id!r} ignored", level="warning")
+            return
+        self._cancel(f"op:{call_id}")
+        if mcp["due_ms"] is not None:
+            mcp["remaining_s"] = max(1.0, (mcp["due_ms"] - self.clock.now_ms()) / 1000.0)
+            mcp["due_ms"] = None
+        mcp["inflight"] = False
+        mcp["attempt"] += 1
+        schema = request.get("schema") or {}
+        timeout_s = getattr(self.cfg, "question_timeout_s", 0) or 0
+        expires = request.get("expires_in_s")
+        if expires:
+            timeout_s = min(timeout_s, expires) if timeout_s > 0 else expires
+        self._ask(call_id, "mcp_input", mcp["name"], mcp["args"], "mcp",
+                  text=str(request.get("message") or ""), options=question_options(schema),
+                  timeout_s=timeout_s,
+                  input_request={"request_state": request["request_state"], "schema": schema})
+
+    def _mcp_cancel_input(self, pending: dict) -> None:
+        """Best effort: tell the gateway a suspended call is abandoned."""
+        mcp = self._mcp_calls.get(pending["call_id"])
+        send = getattr(self.ops, "send_mcp", None)
+        if mcp is None or not callable(send):
+            return
+        try:
+            send(pending["call_id"], mcp["name"], mcp["args"], attempt=mcp["attempt"],
+                 input_response={"request_state": pending["input_request"]["request_state"],
+                                 "action": "cancel"})
+        except Exception as exc:    # noqa: BLE001
+            self.log(f"mcp cancel re-send failed: {exc}", level="warning")
+
+    def _detach_mcp(self) -> None:
+        """Park: close every in-flight mcp connection without cancelling the
+        op (the forwarder keeps the call, M4-CONTRACTS 3.3)."""
+        inflight = [cid for cid, m in self._mcp_calls.items() if m["inflight"] and not m["detached"]]
+        if not inflight:
+            return
+        detach = getattr(self.ops, "detach_mcp", None)
+        if callable(detach):
+            try:
+                detach()
+            except Exception as exc:    # noqa: BLE001
+                self.log(f"detach_mcp failed: {exc}", level="warning")
+        for cid in inflight:
+            self._mcp_calls[cid]["detached"] = True
+        self.log("mcp calls detached for the park", level="info", calls=inflight)
+
+    def _reattach_mcp(self) -> None:
+        """Resume: an expired detached op is a timeout; the others re-attach."""
+        now = self.clock.now_ms()
+        for cid in [c for c, m in self._mcp_calls.items() if m["detached"]]:
+            mcp = self._mcp_calls.get(cid)
+            if mcp is None:
+                continue
+            if mcp["due_ms"] is not None and now >= mcp["due_ms"]:
+                self._mcp_timeout(cid)
+            else:
+                self._mcp_send(cid, mcp["input_response"], reattach=True)
 
     # ------------------------------------------------------------ turns
     def _turns_this_task(self) -> int:
@@ -751,6 +924,7 @@ class Coordinator:
         turn_id = self._id("turn")
         self.emit("turn_start", self._turn_start_body(turn_id, kind, request, includes_through_seq))
         self.current_turn = turn_id
+        self._turn_deferred = False
         self._turn_raw = estimate_tokens(request)
         if kind == "regular":
             self._task_turns += 1
@@ -1023,6 +1197,9 @@ class Coordinator:
             options = [str(o) for o in options] if isinstance(options, list) else []
             self._ask(call_id, "question", name, args, side, text=str(text), options=options)
             return
+        if side == "mcp":
+            self._start_mcp(call_id, name, args)
+            return
         if side == "guest":
             self.emit("op_state", {"call_id": call_id, "state": "running"})
             try:
@@ -1035,16 +1212,22 @@ class Coordinator:
         self._arm_op_timeout(call_id, side)
 
     def _ask(self, call_id: str, kind: str, name: str, args: dict, side: str, *,
-             text: str, options: list) -> None:
-        timeout_s = getattr(self.cfg, "question_timeout_s", 0) or 0
+             text: str, options: list, timeout_s=None, input_request: dict | None = None) -> None:
+        if timeout_s is None:
+            timeout_s = getattr(self.cfg, "question_timeout_s", 0) or 0
         ui_attached = bool(getattr(self.cfg, "ui_attached", False))
         now = self.clock.now_ms()
         deadline = now + int(timeout_s * 1000)
         qid = self._id("question")
-        self.emit("question", {"question_id": qid, "call_id": call_id, "text": text,
-                               "options": options, "deadline": deadline})
+        body = {"question_id": qid, "call_id": call_id, "text": text,
+                "options": options, "deadline": deadline}
+        if input_request is not None:
+            body["input_request"] = input_request
+        self.emit("question", body)
         self._questions[qid] = {"call_id": call_id, "kind": kind, "name": name,
-                                "args": args, "side": side}
+                                "args": args, "side": side, "timeout_s": timeout_s}
+        if input_request is not None:
+            self._questions[qid]["input_request"] = input_request
         if timeout_s <= 0 and not ui_attached:
             self._deny_question(qid)
             return
@@ -1058,6 +1241,16 @@ class Coordinator:
         self.emit("guard_decision", {"ref": qid, "decision": "deny", "reason": UNANSWERED,
                                      "policy_id": "question"})
         escalate = self.state.denied_questions >= MAX_UNANSWERED
+        if pending["kind"] == "mcp_input":
+            if escalate:
+                self._mcp_cancel_input(pending)
+                self._abandon_open_work("killed")
+                self._settle("escalated", "", reason="unanswered_questions")
+                return
+            # the gateway answers the cancel with the call's result
+            self._mcp_send(pending["call_id"], {
+                "request_state": pending["input_request"]["request_state"], "action": "cancel"})
+            return
         was = self._suppress_wake
         self._suppress_wake = was or escalate          # no further turn when escalating
         try:
@@ -1076,6 +1269,7 @@ class Coordinator:
         if call is None or "result" in call:
             return
         self._side_calls.pop(call_id, None)
+        self._mcp_calls.pop(call_id, None)
         self._cancel(f"op:{call_id}")
         self.emit("op_state", {"call_id": call_id, "state": state, **op_extra})
         threshold = _limit(self.limits, "spill_threshold", None)
@@ -1136,6 +1330,8 @@ class Coordinator:
             for qid in list(self._questions):
                 pending = self._questions.pop(qid)
                 self._cancel(f"question:{qid}")
+                if pending["kind"] == "mcp_input":
+                    self._mcp_cancel_input(pending)
                 self._finish_call(pending["call_id"], state, f"error: {state}")
             for call_id in list(self._turn_pending):
                 self._finish_call(call_id, state, f"error: {state}")
@@ -1186,9 +1382,11 @@ class Coordinator:
     # ------------------------------------------------------------ park (M3)
     def _guest_running(self) -> set:
         """Calls of the round that run as guest operations (not host-side
-        calls waiting for side_result, not questions waiting for an answer)."""
+        calls waiting for side_result, not questions waiting for an answer,
+        not mcp calls: the forwarder holds those across a park)."""
         asked = {q["call_id"] for q in self._questions.values()}
-        return {c for c in self._turn_pending if c not in self._side_calls and c not in asked}
+        return {c for c in self._turn_pending
+                if c not in self._side_calls and c not in asked and c not in self._mcp_calls}
 
     def _request_park(self, reason: str) -> None:
         if self.parked or self._park_reason is not None:
@@ -1214,6 +1412,7 @@ class Coordinator:
     def _park(self) -> None:
         reason, self._park_reason = self._park_reason, None
         self._cancel("park_grace")
+        self._detach_mcp()
         self._pause_timers()
         if self._session_start is None:
             raise FatalProtocolError("park without a session_start to chain the checkpoint to")
@@ -1234,6 +1433,7 @@ class Coordinator:
         self.parked = False
         self.log("resumed after park", level="info")
         self._resume_timers()
+        self._reattach_mcp()
 
     # ------------------------------------------------------------ resume from the log (M3)
     def restore(self, events: list) -> None:
@@ -1269,7 +1469,9 @@ class Coordinator:
                     self._user_memory = []
                     task_clock = None
             elif etype == "input" and body["dedupe"] == "new" and body["kind"] == "ui_response":
-                self._questions.pop(body.get("question_id"), None)
+                answered = self._questions.pop(body.get("question_id"), None)
+                if answered is not None and answered["call_id"] in self._mcp_calls:
+                    self._mcp_calls[answered["call_id"]]["inflight"] = True     # the re-send
             elif etype == "clock" and body["kind"] == "turn_clock" and task_clock is None \
                     and self.task_input_id is not None:
                 task_clock = body["at"]
@@ -1285,7 +1487,9 @@ class Coordinator:
             elif etype == "guard_decision":
                 last_guard_policy = body["policy_id"]
                 if body["decision"] == "deny" and body["reason"] == UNANSWERED:
-                    self._questions.pop(body["ref"], None)
+                    denied = self._questions.pop(body["ref"], None)
+                    if denied is not None and denied["call_id"] in self._mcp_calls:
+                        self._mcp_calls[denied["call_id"]]["inflight"] = True  # the cancel re-send
                 continue
             elif etype == "tool_call":
                 calls[body["call_id"]] = body
@@ -1297,18 +1501,30 @@ class Coordinator:
                     self._call_counts[key] = self._call_counts.get(key, 0) + 1
                     if self._call_counts[key] >= DOOM_LOOP_REPEATS:
                         self._call_counts[key] = 0
+            elif etype == "op_state" and body["state"] == "running" \
+                    and calls.get(body["call_id"], {}).get("side") == "mcp":
+                call = calls[body["call_id"]]
+                self._new_mcp(body["call_id"], call["name"], call["args"])["inflight"] = True
             elif etype == "op_state" and body["state"] == "running" and body.get("side_ref"):
                 self._side_calls[body["call_id"]] = {"side": body["side_ref"],
                                                      "started_ms": self.clock.now_ms()}
             elif etype == "question":
                 call = calls.get(body["call_id"], {})
-                self._questions[body["question_id"]] = {
+                pending = {
                     "call_id": body["call_id"], "name": call.get("name"), "args": call.get("args", {}),
                     "side": call.get("side", "guest"),
                     "kind": "question" if call.get("name") == QUESTION_TOOL else "ask"}
+                mcp = self._mcp_calls.get(body["call_id"])
+                if isinstance(body.get("input_request"), dict) and mcp is not None:
+                    pending["kind"] = "mcp_input"
+                    pending["input_request"] = body["input_request"]
+                    mcp["attempt"] += 1
+                    mcp["inflight"] = False
+                self._questions[body["question_id"]] = pending
             elif etype == "tool_result":
                 self._turn_pending.discard(body["call_id"])
                 self._side_calls.pop(body["call_id"], None)
+                self._mcp_calls.pop(body["call_id"], None)
             elif etype == "wake" and body["reason"] == "tool_result":
                 self._last_response_had_calls = False
             elif etype == "memory" and body["scope"] == "user":
@@ -1367,6 +1583,14 @@ class Coordinator:
                 self._arm_op_timeout(call_id, pending["side"])
             for qid in self._questions:
                 self._arm_question(qid)
+            # a fresh process never re-attaches (M4-CONTRACTS 3.3): in-flight mcp calls are lost
+            lost = [cid for cid, m in self._mcp_calls.items() if m["inflight"]]
+            self._suppress_wake = True
+            try:
+                for cid in lost:
+                    self._finish_call(cid, "lost", LOST_CONTENT)
+            finally:
+                self._suppress_wake = False
             if self.task_input_id is not None and self.current_turn is None and not self._turn_pending:
                 if self._last_response_had_calls:
                     self._after_round()
@@ -1382,6 +1606,7 @@ class Coordinator:
                       if "result" not in call]
         self._questions.clear()
         self._side_calls.clear()
+        self._mcp_calls.clear()
         self._suppress_wake = True
         try:
             for call_id in open_calls:
