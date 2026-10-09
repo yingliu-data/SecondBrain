@@ -124,7 +124,9 @@ class HostLog:
 
     def append(self, session_id: str | None, type: str, body: dict) -> dict:
         with self._lock:
-            if self._count is None:
+            # recount when the directory is gone (session deleted, maybe
+            # re-created under the same id): the cached count is stale
+            if self._count is None or not self.events_dir.is_dir():
                 self._count = count_host_events(self.events_dir, self.segment_events)
             self._count += 1
             return append_host_event(self.events_dir, self._count, session_id, type, body,

@@ -121,16 +121,23 @@ class HeldCall:
     def wait(self, conn: socket.socket) -> bool:
         """Block until the answer is in (True) or the guest closed `conn`
         (False: the call runs on, a re-attach gets it)."""
-        watch = [conn, self._wake_r]
+        # poll, not select: a busy worker's fds go past FD_SETSIZE (1024)
+        try:
+            conn_fd = conn.fileno()
+        except (OSError, ValueError):
+            return False
+        poller = select.poll()
+        poller.register(conn_fd, select.POLLIN)
+        poller.register(self._wake_r, select.POLLIN)
         while not self.done.is_set():
             try:
-                readable, _, _ = select.select(watch, [], [])
-            except (OSError, ValueError):
+                ready = poller.poll()
+            except OSError:
                 return False
-            if conn in readable:
+            if any(fd == conn_fd for fd, _ in ready):
                 if _peer_gone(conn):
                     return False
-                watch = [self._wake_r]       # pipelined bytes: only the answer now
+                poller.unregister(conn_fd)   # pipelined bytes: only the answer now
         return True
 
 

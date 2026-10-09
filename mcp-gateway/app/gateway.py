@@ -110,6 +110,7 @@ class Gateway:
         self.upstreams = {n: Upstream(c, settings.allowed_private_hosts, config.input_expires_s)
                           for n, c in config.upstreams.items()}
         self._session_locks: dict[tuple, asyncio.Lock] = {}
+        self._save_locks: dict[tuple, asyncio.Lock] = {}
         self._held: dict[str, _Held] = {}
 
     # ── Session surface and pins ──────────────────────────────
@@ -123,7 +124,10 @@ class Gateway:
         return out
 
     async def _save(self, sp: SessionPins) -> None:
-        await asyncio.to_thread(self.pins.write, sp.ident, sp.to_json())
+        # one write at a time per session, the snapshot taken inside the lock:
+        # an older snapshot can never land after a newer one
+        async with self._save_locks.setdefault(sp.ident.key, asyncio.Lock()):
+            await asyncio.to_thread(self.pins.write, sp.ident, sp.to_json())
 
     async def session(self, ident: Identity) -> SessionPins:
         """The session's pin table; created (and persisted) on first use.
