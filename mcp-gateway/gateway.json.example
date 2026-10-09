@@ -1,0 +1,31 @@
+{
+  "_comment": "Copy to mcp-gateway/data/gateway.json (gitignored, chmod 600) and restart mcp-gateway. Generate from agent-api's tenants.json with: cd mcp-gateway && uv run python -m app.migrate_config ../agent-api/data/tenants.json > data/gateway.json. See harness/docs/GATEWAY.md.",
+  "upstreams": {
+    "wcc-events": {
+      "url": "http://host.docker.internal:8765/mcp/events",
+      "auth_token": "<must match WCC_MCP_TOKEN_EVENTS on the MCP server>",
+      "timeout_s": 2700,
+      "tool_defs_ttl_s": 300,
+      "allow_private": true
+    },
+    "wcc-mentorship": {
+      "url": "http://host.docker.internal:8765/mcp/mentorship",
+      "auth_token": "<must match WCC_MCP_TOKEN_MENTORSHIP>",
+      "timeout_s": 600,
+      "allow_private": true
+    },
+    "wcc-analytic": {
+      "url": "http://host.docker.internal:8765/mcp/analytic",
+      "auth_token": "<must match WCC_MCP_TOKEN_ANALYTIC>",
+      "timeout_s": 1200,
+      "allow_private": true
+    }
+  },
+  "tenants": {
+    "default": {"upstreams": ["wcc-events", "wcc-mentorship", "wcc-analytic"], "allow": ["*"], "deny": [], "promoted": [], "max_concurrent": 2},
+    "wcc-event": {"upstreams": ["wcc-events"], "allow": ["*"], "deny": [], "promoted": ["wcc-events__draft_event"], "max_concurrent": 2},
+    "wcc-mentorship": {"upstreams": ["wcc-mentorship"], "allow": ["*"], "deny": [], "promoted": [], "max_concurrent": 2},
+    "wcc-analytic": {"upstreams": ["wcc-analytic"], "allow": ["*"], "deny": [], "promoted": [], "max_concurrent": 2}
+  },
+  "input_expires_s": 3600
+}

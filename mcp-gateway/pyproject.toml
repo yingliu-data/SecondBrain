@@ -1,0 +1,33 @@
+[project]
+name = "mcp-gateway"
+version = "0.1.0"
+description = "SecondBrain MCP gateway: one MCP server for the guest, one client per upstream, policy, pins (harness M4)"
+requires-python = ">=3.12"
+dependencies = [
+    "mcp>=1.28,<2",
+    "starlette>=0.40",
+    "uvicorn[standard]>=0.34",
+    "httpx>=0.28",
+    "pydantic>=2.0",
+    "secondbrain-harness",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+# Non-editable so the Docker image (which copies harness/ next to this dir)
+# installs it the same way. Only `protocol.canonical` is used (pins, §5).
+secondbrain-harness = { path = "../harness" }
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+pythonpath = ["."]

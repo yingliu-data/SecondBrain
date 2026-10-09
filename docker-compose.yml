@@ -60,6 +60,8 @@ services:
       - MAX_TOOL_CALLS_PER_TURN=10
       - MAX_INPUT_LENGTH=4096
       - RATE_LIMIT_PER_MINUTE=30
+      - MCP_GATEWAY_URL=http://mcp-gateway:8090
+      - INTERNAL_TOKEN=${INTERNAL_TOKEN}          # shared bearer with mcp-gateway (both directions)
     volumes:
       - ./agent-api/data:/root/agent-api/data   # Persistent data (logs, db, tenants.json)
       - /var/run/docker.sock:/var/run/docker.sock  # Auto-start local LLM on fallback
@@ -83,6 +85,39 @@ services:
     # Local LLM (vLLM) is the only provider. Start it with:
     #   docker compose --profile local-llm up -d llm
     # agent-api will auto-start it via the docker.sock mount if it goes down.
+
+  # -- MCP gateway (harness M4) ----------------------------------------------
+  # One MCP server for the guest (POST /mcp via agent-api's forwarder), one
+  # client per upstream MCP server, per-tenant policy, per-session pins
+  # (harness/docs/GATEWAY.md). Config: ./mcp-gateway/data/gateway.json
+  # (`python -m app.migrate_config tenants.json`); pins persist in
+  # ./mcp-gateway/data/gateway-state. Not published on a host port.
+  mcp-gateway:
+    image: ghcr.io/yingliu-data/secondbrain-mcp-gateway:latest
+    build:
+      context: .                                # needs harness/ (protocol.canonical)
+      dockerfile: mcp-gateway/Dockerfile
+    container_name: secondbrain-mcp-gateway
+    restart: unless-stopped
+    environment:
+      - GATEWAY_CONFIG=/data/gateway.json
+      - GATEWAY_STATE_DIR=/data/gateway-state
+      - AGENT_API_URL=http://agent-api:8000
+      - INTERNAL_TOKEN=${INTERNAL_TOKEN}
+      - LOG_LEVEL=info
+    volumes:
+      - ./mcp-gateway/data:/data                # gateway.json + gateway-state/pins
+    networks:
+      - llm_internal                            # agent-api <-> gateway
+      - agent-net                               # upstreams: http://wcc-mcp:8765
+    extra_hosts:
+      - "host.docker.internal:host-gateway"     # host-run MCP servers
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request,sys;sys.exit(0 if urllib.request.urlopen(\"http://localhost:8090/healthz\",timeout=3).status==200 else 1)'"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
   # -- Cloudflare Tunnel ---------------------------------------------------
   cloudflared:

@@ -1,0 +1,11 @@
+# BuildKit reads <Dockerfile>.dockerignore for a root-context build: send
+# only what the gateway image needs.
+*
+!harness/pyproject.toml
+!harness/protocol
+!harness/guest
+!mcp-gateway/pyproject.toml
+!mcp-gateway/uv.lock
+!mcp-gateway/app
+**/__pycache__
+**/.venv
