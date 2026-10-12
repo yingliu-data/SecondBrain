@@ -21,7 +21,11 @@ The path of an input is configuration, never liveness: TEMPORAL_ADDRESS set
                                    waits for Temporal
   stop()                           shut the supervisor and the worker down
   client                           the connected Client, or None (not ready)
+  task_queue                       the worker's task queue
   status(ref)                      the session workflow's `status` query, or None
+
+The state lives in one TemporalRuntime (`runtime`); the module functions
+and the `client` / `task_queue` attributes are its process-wide face.
 """
 from __future__ import annotations
 
@@ -45,34 +49,6 @@ from app.config import (HARNESS_MAX_CONCURRENT_TASKS, TEMPORAL_ADDRESS,
 
 logger = logging.getLogger("host.temporal")
 
-client: Client | None = None
-task_queue: str = TEMPORAL_TASK_QUEUE
-_address: str = TEMPORAL_ADDRESS      # the configured path (not liveness)
-_worker = None
-_worker_task: asyncio.Task | None = None
-_start_task: asyncio.Task | None = None
-
-
-def configured() -> bool:
-    """The workflow path is configured: every input goes through it."""
-    return bool(_address)
-
-
-def ready() -> bool:
-    """Connected, and the worker runs (inputs can be signalled)."""
-    return client is not None
-
-
-async def wait_ready(timeout_s: float) -> bool:
-    """ready() now or within `timeout_s` (Temporal connecting, or its
-    worker being restarted)."""
-    deadline = time.monotonic() + timeout_s
-    while not ready():
-        if time.monotonic() >= deadline:
-            return False
-        await asyncio.sleep(0.05)
-    return True
-
 
 def max_concurrent_activities(cap: int = HARNESS_MAX_CONCURRENT_TASKS) -> int:
     """The worker's activity slots: room for the cap's running run_tasks
@@ -82,116 +58,162 @@ def max_concurrent_activities(cap: int = HARNESS_MAX_CONCURRENT_TASKS) -> int:
     return 2 * max(1, cap) + 10
 
 
-async def start(activities: list, tenants_doc: dict | None = None, *,
-                address: str = TEMPORAL_ADDRESS, namespace: str = TEMPORAL_NAMESPACE,
-                queue: str = TEMPORAL_TASK_QUEUE, connected: Client | None = None,
-                **worker_kwargs) -> bool:
-    """True when the worker runs. `connected` skips the connect (tests).
-    An address (or a connected client) makes the workflow path the
-    configured one, also when the connect fails (then requests answer 503
-    until a later start succeeds)."""
-    global client, task_queue, _worker, _worker_task, _address
-    if connected is None:
-        if not address:
-            return False
-        _address = address
-        try:
-            connected = await asyncio.wait_for(Client.connect(address, namespace=namespace),
-                                               timeout=TEMPORAL_CONNECT_TIMEOUT_S)
-        except Exception as e:  # noqa: BLE001 - any connect failure: not ready (503)
-            logger.error("Temporal at %s (%s) unreachable: %r", address, namespace, e)
-            return False
-    else:
-        _address = address or "connected"
-    worker_kwargs.setdefault("max_concurrent_activities", max_concurrent_activities())
-    _worker = build_worker(connected, task_queue=queue, activities=activities, **worker_kwargs)
-    _worker_task = asyncio.get_running_loop().create_task(_worker.run(),
-                                                          name=f"temporal-worker:{queue}")
-    _worker_task.add_done_callback(_worker_exited)
-    client, task_queue = connected, queue
-    logger.info("Temporal worker on %s (%s)", queue, connected.namespace)
-    if tenants_doc is not None:
-        try:
-            result = await ensure_schedules(connected, tenants_doc, task_queue=queue)
-            logger.info("schedules: %s", result)
-        except Exception as e:  # noqa: BLE001 - schedules never block startup
-            logger.error("ensure_schedules failed: %r", e)
-    return True
+class TemporalRuntime:
+    """The process's Temporal connection: the client, the worker and its
+    task, the supervisor, and the configured address (the path, not
+    liveness)."""
 
+    def __init__(self, address: str = TEMPORAL_ADDRESS,
+                 task_queue: str = TEMPORAL_TASK_QUEUE) -> None:
+        self.client: Client | None = None
+        self.task_queue = task_queue
+        self.address = address
+        self.worker = None
+        self.worker_task: asyncio.Task | None = None
+        self.start_task: asyncio.Task | None = None
 
-def start_in_background(activities: list, tenants_doc: dict | None = None, *,
-                        address: str = TEMPORAL_ADDRESS,
-                        reconnect_s: float = TEMPORAL_RECONNECT_S,
-                        **kwargs) -> asyncio.Task | None:
-    """The supervisor: start(), again every `reconnect_s` while the connect
-    fails, and again after the worker exits. None without an address (the
-    direct path)."""
-    global _start_task, _address
-    if not address:
-        return None
-    _address = address
+    def configured(self) -> bool:
+        """The workflow path is configured: every input goes through it."""
+        return bool(self.address)
 
-    async def supervise() -> None:
-        while True:
+    def ready(self) -> bool:
+        """Connected, and the worker runs (inputs can be signalled)."""
+        return self.client is not None
+
+    async def wait_ready(self, timeout_s: float) -> bool:
+        """ready() now or within `timeout_s` (Temporal connecting, or its
+        worker being restarted)."""
+        deadline = time.monotonic() + timeout_s
+        while not self.ready():
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(0.05)
+        return True
+
+    async def start(self, activities: list, tenants_doc: dict | None = None, *,
+                    address: str = TEMPORAL_ADDRESS, namespace: str = TEMPORAL_NAMESPACE,
+                    queue: str = TEMPORAL_TASK_QUEUE, connected: Client | None = None,
+                    **worker_kwargs) -> bool:
+        """True when the worker runs. `connected` skips the connect (tests).
+        An address (or a connected client) makes the workflow path the
+        configured one, also when the connect fails (then requests answer
+        503 until a later start succeeds)."""
+        if connected is None:
+            if not address:
+                return False
+            self.address = address
             try:
-                started = await start(activities, tenants_doc, address=address, **kwargs)
-            except Exception:  # noqa: BLE001 - e.g. build_worker: retried, never fatal
-                logger.exception("Temporal worker start failed; retrying in %ss", reconnect_s)
-                started = False
-            if started:
-                task = _worker_task
-                if task is not None:
-                    await asyncio.wait({task})
-            await asyncio.sleep(reconnect_s)
+                connected = await asyncio.wait_for(Client.connect(address, namespace=namespace),
+                                                   timeout=TEMPORAL_CONNECT_TIMEOUT_S)
+            except Exception as e:  # noqa: BLE001 - any connect failure: not ready (503)
+                logger.error("Temporal at %s (%s) unreachable: %r", address, namespace, e)
+                return False
+        else:
+            self.address = address or "connected"
+        worker_kwargs.setdefault("max_concurrent_activities", max_concurrent_activities())
+        self.worker = build_worker(connected, task_queue=queue, activities=activities,
+                                   **worker_kwargs)
+        self.worker_task = asyncio.get_running_loop().create_task(
+            self.worker.run(), name=f"temporal-worker:{queue}")
+        self.worker_task.add_done_callback(self.worker_exited)
+        self.client, self.task_queue = connected, queue
+        logger.info("Temporal worker on %s (%s)", queue, connected.namespace)
+        if tenants_doc is not None:
+            try:
+                result = await ensure_schedules(connected, tenants_doc, task_queue=queue)
+                logger.info("schedules: %s", result)
+            except Exception as e:  # noqa: BLE001 - schedules never block startup
+                logger.error("ensure_schedules failed: %r", e)
+        return True
 
-    _start_task = asyncio.get_running_loop().create_task(supervise(), name="temporal-start")
-    return _start_task
+    def start_in_background(self, activities: list, tenants_doc: dict | None = None, *,
+                            address: str = TEMPORAL_ADDRESS,
+                            reconnect_s: float = TEMPORAL_RECONNECT_S,
+                            **kwargs) -> asyncio.Task | None:
+        """The supervisor: start(), again every `reconnect_s` while the
+        connect fails, and again after the worker exits. None without an
+        address (the direct path)."""
+        if not address:
+            return None
+        self.address = address
 
+        async def supervise() -> None:
+            while True:
+                try:
+                    started = await self.start(activities, tenants_doc, address=address,
+                                               **kwargs)
+                except Exception:  # noqa: BLE001 - e.g. build_worker: retried, never fatal
+                    logger.exception("Temporal worker start failed; retrying in %ss",
+                                     reconnect_s)
+                    started = False
+                if started:
+                    task = self.worker_task
+                    if task is not None:
+                        await asyncio.wait({task})
+                await asyncio.sleep(reconnect_s)
 
-def _worker_exited(t: asyncio.Task) -> None:
-    """A worker that dies on its own (namespace missing, poll failure):
-    not ready (requests answer 503) until the supervisor restarted it; the
-    direct path is never taken instead. stop() clears _worker_task first,
-    so its shutdown is not this."""
-    global client, _worker, _worker_task
-    if t is not _worker_task:
-        return
-    e = t.exception() if t.done() and not t.cancelled() else None
-    logger.error("Temporal worker exited (%r): not ready until it is restarted", e)
-    client, _worker, _worker_task = None, None, None
+        self.start_task = asyncio.get_running_loop().create_task(supervise(),
+                                                                 name="temporal-start")
+        return self.start_task
 
+    def worker_exited(self, t: asyncio.Task) -> None:
+        """A worker that dies on its own (namespace missing, poll failure):
+        not ready (requests answer 503) until the supervisor restarted it;
+        the direct path is never taken instead. stop() clears worker_task
+        first, so its shutdown is not this."""
+        if t is not self.worker_task:
+            return
+        e = t.exception() if t.done() and not t.cancelled() else None
+        logger.error("Temporal worker exited (%r): not ready until it is restarted", e)
+        self.client, self.worker, self.worker_task = None, None, None
 
-async def stop() -> None:
-    global client, _worker, _worker_task, _start_task, _address
-    if _start_task is not None and not _start_task.done():
-        _start_task.cancel()
-    _start_task = None
-    w, t = _worker, _worker_task
-    client, _worker, _worker_task = None, None, None
-    _address = TEMPORAL_ADDRESS
-    if w is not None:
+    async def stop(self) -> None:
+        if self.start_task is not None and not self.start_task.done():
+            self.start_task.cancel()
+        self.start_task = None
+        w, t = self.worker, self.worker_task
+        self.client, self.worker, self.worker_task = None, None, None
+        self.address = TEMPORAL_ADDRESS
+        if w is not None:
+            try:
+                await w.shutdown()
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Temporal worker shutdown: %r", e)
+        if t is not None:
+            try:
+                await t
+            except Exception:  # noqa: BLE001
+                pass
+
+    async def status(self, ref: SessionRef) -> Status | None:
+        """The workflow's `status` query; None when Temporal is off or the
+        session has no workflow."""
+        if self.client is None:
+            return None
         try:
-            await w.shutdown()
-        except Exception as e:  # noqa: BLE001
-            logger.warning("Temporal worker shutdown: %r", e)
-    if t is not None:
-        try:
-            await t
-        except Exception:  # noqa: BLE001
-            pass
+            return await query_status(self.client, ref)
+        except Exception as e:  # noqa: BLE001 - not found, closed, no worker to answer
+            if not isinstance(e, RPCError):
+                logger.info("status query %s/%s/%s: %r", ref.user, ref.tenant, ref.session_id, e)
+            return None
 
 
-async def status(ref: SessionRef) -> Status | None:
-    """The workflow's `status` query; None when Temporal is off or the
-    session has no workflow."""
-    if client is None:
-        return None
-    try:
-        return await query_status(client, ref)
-    except Exception as e:  # noqa: BLE001 - not found, closed, no worker to answer
-        if not isinstance(e, RPCError):
-            logger.info("status query %s/%s/%s: %r", ref.user, ref.tenant, ref.session_id, e)
-        return None
+runtime = TemporalRuntime()
+
+configured = runtime.configured
+ready = runtime.ready
+wait_ready = runtime.wait_ready
+start = runtime.start
+start_in_background = runtime.start_in_background
+stop = runtime.stop
+status = runtime.status
+
+
+def __getattr__(name: str):
+    """`client` and `task_queue` read through to the runtime."""
+    if name in ("client", "task_queue"):
+        return getattr(runtime, name)
+    raise AttributeError(name)
 
 
 def status_dict(st: Status | None) -> dict | None:

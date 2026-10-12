@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -6,7 +7,7 @@ from temporalio.service import RPCError, RPCStatusCode
 from app.auth.middleware import verify
 from flows.client import signal_abort
 from app.host import temporal
-from app.host.state_sync import read_current_run
+from app.host.state_sync import host_log, read_current_run
 from app.session.dir_store import DirStore
 from app.session.eventlog import parse_ts
 from app.session.ids import SessionRef, session_key, session_ref
@@ -28,15 +29,26 @@ def set_sessions(sessions: DirStore):
 
 @router.get("")
 async def list_sessions(tenant: Tenant = Depends(verify)):
-    rows = _sessions.list_for_tenant(tenant.user, tenant.name)
+    # a directory scan: off the loop
+    rows = await asyncio.to_thread(_sessions.list_for_tenant, tenant.user, tenant.name)
     return {"sessions": [{"session_id": r["session_id"], "updated_at": r["updated_at"]}
                          for r in rows]}
+
+
+def _delete(tenant: Tenant, session_id: str) -> bool:
+    """The session directory removed, its host log's queued records
+    written first (a record still queued would otherwise fail, or land in a
+    session re-created under the same id)."""
+    session = _sessions.get(tenant.user, tenant.name, session_id)
+    if session is not None:
+        host_log(session.events).flush()
+    return _sessions.delete(tenant.user, tenant.name, session_id)
 
 
 @router.delete("/{session_id}")
 async def delete_session(session_id: str, tenant: Tenant = Depends(verify)):
     try:
-        deleted = _sessions.delete(tenant.user, tenant.name, session_id)
+        deleted = await asyncio.to_thread(_delete, tenant, session_id)
     except ValueError:
         raise HTTPException(400, "Invalid session id")
     if deleted:

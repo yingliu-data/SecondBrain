@@ -183,6 +183,16 @@ class LocalSandbox(Sandbox):
     def is_alive(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
 
+    def wait_exit(self, timeout: float) -> bool:
+        proc = self.proc
+        if proc is None:
+            return True
+        try:
+            proc.wait(timeout=timeout)
+            return True
+        except subprocess.TimeoutExpired:
+            return False
+
     @property
     def returncode(self) -> int | None:
         return None if self.proc is None else self.proc.poll()

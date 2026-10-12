@@ -63,33 +63,33 @@ class HostActivities:
         return [self.prepare_vm, self.run_task, self.park_vm, self.deliver]
 
     # ------------------------------------------------------------ helpers
-    def worker(self, ref: SessionRef) -> Worker:
+    async def worker(self, ref: SessionRef) -> Worker:
         tenant = self.tenants.get_by_name(ref.tenant)
         if tenant is None or tenant.user != ref.user:
             raise ApplicationError(f"unknown tenant {ref.user}/{ref.tenant}", non_retryable=True)
-        return self.workers.get_or_create(tenant, ref.session_id, self.registry)
+        return await self.workers.open(tenant, ref.session_id, self.registry)
 
     @staticmethod
-    async def _started(w: Worker, name: str, input_id: str, **extra) -> None:
-        await asyncio.to_thread(w.sync.host_event, "workflow", {
+    def _started(w: Worker, name: str, input_id: str, **extra) -> None:
+        w.sync.host_event("workflow", {
             "kind": "activity_start", "activity": name, "input_id": input_id,
             "attempt": activity.info().attempt, **extra})
 
     # ------------------------------------------------------------ activities
     @activity.defn(name="prepare_vm")
     async def prepare_vm(self, inp: PrepareVM) -> None:
-        w = self.worker(inp.session)
-        await self._started(w, "prepare_vm", inp.input_id, resume_from_park=inp.resume_from_park)
+        w = await self.worker(inp.session)
+        self._started(w, "prepare_vm", inp.input_id, resume_from_park=inp.resume_from_park)
         await w.ensure_ready(inp.input_id, WORKFLOW)
 
     @activity.defn(name="run_task")
     async def run_task(self, inp: RunTask) -> RunResult:
         info = activity.info()
-        w = self.worker(inp.session)
+        w = await self.worker(inp.session)
         extra: dict = {"resume": inp.resume}
         if info.attempt > 1:
             extra["floor_seq"] = _floor_seq(info.heartbeat_details)
-        await self._started(w, "run_task", inp.input_id, **extra)
+        self._started(w, "run_task", inp.input_id, **extra)
         # the task's heartbeat ticks in its own asyncio task: run there in
         # this activity's context (activity.heartbeat reads a contextvar)
         ctx = contextvars.copy_context()
@@ -141,17 +141,17 @@ class HostActivities:
 
     @activity.defn(name="park_vm")
     async def park_vm(self, inp: ParkVM) -> None:
-        w = self.worker(inp.session)
-        await self._started(w, "park_vm", inp.input_id, question_id=inp.question_id)
+        w = await self.worker(inp.session)
+        self._started(w, "park_vm", inp.input_id, question_id=inp.question_id)
         if not await w.ensure_parked("question"):
             logger.warning("session %s: could not park for question %s (vm %s)",
                            w.session_key, inp.question_id, w.vm_state)
 
     @activity.defn(name="deliver")
     async def deliver(self, inp: Deliver) -> None:
-        w = self.worker(inp.session)
+        w = await self.worker(inp.session)
         iid = inp.input_id
-        await self._started(w, "deliver", iid, outcome=inp.outcome)
+        self._started(w, "deliver", iid, outcome=inp.outcome)
         if iid not in w.sync.settled:
             # the workflow is done with this input: a task of it still queued
             # (session lock, task cap) never runs (run_task's cancel may reach
@@ -172,6 +172,6 @@ class HostActivities:
         w.finish_input(iid, error, outcome=inp.outcome, question_id=inp.question_id,
                        driver=WORKFLOW)
         if first:
-            await asyncio.to_thread(w.sync.host_event, "workflow", {
+            w.sync.host_event("workflow", {
                 "kind": "delivered", "input_id": iid, "outcome": inp.outcome,
                 "ticket_id": ticket_id_for(inp.session, iid)})

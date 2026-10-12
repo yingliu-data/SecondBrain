@@ -62,9 +62,9 @@ async def test_load_parked_loads_only_the_tenant_s_sessions_and_makes_no_dir(sto
     workers = Workers(sandbox_factory=lambda: FakeSandbox([]), sessions=store)
     before = _dirs(store)
     try:
-        assert workers.load_parked(WCC, FakeRegistry()) == []
+        assert await workers.load_parked(WCC, FakeRegistry()) == []
         assert _dirs(store) == before                          # no stray wcc.event_s1
-        loaded = workers.load_parked(WCC_EVENT, FakeRegistry())
+        loaded = await workers.load_parked(WCC_EVENT, FakeRegistry())
         assert sorted(w.session_id for w in loaded) == ["s1", "s2"]
         assert {w.session.root.name for w in loaded} == {"wcc_event_s1", "wcc_event.s2"}
         assert all(w.ref.tenant == "wcc_event" for w in loaded)
@@ -102,3 +102,22 @@ async def test_tool_result_never_reaches_another_tenant_s_call(store, monkeypatc
     finally:
         await client.aclose()
         await workers.shutdown(park_s=0)
+
+
+def test_listing_reads_only_the_tenant_s_directories_and_what_they_require(store, monkeypatch):
+    """list_for_tenant filters directory names by the tenant first (session.json
+    of another tenant's directory is never read) and, with `require`, skips a
+    directory without that file before reading its identity."""
+    import app.session.dir_store as ds
+    read = []
+    real = ds.read_identity
+    monkeypatch.setattr(ds, "read_identity", lambda p: read.append(p.name) or real(p))
+    rows = store.list_for_tenant("u", "wcc")
+    assert [r["session_id"] for r in rows] == ["event_s2"]
+    assert all(n.startswith(("wcc.", "wcc_")) for n in read)
+    read.clear()
+    assert store.list_for_tenant("u", "wcc", require="vm/parked.json") == []
+    assert "wcc.event_s2" not in read      # no parked.json: its session.json is never read
+    assert store.list_for_tenant("u", "wcc_event", require="vm/parked.json") == [
+        r for r in store.list_for_tenant("u", "wcc_event")
+        if (r["root"] / "vm" / "parked.json").exists()]

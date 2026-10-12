@@ -131,18 +131,23 @@ host did, never folded. One line per record, `{ts, hseq, session_id, type,
 body}`; `hseq` is gapless from 1 (`protocol.replay verify` checks it, and
 that `type` is a str and `body` a dict). There is one writer per session in
 a process (`state_sync.HostLog`, via `StateSync.host_event`); a live worker
-and `POST /internal/gateway-events` share it.
+and `POST /internal/gateway-events` share it. Records are group-committed
+(`app/host/durable.py`, the same writer as the guest events): `hseq` is
+assigned and the record queued under the HostLog's lock, so file order is
+hseq order; the worker's records are not waited for (telemetry: a failed
+write is logged, and leaves a hole in `hseq` that `verify` reports), the
+gateway route's are (`append_durable`: its 202 means stored).
 
 | type | body | writer |
 |---|---|---|
 | `vm` | `op` in `boot`/`restore`/`snapshot`/`destroy`, `source` in `rootfs`/`base`/`session`, `ms` (the sandbox's figure when it has one), `ready_ms`, `run`, `sandbox`, plus `ok`, `error`, `resume`, `reason` where they apply | worker |
-| `workflow` | `kind` in `task_signal`/`activity_start`/`heartbeat`/`completed`/`parked`/`delivered`/`idle`/`park_timeout`/`resume`/`answer_signal`/`answer_timeout`/`abort`/`dropped` (a queued task that never started, `reason`), with the kind's fields (`input_id`, `outcome`, `ticket_id`, `attempt`, `floor_seq`, ...) | worker, activities |
+| `workflow` | `kind` in `task_signal`/`activity_start`/`heartbeat`/`completed`/`parked`/`delivered`/`idle`/`park_timeout`/`resume`/`answer_signal`/`answer_timeout`/`abort`/`dropped` (a queued task that never started, `reason`)/`evicted` (an idle Worker dropped from memory, `vm_state`; docs/HOST.md), with the kind's fields (`input_id`, `outcome`, `ticket_id`, `attempt`, `floor_seq`, ...) | worker, activities |
 | `side_call` | `side`, `call_id`, `name`, `ok`, `duration_ms`; `state: adopted` / `state: lost` for device calls a restarted worker adopted or a resume cancelled | sides, worker |
 | `gateway` | `op` in `list`/`call`/`quarantine`/`error`, `tool`?, `upstream`?, `ok`?, `ms`?, `error`?, `source`? (`forwarder` when the gateway could not be reached) | gateway (posted), forwarder |
 | `usage` | one LLM request's usage and status | LLM proxy |
 | `memory` | `scope`, `op`, `slug`, `sha256`, `call_id`: a `remember`/`forget` write | sides |
 | `bulk` | `kind`, `path`, `bytes`, `sha256`: a bulk `put` the host stored | worker |
-| `input` | `kind: side_result`, `call_id`, `side`, `dedupe: late`: a side result for a call no longer open, dropped | worker |
+| `input` | `kind: side_result`, `call_id`, `side`, `dedupe: late`: a side result for a call the run's fold has `op_state{lost}`, dropped (also after an agent-api restart) | worker |
 | `harness_skew` | `guest`, `host`: the guest's `session_start.harness_version` differs from the host's `protocol.version.HARNESS_VERSION` (a warning; the session runs) | worker |
 
 ## Log rules (`validate_log`)
@@ -164,7 +169,16 @@ that each rule has exactly one owner.
 
 ## Rules the fold checks (`protocol/fold.py`)
 
-`fold.apply` runs `validate_event` on every event it applies, then the handlers check the
+(The fold's State also keeps index fields that are never hashed or compared:
+`call_args`, `question_text`, `settles_by_input`, `open_input`, beside the
+older `_unresolved` and `_checkpoint_seqs`; the host reads them instead of
+re-deriving them. Adding one never changes a `state_hash`. Across runs,
+`protocol.replay.SessionIndex` / `session_index` collect the input ids seen
+and the settles by a cheap scan of `input` and `settle` lines.)
+
+`fold.apply` runs `validate_event` on every event it applies (`fold.apply_valid` is the
+same step for an event its caller validated already: the host's StateSync, which refuses
+an event with its schema error first), then the handlers check the
 references that need the folded state. Each is a `FoldError("seq N: ...")`; `replay`
 reports them next to the `validate_log` ones (docs/REPLAY.md).
 

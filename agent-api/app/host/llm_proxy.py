@@ -49,6 +49,7 @@ from protocol.sse import iter_sse_data
 from protocol.usage import normalise_usage
 
 from app.config import HARNESS_TOKEN_BUDGET, LLM_TIMEOUT, LLM_URL
+from app.host.http_clients import shared_client
 from app.host.uds_http import UDSHandler, UDSService
 
 logger = logging.getLogger("host.llm_proxy")
@@ -234,7 +235,8 @@ class LLMProxy(UDSService):
         super().__init__(listener)
         self.upstream_url = upstream_url.rstrip("/")
         self.host_event = host_event
-        self.client = httpx.Client(base_url=self.upstream_url, timeout=httpx.Timeout(timeout_s))
+        # the process's client for this upstream (http_clients): not closed with the proxy
+        self.client = shared_client(self.upstream_url, httpx.Timeout(timeout_s))
         self.token_budget = max(0, int(token_budget or 0))
         self.tokens_used = 0
         self._lock = threading.Lock()
@@ -258,4 +260,4 @@ class LLMProxy(UDSService):
                 logger.warning("usage event failed: %s", e)
 
     def closed(self) -> None:
-        self.client.close()
+        pass                # the shared client outlives the session

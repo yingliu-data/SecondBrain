@@ -4,13 +4,13 @@ The host half of a session: the Worker that boots, parks and resumes the
 guest, the HTTP API both drivers serve, and the agent-api configuration the
 harness depends on. The wire is docs/PROTOCOL.md, the Temporal path
 docs/FLOWS.md, the host log docs/EVENTS.md "Host log", the gateway
-docs/GATEWAY.md. The module docstrings (`worker.py`, `state_sync.py`,
-`gateway_forwarder.py`, `sandbox/firecracker.py`, `sandbox/base_snapshot.py`)
-carry the details.
+docs/GATEWAY.md. The module docstrings (`state_sync.py`, `durable.py`,
+`vm.py`, `adopted.py`, `gateway_forwarder.py`, `sandbox/firecracker.py`,
+`sandbox/base_snapshot.py`) carry the details; `worker.py`'s points here.
 
 Shared definitions come from `protocol` (one home each): the ports
 (`protocol.ports`), the limit defaults and `SEGMENT_EVENTS`
-(`protocol.limits`; `Worker.limits()` starts from `DEFAULT_LIMITS` and
+(`protocol.limits`; `hello.limits()` starts from `DEFAULT_LIMITS` and
 applies only the `HARNESS_*` env and tenant overrides, whose own defaults are
 `DEFAULT_LIMITS` too), atomic writes and file digests (`protocol.fsio`: tickets
 and `vm/parked.json` durable, `session.json` and snapshot `META.json` renamed
@@ -33,11 +33,81 @@ running → parking → parked → booting ...).
 | park | Control `park{reason}`, wait for the acked `parked`, close the guest's :5000/:5001/:5011 listeners (held gateway calls keep running), `sandbox.snapshot({session}/vm/snapshot)`, write `vm/parked.json` for a restarted worker. A guest that parks itself on a question is adopted the same way. |
 | wake | The next task, `ui_response` or `side_result` of a parked session restores the session snapshot (no hello; `seq`/`cseq` continue) and sends the held controls, `ui_response` first. Fallback: base restore + `hello{resume: true}` + log return. |
 | idle | `HARNESS_SESSION_IDLE_S` (1800) after a settle: park, snapshot, destroy. |
-| death | Link down and sandbox not alive mid-task: base restore + `hello{resume: true}`; the guest pulls the acked log on :5001 and marks open calls `lost`, and the worker cancels them (a late `side_result` is dropped and logged as an `input{dedupe: late}` host event). `HARNESS_MAX_RESUMES` (1) per task, then the task fails. |
+| death | Link down and sandbox not alive mid-task: base restore + `hello{resume: true}`; the guest pulls the acked log on :5001 and marks open calls `lost`, and the worker cancels them (a late `side_result` is dropped and logged as an `input{dedupe: late}` host event; the lost state is read from the run's fold, so this holds after an agent-api restart too). `HARNESS_MAX_RESUMES` (1) per task, then the task fails. A dropped link is told apart off the pump: the worker waits for the guest to exit (`Sandbox.wait_exit`) or reconnect, whichever comes first (at most 2 s), instead of a fixed sleep. |
 
 After an agent-api restart, `POST /api/v1/tool-result` for an unknown call id
 loads the tenant's parked sessions first: each Worker rebuilds its open device
 calls from the fold, so the result is accepted and wakes the guest.
+
+### Worker internals (`worker.py`, `vm.py`, `hello.py`, `adopted.py`, `outcomes.py`, `settings.py`)
+
+- **Modules.** `worker.py`: `Worker` (sinks, the task API, control, the
+  pump) and `Workers` (the registry). `vm.py`: the `VMLifecycle` mixin of
+  Worker (boot, park, wake, idle, the parked file). `hello.py`: the hello
+  and its parts (tools, limits, system block, `session_config`,
+  `answer_wait_for`). `adopted.py`: device calls adopted after a restart.
+  `outcomes.py`: settle outcomes, `task_outcome`/`end_error`,
+  `ticket_id_for`, `answer_input_id`, `GuestError`. `settings.py`:
+  `WorkerSettings`, one frozen value built from `app.config`
+  (`WorkerSettings.from_config(**over)`; `dataclasses.replace` for a
+  variant). Dependencies (sandbox, `DeviceCalls`, the admission) stay
+  keyword arguments.
+- **Task API** (both drivers): `ensure_ready(input_id, driver)` boot /
+  wake (prepare_vm); `start_task(task_input)` the worker-owned task of an
+  input (a retry re-attaches by input_id); `wait_outcome(input_id)` its
+  settle, the host's failure result, or `{outcome: parked, question_id}`;
+  `on_heartbeat`, `drop_queued`, `answer(question_id, text, input_id)`,
+  `abort(reason)`, `abort_and_wait`, `finish_input` (the only end of an
+  input: ticket, then error/done/end of stream), `replay(input_id)`.
+  `act()` is the direct path's driver over it; the activities are the
+  workflow's.
+- **Question parks.** `answer_wait_s` is decided per guest run by the
+  driver of the task that boots it (the tenant's, else 0 direct / 86400
+  workflow). > 0: the guest parks itself on a question deadline, the worker
+  adopts the park; the task's wall clock stops; the driver waits up to
+  `answer_wait_s` for the answer (the workflow's timer, `act()`'s `_drive`),
+  else `abort_and_wait(escalated)`.
+- **Across a restart** (a new Worker on the same directory). Unsettled (the
+  input acked, no settle, no guest): the task's next start resumes that run
+  like a death, never a new run. Parked (`vm/parked.json`): the guest is
+  woken from it; a direct-path question park is driven by a restored driver
+  (`_drive_restored`); device calls the fold has open are adopted (their
+  args from the fold). Orphan (a different input on a guest holding an
+  unsettled task): `abort{aborted}` settles that one first. Shutdown
+  (`Workers.shutdown`) parks running guests (`park(timeout_s=)`).
+- **Waits.** Every change of what a waiter may wait for (vm_state,
+  question_park, the link, the acked `parked`, a settle) calls `_pulse()`;
+  `_until(predicate, aw=None, timeout=None)` is the one wait.
+- **The pump** is the single consumer of the inbound queue and the single
+  writer of state_sync. A run of guest events already queued (up to 256) is
+  folded and handed to the group writer together; the pump awaits the last
+  append, sends ONE ack of the highest durable seq, and only then runs each
+  stored event's effects (stream, side calls, settle). Nothing is acked or
+  acted on before it is fsynced.
+- **Durability** (`durable.py`). One process-wide `GroupWriter` (4 shard
+  threads, a path's shard fixed by its directory) appends the guest events
+  and host-log records: it drains what is queued, one write + one fsync per
+  file on a descriptor it keeps open, then resolves each record's future.
+  A failed batch is cut back (no torn line) and poisons its StateSync: later
+  records fail, the next submit refolds the run from disk, the guest's
+  resend is accepted. `StateSync.read()` (the log return) and `last_seq`
+  are bounded by the durable seq.
+- **Loading.** `Workers.open()` builds a Worker in a thread (the session's
+  last run is folded in full, earlier runs only scanned for their inputs and
+  settles, `protocol.replay.SessionIndex`); `Worker.on_loop()` then adopts
+  device calls and restores a question park. `load_parked` (the tool-result
+  route, startup) lists only directories named for the tenant that hold a
+  `vm/parked.json` before reading their `session.json`, off the loop.
+- **Eviction.** A Worker idle for `HARNESS_WORKER_EVICT_S` (300; 0 = never)
+  with no task, the VM none or parked, no adopted or open device call, no
+  question park, no attached stream and no background work is closed and
+  dropped (`workflow{kind: evicted}`; its threads, proxy and folded state
+  released; a parked VM's process is stopped, its snapshot stays). The next
+  request rebuilds it from disk.
+- **Plumbing** (listeners, LLM proxy, accept thread, Sides, pump) is made
+  on the first use that needs a guest; a task makes it only once it holds
+  its slot of the cap. The LLM proxy and the gateway relay of every session
+  share one `httpx.Client` per upstream (`http_clients.py`).
 
 ### Session identity and directories
 
@@ -66,7 +136,7 @@ names; a new session never goes there. Rename legacy directories with
   an abort, `prepare_vm` of the resume) takes it again first. The Temporal
   worker runs at most `2 * cap + 10` activities at once.
 - **Wall clock.** One value per task: the tenant's `wall_clock_s`
-  (`SessionConfig`, `worker.session_config`), else `HARNESS_WALL_CLOCK_S`
+  (`SessionConfig`, `hello.session_config`), else `HARNESS_WALL_CLOCK_S`
   (600); on the workflow path the chat route puts it in `TaskSignal`.
   It travels in the `task` message (`wall_clock_s`); the guest arms it per
   task and settles `timeout` (hello `limits.wall_clock_s` is only the

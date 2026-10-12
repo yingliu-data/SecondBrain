@@ -197,6 +197,7 @@ def test_host_event_log_and_runs(session):
     sync = StateSync(session)
     rec = sync.host_event("usage", {"prompt_tokens": 5, "completion_tokens": 1})
     assert rec["hseq"] == 1
+    sync.flush_host()                       # group-committed, not waited for
     assert read_jsonl(session.root / "events" / "host-000001.jsonl")[0]["type"] == "usage"
     for e in text_task():
         sync.accept(e)
@@ -326,6 +327,7 @@ def test_host_log_recounts_after_its_directory_is_deleted(tmp_path):
     s = store.get_or_create("u", "t", "s1")
     sync = StateSync(s)
     assert [sync.host_event("vm", {"op": "boot"})["hseq"] for _ in range(2)] == [1, 2]
+    sync.flush_host()           # the route flushes before deleting (sessions.delete_session)
     assert store.delete("u", "t", "s1")
     s2 = store.get_or_create("u", "t", "s1")
     assert StateSync(s2).host_event("vm", {"op": "boot"})["hseq"] == 1

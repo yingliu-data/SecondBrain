@@ -20,7 +20,7 @@ from app.host.sides import DeviceCalls
 from app.host.stream import DONE, tokens
 from app.host.worker import Worker
 from host_fakes import (FakeRegistry, FakeTenant, FakeUpstreamLLM, session,  # noqa: F401
-                        token_text, users_root)
+                        token_text, users_root, worker_kwargs)
 from eventlog_fakes import conversation
 
 GUEST_ROOT = Path(__file__).resolve().parents[2] / "harness"
@@ -42,8 +42,8 @@ def make_worker(session, upstream, registry=None, dc=None):
     return Worker(session, FakeTenant(system_prompt="You are a test. {current_time}"),
                   FakeRegistry() if registry is None else registry, LocalSandbox(GUEST_ROOT),
                   device_calls=DeviceCalls() if dc is None else dc,
-                  llm_url=upstream.url, hello_timeout_s=20, heartbeat_s=1, wall_clock_s=60,
-                  park_grace_s=30)
+                  **worker_kwargs(llm_url=upstream.url, hello_timeout_s=20, heartbeat_s=1,
+                                  wall_clock_s=60, park_grace_s=30))
 
 
 async def drain(q):
@@ -159,7 +159,7 @@ async def test_e2e_redelivered_input_runs_once(session, upstream):
 async def test_e2e_non_streamed_fallback(session, upstream, monkeypatch):
     """LLM_STREAM=false: `params.stream` is false in hello, the guest makes one
     non-streamed call per turn and the text still reaches the client once."""
-    monkeypatch.setattr("app.host.worker.LLM_STREAM", False)
+    monkeypatch.setattr("app.config.LLM_STREAM", False)
     upstream.responses = [{"content": "Plain answer here"}]
     w = make_worker(session, upstream)
     sink = w.attach()
@@ -180,8 +180,8 @@ async def test_e2e_compaction_writes_the_session_memory_and_replays(session, ups
     regular turn (the first turn's tool call commits a prefix to summarise):
     the summary is projected to memory/compaction-<seq>.md, the memory
     event's hash matches, and the stored log replays."""
-    monkeypatch.setattr("app.host.worker.HARNESS_CONTEXT_WINDOW_TOKENS", 120)
-    monkeypatch.setattr("app.host.worker.HARNESS_RESERVE_TOKENS", 100)
+    monkeypatch.setattr("app.config.HARNESS_CONTEXT_WINDOW_TOKENS", 120)
+    monkeypatch.setattr("app.config.HARNESS_RESERVE_TOKENS", 100)
     summary = "Goal: say hello. Progress: ran echo. Next: answer."
     upstream.responses = [tool_call("call_b", "bash", {"command": "echo hi"}),
                           {"content": summary}, {"content": "Hello after compaction"}]

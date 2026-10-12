@@ -25,7 +25,7 @@ async def tool_result_endpoint(request: Request, tenant: Tenant = Depends(verify
     try:
         if DEVICE_CALLS.resolve(call_id, result, owner=owner):
             return {"status": "ok"}
-        if chat.workers.load_parked(tenant, chat._registry) and \
+        if await chat.workers.load_parked(tenant, chat._registry) and \
                 DEVICE_CALLS.resolve(call_id, result, owner=owner):
             return {"status": "ok"}
     except DeliveryError as e:

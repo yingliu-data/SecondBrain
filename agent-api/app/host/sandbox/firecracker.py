@@ -463,6 +463,16 @@ class FirecrackerSandbox(_SandboxBase):
     def is_alive(self) -> bool:
         return self._proc is not None and self._proc.poll() is None
 
+    def wait_exit(self, timeout: float) -> bool:
+        proc = self._proc
+        if proc is None:
+            return True
+        try:
+            proc.wait(timeout=timeout)
+            return True
+        except subprocess.TimeoutExpired:
+            return False
+
     # --------------------------------------------------------------- extras
 
     @property

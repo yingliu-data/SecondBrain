@@ -22,7 +22,7 @@ from app.skills.avatar_control.poses import POSES
 from app.skills.avatar_control.skill import AvatarControlSkill
 from app.skills.registry import SkillRegistry
 from app.tenants import TenantRegistry
-from host_fakes import FakeUpstreamLLM, users_root  # noqa: F401
+from host_fakes import FakeUpstreamLLM, users_root, worker_kwargs  # noqa: F401
 
 GUEST_ROOT = Path(__file__).resolve().parents[2] / "harness"
 ORIGIN = "https://robot.yingliu.site"
@@ -60,8 +60,9 @@ def page(tmp_path, users_root, upstream, monkeypatch):  # noqa: F811
     from app.routes import chat, guest
     store = DirStore(tmp_path / "sessions")
     workers = Workers(sandbox_factory=lambda: LocalSandbox(GUEST_ROOT), sessions=store,
-                      device_calls=DeviceCalls(), llm_url=upstream.url, hello_timeout_s=20,
-                      heartbeat_s=1, wall_clock_s=60)
+                      device_calls=DeviceCalls(),
+                      **worker_kwargs(llm_url=upstream.url, hello_timeout_s=20,
+                                      heartbeat_s=1, wall_clock_s=60))
     monkeypatch.setattr(chat, "sessions", store)
     monkeypatch.setattr(chat, "workers", workers)
     monkeypatch.setattr(chat, "HARNESS_KEEPALIVE_S", 0.5)

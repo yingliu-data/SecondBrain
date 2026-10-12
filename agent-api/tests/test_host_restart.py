@@ -27,7 +27,8 @@ from app.host.sandbox.local import LocalSandbox
 from app.host.sides import DeliveryError, DeviceCalls
 from app.host.worker import DIRECT, WORKFLOW, Worker, Workers
 from app.session.dir_store import DirStore
-from host_fakes import FakeRegistry, FakeTenant, FakeUpstreamLLM, session, users_root  # noqa: F401
+from host_fakes import (FakeRegistry, FakeTenant, FakeUpstreamLLM, session,  # noqa: F401
+                        users_root, worker_kwargs)
 from app.session.ids import session_ref
 
 REF = session_ref("u", "t", "s1")
@@ -55,13 +56,13 @@ WORKER_KW = dict(llm_url=None, hello_timeout_s=20, heartbeat_s=1, wall_clock_s=6
 
 def make_worker(session, llm_url, dc, tenant=None):
     return Worker(session, tenant or FakeTenant(), FakeRegistry(), LocalSandbox(GUEST_ROOT),
-                  device_calls=dc, **{**WORKER_KW, "llm_url": llm_url})
+                  device_calls=dc, **worker_kwargs(**{**WORKER_KW, "llm_url": llm_url}))
 
 
 def make_workers(session, llm_url, dc):
     return Workers(sandbox_factory=lambda: LocalSandbox(GUEST_ROOT),
                    sessions=DirStore(session.root.parents[1]), device_calls=dc,
-                   **{**WORKER_KW, "llm_url": llm_url})
+                   **worker_kwargs(**{**WORKER_KW, "llm_url": llm_url}))
 
 
 async def wait_until(pred, timeout=30.0, what=""):
@@ -202,7 +203,7 @@ async def test_device_result_route_503_then_retry_and_worker_dedupe(session, mon
     dc = DeviceCalls()
     sent = []
     w = Worker(session, FakeTenant(), FakeRegistry(), LocalSandbox(GUEST_ROOT), device_calls=dc,
-               **{**WORKER_KW, "llm_url": "http://127.0.0.1:9"})
+               **worker_kwargs(**{**WORKER_KW, "llm_url": "http://127.0.0.1:9"}))
     statuses = iter(["no_guest", "held", "held"])
 
     def fake_send(type, body):
@@ -210,8 +211,8 @@ async def test_device_result_route_503_then_retry_and_worker_dedupe(session, mon
         sent.append((type, body["call_id"], status))
         return status
     monkeypatch.setattr(w, "send_control", fake_send)
-    deliver = lambda result: w._deliver_adopted("call_r", "get_calendar_events", result)  # noqa: E731
-    w._adopted["call_r"] = deliver
+    deliver = lambda result: w.adopted.deliver("call_r", "get_calendar_events", result)  # noqa: E731
+    w.adopted.watch("call_r", deliver)
     dc.adopt("call_r", "get_calendar_events", {}, w.ref, deliver=deliver,
              loop=asyncio.get_running_loop())
     monkeypatch.setattr(tool_result, "DEVICE_CALLS", dc)
@@ -227,7 +228,7 @@ async def test_device_result_route_503_then_retry_and_worker_dedupe(session, mon
         assert r.status_code == 200 and not dc.is_open("call_r")
         assert [s[2] for s in sent] == ["no_guest", "held"]
         # a duplicate delivery (e.g. a deliver retried after it went out) is not resent
-        w._deliver_adopted("call_r", "get_calendar_events", "x")
+        w.adopted.deliver("call_r", "get_calendar_events", "x")
         assert len(sent) == 2
         r = await client.post("/api/v1/tool-result", json={"tool_call_id": "call_r", "result": "x"})
         assert r.status_code == 409
@@ -307,3 +308,35 @@ async def test_shutdown_parks_a_running_session_and_a_restart_adopts_its_device_
     finally:
         await client.aclose()
         await workers2.shutdown(park_s=0)
+
+
+# ---------------------------------------------------------------- 5. lost calls from the fold
+def test_a_late_side_result_for_a_lost_call_is_refused_after_a_restart(session):
+    """A death resume marked call c1 op_state{lost}; the process restarts.
+    The new Worker reads the lost state from the fold (no memory of the old
+    one): a side_result for c1 is dropped and logged input{dedupe: late}."""
+    from app.host.state_sync import StateSync
+    from host_fakes import FakeSandbox
+    from test_host_state_sync import ev, text_task
+    sync = StateSync(session)
+    for e in text_task()[:4]:
+        sync.accept(e)
+    sync.accept(ev(5, "llm_response", {"turn_id": "t1", "finish_reason": "tool_calls",
+                                       "usage": {}, "message": {"role": "assistant",
+                                                                "content": None,
+                                                                "tool_calls": []}}))
+    sync.accept(ev(6, "tool_call", {"turn_id": "t1", "call_id": "c1",
+                                    "name": "get_calendar_events", "side": "device",
+                                    "args": {}, "state": "RUNNING"}))
+    sync.accept(ev(7, "op_state", {"call_id": "c1", "state": "lost"}))
+    sync.accept(ev(8, "tool_result", {"call_id": "c1",
+                                      "content": "error: operation lost (VM restarted)"}))
+    w = Worker(session, FakeTenant(), FakeRegistry(), FakeSandbox([]),
+               device_calls=DeviceCalls(), **worker_kwargs())
+    assert w.send_control("side_result", {"call_id": "c1", "side": "device",
+                                          "content": "late", "ok": True}) == "dropped"
+    # another call id is not refused (no guest: no_guest)
+    assert w.send_control("side_result", {"call_id": "c2", "side": "device",
+                                          "content": "x", "ok": True}) == "no_guest"
+    late = [h["body"] for h in w.sync.read_host() if h["type"] == "input"]
+    assert late == [{"kind": "side_result", "call_id": "c1", "side": "device", "dedupe": "late"}]

@@ -39,9 +39,18 @@ from app.host.sides import DeviceCalls
 from app.host.worker import WORKFLOW, Workers
 from app.session.dir_store import DirStore
 from app.tenants import TenantRegistry
-from host_fakes import FakeRegistry, FakeUpstreamLLM, users_root  # noqa: F401
+from host_fakes import FakeRegistry, FakeUpstreamLLM, make_settings, users_root  # noqa: F401
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
+
+
+def short_questions(monkeypatch, *harnesses) -> None:
+    """question_timeout_s 1: for the Workers made from now on (app.config,
+    read by WorkerSettings.from_config) and those of `harnesses`."""
+    import dataclasses
+    monkeypatch.setattr("app.config.HARNESS_QUESTION_TIMEOUT_S", 1)
+    for d in harnesses:
+        d.workers.settings = dataclasses.replace(d.workers.settings, question_timeout_s=1)
 
 GUEST_ROOT = Path(__file__).resolve().parents[2] / "harness"
 ANSWER_WAIT_S = 3600
@@ -101,11 +110,11 @@ class Harness:
         self.short = Path(tempfile.mkdtemp(prefix="m5", dir="/tmp"))
         self.store = DirStore(self.short)
         self.workers = Workers(sandbox_factory=lambda: LocalSandbox(GUEST_ROOT),
-                               sessions=self.store, abort_wait_s=20,
-                               max_concurrent=max_concurrent,
-                               device_calls=DeviceCalls(), llm_url=upstream.url,
-                               hello_timeout_s=20, heartbeat_s=1, wall_clock_s=120,
-                               park_grace_s=30)
+                               sessions=self.store, max_concurrent=max_concurrent,
+                               device_calls=DeviceCalls(),
+                               settings=make_settings(abort_wait_s=20, llm_url=upstream.url,
+                                                      hello_timeout_s=20, heartbeat_s=1,
+                                                      wall_clock_s=120, park_grace_s=30))
         monkeypatch.setattr(chat, "sessions", self.store)
         monkeypatch.setattr(chat, "workers", self.workers)
         monkeypatch.setattr(chat, "HARNESS_KEEPALIVE_S", 0.5)
@@ -144,6 +153,7 @@ class Harness:
         from app.routes import chat
         old = self.workers
         self.workers = Workers(sandbox_factory=old.sandbox_factory, sessions=old.sessions,
+                               settings=old.settings,
                                **{**old.worker_kwargs, "device_calls": DeviceCalls()})
         self.acts.workers = self.workers
         monkeypatch.setattr(chat, "workers", self.workers)
@@ -314,7 +324,7 @@ async def test_chat_task_completes_through_the_workflow(h):
 
 
 async def test_question_parks_then_answer_resumes(h, monkeypatch):
-    monkeypatch.setattr("app.host.worker.HARNESS_QUESTION_TIMEOUT_S", 1)
+    short_questions(monkeypatch, h)
     h.upstream.responses = [tool_call("call_q", "question", {"text": "Which colour?",
                                                             "options": ["red", "blue"]}),
                             {"content": "You picked blue"}]
@@ -352,7 +362,7 @@ async def test_question_parks_then_answer_resumes(h, monkeypatch):
 
 
 async def test_answer_wait_timer_escalates(h, monkeypatch):
-    monkeypatch.setattr("app.host.worker.HARNESS_QUESTION_TIMEOUT_S", 1)
+    short_questions(monkeypatch, h)
     h.upstream.responses = [tool_call("call_q", "question", {"text": "Still there?"}),
                             {"content": "never"}]
     await h.start()
@@ -381,7 +391,7 @@ async def test_run_task_retry_reattaches_without_a_second_turn(h):
     async def flaky_run_task(inp: RunTask) -> RunResult:
         if activity.info().attempt == 1:
             # the turn starts, then the activity dies (a worker crash)
-            w = acts.worker(inp.session)
+            w = await acts.worker(inp.session)
             w.start_task({"input_id": inp.input_id, "text": inp.text, "kind": inp.kind})
             activity.heartbeat({"last_seq": w.sync.last_seq})
             await asyncio.sleep(0.5)
@@ -577,7 +587,7 @@ async def direct(tmp_path, users_root, upstream, monkeypatch):
 
 
 async def _direct_question_answered(d, monkeypatch, input_id):
-    monkeypatch.setattr("app.host.worker.HARNESS_QUESTION_TIMEOUT_S", 1)
+    short_questions(monkeypatch, d)
     d.upstream.responses = [tool_call("call_q", "question", {"text": "Which colour?",
                                                             "options": ["red", "blue"]}),
                             {"content": "You picked blue"}]
@@ -606,7 +616,7 @@ async def test_direct_path_question_parks_then_answer_resumes(direct, monkeypatc
 
 
 async def test_direct_path_answer_wait_escalates(direct, monkeypatch):
-    monkeypatch.setattr("app.host.worker.HARNESS_QUESTION_TIMEOUT_S", 1)
+    short_questions(monkeypatch, direct)
     direct.upstream.responses = [tool_call("call_q", "question", {"text": "Still there?"}),
                                  {"content": "never"}]
     t0 = time.monotonic()
@@ -635,8 +645,8 @@ async def test_temporal_worker_exit_is_503_not_the_direct_path(h, monkeypatch):
     monkeypatch.setattr(chat, "TEMPORAL_READY_WAIT_S", 0.3)
     await h.start()
     assert temporal.configured() and temporal.ready()
-    worker, task = temporal._worker, temporal._worker_task
-    temporal._worker_exited(task)                 # as if the worker died
+    worker, task = temporal.runtime.worker, temporal.runtime.worker_task
+    temporal.runtime.worker_exited(task)                 # as if the worker died
     try:
         assert temporal.configured() and not temporal.ready()
         raw, hd = h._headers({"session_id": h.session_id, "message": "hi"})
@@ -654,7 +664,7 @@ async def test_temporal_worker_exit_is_503_not_the_direct_path(h, monkeypatch):
 
 
 async def test_direct_answer_to_another_question_while_parked_is_refused(direct, monkeypatch):
-    monkeypatch.setattr("app.host.worker.HARNESS_QUESTION_TIMEOUT_S", 1)
+    short_questions(monkeypatch, direct)
     direct.upstream.responses = [tool_call("call_q", "question", {"text": "Which?"}),
                                  {"content": "ok"}]
     first = asyncio.ensure_future(direct.chat(message="ask", input_id="in_dq4"))
@@ -674,7 +684,7 @@ async def test_direct_redelivery_while_parked_on_a_question_does_not_wake(direct
     """A redelivered input (act() again) or any control but the answer and
     the abort is held without a wake: a woken guest would not park again
     and the answer wait would be lost."""
-    monkeypatch.setattr("app.host.worker.HARNESS_QUESTION_TIMEOUT_S", 1)
+    short_questions(monkeypatch, direct)
     direct.upstream.responses = [tool_call("call_q", "question", {"text": "Which?"}),
                                  {"content": "ok"}]
     first = asyncio.ensure_future(direct.chat(message="ask", input_id="in_dq5"))
@@ -696,7 +706,7 @@ async def test_direct_parked_sessions_do_not_hold_the_global_slots(tmp_path, use
     """The Workers' admission caps running tasks at 5; a task parked on a
     question (up to answer_wait_s, here an hour) gives its slot back, so
     six parked sessions never block a seventh session's chat."""
-    monkeypatch.setattr("app.host.worker.HARNESS_QUESTION_TIMEOUT_S", 1)
+    short_questions(monkeypatch)
     d = Harness(None, tmp_path, upstream, monkeypatch, answer_wait_s=3600)
     assert d.workers.admission.max_concurrent == 5
     n = 6
@@ -732,7 +742,7 @@ async def _cap_of_one(d, monkeypatch, workflow: bool) -> None:
     """max_concurrent 1: a task parked on a question holds no slot (another
     session's task runs), a running task does (the next one waits for it:
     it asks the model only after the first task settled)."""
-    monkeypatch.setattr("app.host.worker.HARNESS_QUESTION_TIMEOUT_S", 1)
+    short_questions(monkeypatch, d)
     assert d.workers.admission.max_concurrent == 1
     sa, sb, sc, sd = (f"{d.session_id}-{x}" for x in "abcd")
     d.upstream.responses = [tool_call("call_q", "question", {"text": "Which?"}),
@@ -954,7 +964,7 @@ async def test_tenant_wall_clock_on_the_workflow_path(tenv, tmp_path, users_root
     safety net past it: the task's wall clock + WALL_CLOCK_GRACE_S +
     max_queue_wait_s (HARNESS_MAX_QUEUE_WAIT_S), the same for both."""
     from flows.activities import WALL_CLOCK_GRACE_S
-    monkeypatch.setattr("app.host.worker.HARNESS_MAX_QUEUE_WAIT_S", 700)
+    monkeypatch.setattr("app.host.hello.HARNESS_MAX_QUEUE_WAIT_S", 700)
     d = Harness(tenv, tmp_path, upstream, monkeypatch, wall_clock_s=tenant_wall)
     acts, seen = d.acts, []
 
@@ -997,7 +1007,7 @@ async def test_run_task_retry_in_a_new_process_resumes_the_run(h, tmp_path, monk
     @activity.defn(name="run_task")
     async def dying_run_task(inp: RunTask) -> RunResult:
         if activity.info().attempt == 1:
-            w = acts.worker(inp.session)
+            w = await acts.worker(inp.session)
             w.start_task({"input_id": inp.input_id, "text": inp.text, "kind": inp.kind,
                           "driver": WORKFLOW})
             await wait_until(lambda: marker.exists() and any(
@@ -1043,7 +1053,7 @@ async def _park_then_restart(tmp_path, upstream, monkeypatch, answer_wait_s, inp
     its guest is killed) and starts again: the parked question is restored
     at startup (load_question_parks). (harness, the new Worker, question_id,
     the park's monotonic time)"""
-    monkeypatch.setattr("app.host.worker.HARNESS_QUESTION_TIMEOUT_S", 1)
+    short_questions(monkeypatch)
     d = Harness(None, tmp_path, upstream, monkeypatch, answer_wait_s=answer_wait_s)
     upstream.responses = [tool_call("call_q", "question", {"text": "Which colour?",
                                                           "options": ["red", "blue"]}),
@@ -1059,7 +1069,7 @@ async def _park_then_restart(tmp_path, upstream, monkeypatch, answer_wait_s, inp
     info = json.loads(w1.parked_file.read_text())
     assert info["question"] == {"input_id": input_id, "question_id": qid}
     assert info["driver"] == "direct" and info["answer_wait_s"] == answer_wait_s
-    [w2] = d.workers.load_question_parks(d.tenants.all_tenants(), d.registry)
+    [w2] = await d.workers.load_question_parks(d.tenants.all_tenants(), d.registry)
     assert w2.vm_state == "parked" and w2.question_park == {"input_id": input_id,
                                                             "question_id": qid}
     assert 0 < w2.answer_left_s() <= answer_wait_s

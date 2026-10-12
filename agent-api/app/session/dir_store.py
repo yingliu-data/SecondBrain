@@ -96,24 +96,37 @@ class DirStore:
         shutil.rmtree(session.root)
         return True
 
-    def list_for_tenant(self, user: str, tenant: str) -> list[dict[str, Any]]:
+    def list_for_tenant(self, user: str, tenant: str, *,
+                        require: str | None = None) -> list[dict[str, Any]]:
         """Sessions belonging to one tenant of one user (session.json's
         tenant, compared exactly), newest first:
-        {session_id, tenant, updated_at, state, title, root}."""
-        return self._scan(user, tenant=tenant)
+        {session_id, tenant, updated_at, state, title, root}. Only
+        directories named for that tenant (`{tenant}.` or legacy
+        `{tenant}_`) have their session.json read; with `require` (a path
+        relative to the session directory, e.g. "vm/parked.json") only
+        those that also hold it. Blocking I/O: call it off the loop."""
+        return self._scan(user, tenant=tenant, require=require)
 
     def list_for_user(self, user: str) -> list[dict[str, Any]]:
         """All sessions across a user's tenants, newest first."""
         return self._scan(user, tenant=None)
 
-    def _scan(self, user: str, *, tenant: str | None) -> list[dict[str, Any]]:
+    def _scan(self, user: str, *, tenant: str | None,
+              require: str | None = None) -> list[dict[str, Any]]:
         if not is_safe_id(user):
             return []
         user_dir = self.root / user
         if not user_dir.is_dir():
             return []
+        # a cheap name filter before any session.json is read; the identity
+        # below still decides (a legacy `{tenant}_` prefix is ambiguous)
+        prefixes = (f"{tenant}.", f"{tenant}_") if tenant is not None else None
         found: dict[tuple, dict[str, Any]] = {}
         for entry in sorted(user_dir.iterdir()):
+            if prefixes is not None and not entry.name.startswith(prefixes):
+                continue
+            if require is not None and not (entry / require).exists():
+                continue
             if not entry.is_dir():
                 continue
             ident = read_identity(entry)

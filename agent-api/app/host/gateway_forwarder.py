@@ -64,6 +64,7 @@ from protocol.mcp import CALL_HEADER, REATTACH_HEADER
 
 from app.config import INTERNAL_TOKEN, MCP_GATEWAY_CALL_TIMEOUT_S
 from app.gateway.client import auth_headers, identity_headers
+from app.host.http_clients import shared_client
 from app.host.uds_http import UDSHandler, UDSService, error_body
 
 logger = logging.getLogger("host.gateway_forwarder")
@@ -155,8 +156,8 @@ class GatewayRelay:
         self.upstream_url = gateway_url.rstrip("/")
         self.host_event = host_event
         self.stamp = {**identity_headers(user, tenant, session), **auth_headers(token)}
-        self.client = httpx.Client(base_url=self.upstream_url,
-                                   timeout=httpx.Timeout(timeout_s, connect=10.0))
+        # the process's client for the gateway (http_clients), shared by every relay
+        self.client = shared_client(self.upstream_url, httpx.Timeout(timeout_s, connect=10.0))
         self._lock = threading.Lock()
         self._calls: dict[object, HeldCall] = {}
 
@@ -217,7 +218,9 @@ class GatewayRelay:
                 logger.warning("gateway event failed: %s", e)
 
     def close(self) -> None:
-        self.client.close()
+        """Forget the held calls (the shared client stays open)."""
+        with self._lock:
+            self._calls.clear()
 
 
 def _peer_gone(conn: socket.socket) -> bool:

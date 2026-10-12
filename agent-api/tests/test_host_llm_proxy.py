@@ -190,3 +190,31 @@ def test_zero_budget_is_unlimited(proxy):
     for _ in range(3):
         assert client.post("/v1/chat/completions", json={"model": "m", "messages": []}).status_code == 200
     assert p.tokens_used > 0 and not p.budget_exhausted()
+
+
+def test_proxies_of_one_upstream_share_one_client_that_outlives_them(tmp_path):
+    """One httpx.Client per upstream per process (http_clients): two
+    sessions' proxies share it, and stopping one leaves it open for the other."""
+    from app.host.gateway_forwarder import GatewayRelay
+    upstream = FakeUpstreamLLM([{"content": "a"}, {"content": "b"}]).start()
+    a, b = Endpoints(tmp_path / "a", [5010]), Endpoints(tmp_path / "b", [5010])
+    pa = LLMProxy(a.listener(5010), upstream.url, timeout_s=5).start()
+    pb = LLMProxy(b.listener(5010), upstream.url, timeout_s=5).start()
+    try:
+        assert pa.client is pb.client
+        pa.stop()
+        assert not pb.client.is_closed
+        with httpx.Client(transport=httpx.HTTPTransport(uds=str(b.path(5010))),
+                          base_url="http://llm") as client:
+            r = client.post("/v1/chat/completions", json={"model": "m", "messages": []})
+            assert r.status_code == 200
+        r1 = GatewayRelay("http://127.0.0.1:9", user="u", tenant="t", session="s1")
+        r2 = GatewayRelay("http://127.0.0.1:9", user="u", tenant="t", session="s2")
+        assert r1.client is r2.client and r1.client is not pb.client
+        r1.close()
+        assert not r2.client.is_closed
+    finally:
+        pb.stop()
+        a.close()
+        b.close()
+        upstream.stop()

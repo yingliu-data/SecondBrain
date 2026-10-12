@@ -1,0 +1,214 @@
+"""durable — group-commit appends for the host's logs (docs/HOST.md).
+
+Every durable line the host writes on the event loop's behalf (a guest
+event accepted by StateSync, a host-log record) goes through one
+process-wide GroupWriter instead of open + write + fsync + close on the
+loop. A writer thread drains whatever is queued, writes each file's
+records with one write and one fsync on a file descriptor it keeps open,
+then resolves each record's future. A future resolves only after its
+bytes were fsynced: StateSync acks a guest event only then.
+
+  writer()                          the process's GroupWriter (started lazily)
+  GroupWriter(shards=4, max_open=64, fsync=os.fsync)
+    .append(path, data, group=None) -> concurrent.futures.Future
+                                    the file's inode once fsynced; the OSError
+                                    otherwise.
+                                    Records of one path are written in the
+                                    order appended (one path, one shard).
+    .reset(group)                   clear a failed group (below)
+    .flush(timeout=None)            wait for everything appended so far
+
+Shards: `shards` writer threads, a path's shard fixed by its directory, so
+the fsyncs of different sessions run side by side and one session's
+records stay in order.
+
+Failure: a batch whose write or fsync fails is cut back to the size the
+file had before it (no torn line stays behind) and its futures get the
+error. With `group` (StateSync passes itself), the failure also poisons
+the group: every later record of that group fails at once, whatever its
+path, until reset(group); a log with a hole in its seqs is never written.
+
+Descriptors: kept open per path, at most `max_open` per shard (least
+recently used closed first). Before a batch the path is stat()ed: replaced
+by another file (a run directory swapped in) -> reopened; gone (the
+session deleted) -> the batch goes to the old, unlinked file and is lost,
+as a write to a deleted session should be; never opened -> created.
+"""
+from __future__ import annotations
+
+import concurrent.futures
+import logging
+import os
+import queue
+import threading
+import weakref
+from collections import OrderedDict
+
+logger = logging.getLogger("host.durable")
+
+_FLAGS = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_CLOEXEC", 0)
+
+
+class PoisonedError(OSError):
+    """An earlier record of the same group failed: this one is not written."""
+
+
+class _Shard:
+    def __init__(self, name: str, max_open: int, poisoned, poison_lock: threading.Lock,
+                 fsync=os.fsync):
+        self.name = name
+        self._fsync = fsync
+        self.max_open = max(1, int(max_open))
+        self._q: queue.SimpleQueue = queue.SimpleQueue()
+        self._fds: OrderedDict[str, tuple[int, int]] = OrderedDict()   # path -> (fd, inode)
+        self._poisoned = poisoned
+        self._poison_lock = poison_lock
+        self._thread: threading.Thread | None = None
+        self._start_lock = threading.Lock()
+
+    def submit(self, path: str, data: bytes, group) -> concurrent.futures.Future:
+        fut: concurrent.futures.Future = concurrent.futures.Future()
+        if self._thread is None:
+            with self._start_lock:
+                if self._thread is None:
+                    self._thread = threading.Thread(target=self._run, daemon=True,
+                                                    name=self.name)
+                    self._thread.start()
+        self._q.put((path, data, group, fut))
+        return fut
+
+    # ------------------------------------------------------------ the thread
+    def _run(self) -> None:
+        while True:
+            items = [self._q.get()]
+            while True:
+                try:
+                    items.append(self._q.get_nowait())
+                except queue.Empty:
+                    break
+            by_path: dict[str, list] = {}
+            for item in items:
+                by_path.setdefault(item[0], []).append(item)
+            for path, recs in by_path.items():
+                self._commit(path, recs)
+
+    def _commit(self, path: str, recs: list) -> None:
+        live = []
+        for rec in recs:
+            group = rec[2]
+            if group is not None and self._is_poisoned(group):
+                rec[3].set_exception(PoisonedError(f"{path}: an earlier write of its log failed"))
+            else:
+                live.append(rec)
+        if not live:
+            return
+        fd = None
+        size = None
+        try:
+            fd = self._fd(path)
+            size = os.fstat(fd).st_size
+            buf = memoryview(b"".join(r[1] for r in live))
+            while buf:
+                n = os.write(fd, buf)
+                buf = buf[n:]
+            self._fsync(fd)
+        except OSError as e:
+            logger.error("durable append to %s failed: %s", path, e)
+            if fd is not None and size is not None:
+                try:
+                    os.ftruncate(fd, size)
+                    os.fsync(fd)
+                except OSError:
+                    pass
+            self._close(path)
+            for rec in live:
+                if rec[2] is not None:
+                    self._poison(rec[2], e)
+                rec[3].set_exception(e)
+            return
+        ino = self._fds[path][1]
+        for rec in live:
+            rec[3].set_result(ino)
+
+    def _fd(self, path: str) -> int:
+        cached = self._fds.get(path)
+        if cached is not None:
+            fd, ino = cached
+            try:
+                now = os.stat(path).st_ino
+            except FileNotFoundError:
+                now = ino                   # deleted: the old inode takes it (lost)
+            if now == ino:
+                self._fds.move_to_end(path)
+                return fd
+            self._close(path)               # replaced by another file: reopen
+        fd = os.open(path, _FLAGS, 0o644)
+        self._fds[path] = (fd, os.fstat(fd).st_ino)
+        while len(self._fds) > self.max_open:
+            old, (ofd, _) = self._fds.popitem(last=False)
+            _close_fd(ofd)
+        return fd
+
+    def _close(self, path: str) -> None:
+        cached = self._fds.pop(path, None)
+        if cached is not None:
+            _close_fd(cached[0])
+
+    def _is_poisoned(self, group) -> bool:
+        with self._poison_lock:
+            return group in self._poisoned
+
+    def _poison(self, group, error: OSError) -> None:
+        with self._poison_lock:
+            self._poisoned[group] = error
+
+
+def _close_fd(fd: int) -> None:
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+
+
+class GroupWriter:
+    def __init__(self, shards: int = 4, max_open: int = 64, *, fsync=os.fsync) -> None:
+        # group -> its error (weak: a dropped StateSync takes its entry along)
+        self._poisoned: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+        self._poison_lock = threading.Lock()
+        self._shards = [_Shard(f"durable-{i}", max_open, self._poisoned, self._poison_lock,
+                               fsync) for i in range(max(1, int(shards)))]
+        self._last: dict[int, concurrent.futures.Future] = {}
+
+    def append(self, path, data: bytes, group=None) -> concurrent.futures.Future:
+        path = os.fspath(path)
+        i = hash(os.path.dirname(path)) % len(self._shards)
+        fut = self._shards[i].submit(path, data, group)
+        self._last[i] = fut
+        return fut
+
+    def reset(self, group) -> None:
+        with self._poison_lock:
+            self._poisoned.pop(group, None)
+
+    def poisoned(self, group) -> OSError | None:
+        with self._poison_lock:
+            return self._poisoned.get(group)
+
+    def flush(self, timeout: float | None = None) -> None:
+        """Wait for every record appended so far (errors are the callers')."""
+        concurrent.futures.wait(list(self._last.values()), timeout=timeout)
+
+
+_writer: GroupWriter | None = None
+_writer_lock = threading.Lock()
+
+
+def writer() -> GroupWriter:
+    """The process-wide GroupWriter."""
+    global _writer
+    if _writer is None:
+        with _writer_lock:
+            if _writer is None:
+                _writer = GroupWriter()
+    return _writer
+

@@ -30,6 +30,14 @@ Public functions (agent-api reuses them):
                                              event log (+ the guest's events.before-resume-N
                                              buffers)
   summarize(state) -> dict                   the replay summary of a folded State
+  SessionIndex                               what holds across runs: seen_input_ids,
+                                             settles (input_id -> settle body);
+                                             .add_events(events) .add_state(state)
+                                             .scan_run(run_dir) .settled(input_id)
+  session_index(path, runs=None)             a SessionIndex of the session's runs (all,
+                                             or the run numbers given), scanned cheaply:
+                                             only `input` and `settle` lines are parsed,
+                                             nothing is folded
 
 Per run, verify does validate_log + fold + every checkpoint (hash and prev_hash
 chain) via fold.replay, and reads every line (an unreadable line is a problem
@@ -239,6 +247,65 @@ def iter_runs(path, *, newest_first: bool = False,
 def load_session(path) -> list[list[dict]]:
     """Every run of iter_runs(path), oldest first."""
     return list(iter_runs(path))
+
+
+# ---------------------------------------------------------------- across runs
+class SessionIndex:
+    """What must hold across a session's runs (each run is its own fold):
+    every input_id seen (any dedupe) and each task's settle body. Built
+    from folded States (add_state, the State's own indexes) or by a cheap
+    scan of a run's events (add_events / scan_run: only `input` and
+    `settle` events count, nothing is folded or checked)."""
+
+    def __init__(self) -> None:
+        self.seen_input_ids: set[str] = set()
+        self.settles: dict[str, dict] = {}
+
+    def add_events(self, events) -> "SessionIndex":
+        for ev in events:
+            etype, body = ev.get("type"), ev.get("body")
+            if not isinstance(body, dict):
+                continue
+            if etype == "input" and isinstance(body.get("input_id"), str):
+                self.seen_input_ids.add(body["input_id"])
+            elif etype == "settle" and isinstance(body.get("input_id"), str):
+                self.settles[body["input_id"]] = body
+        return self
+
+    def add_state(self, state: State) -> "SessionIndex":
+        self.seen_input_ids |= state.seen_input_ids
+        self.settles.update(state.settles_by_input)
+        return self
+
+    def scan_run(self, run_dir) -> "SessionIndex":
+        """Add one run directory's inputs and settles. A line is parsed only
+        when it can be one (it holds `"input"` or `"settle"`); a line that
+        is not JSON raises ReplayError, as iter_segment does."""
+        for path in segments(run_dir):
+            with Path(path).open("rb") as fh:
+                for lineno, line in enumerate(fh, 1):
+                    if b'"input"' not in line and b'"settle"' not in line:
+                        continue
+                    try:
+                        ev = json.loads(line)
+                    except ValueError as exc:
+                        raise ReplayError(f"{path}:{lineno}: line is not JSON ({exc})") from None
+                    if isinstance(ev, dict):
+                        self.add_events((ev,))
+        return self
+
+    def settled(self, input_id: str) -> dict | None:
+        return self.settles.get(input_id)
+
+
+def session_index(path, runs=None) -> SessionIndex:
+    """A SessionIndex of the session at `path` (a session dir or its events/
+    dir): every run, or only the run numbers in `runs`. Cheap: no fold."""
+    events_dir = _events_dir(Path(path))
+    index = SessionIndex()
+    for n in run_numbers(events_dir) if runs is None else runs:
+        index.scan_run(events_dir / run_name(n))
+    return index
 
 
 # ---------------------------------------------------------------- checks

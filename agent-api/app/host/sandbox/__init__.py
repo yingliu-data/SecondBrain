@@ -17,6 +17,8 @@ harness/ on sys.path.
 """
 from __future__ import annotations
 
+import time
+
 from abc import ABC, abstractmethod
 from pathlib import Path
 
@@ -50,6 +52,17 @@ class Sandbox(ABC):
 
     @abstractmethod
     def is_alive(self) -> bool: ...
+
+    def wait_exit(self, timeout: float) -> bool:
+        """Block until the guest is not alive (True) or `timeout` passed
+        (False). The default polls is_alive(); backends with a process
+        wait on it."""
+        deadline = time.monotonic() + timeout
+        while self.is_alive():
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.01)
+        return True
 
     # --- snapshots ------------------------------------------------------------
     # Default implementations: no snapshots (restore raises SandboxError, so

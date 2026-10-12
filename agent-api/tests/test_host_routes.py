@@ -16,7 +16,7 @@ from app.session.dir_store import DirStore
 from app.tenants import TenantRegistry
 from app.host.sides import DEVICE_CALLS
 from app.host.worker import Workers
-from host_fakes import FakeRegistry, FakeSandbox, users_root  # noqa: F401
+from host_fakes import FakeRegistry, FakeSandbox, users_root, worker_kwargs  # noqa: F401
 
 
 def _headers(key, body: dict):
@@ -41,8 +41,8 @@ def client(tmp_path, users_root, monkeypatch):
               {"text": "one event"}]
     store = DirStore(tmp_path / "sessions")
     monkeypatch.setattr(chat, "sessions", store)
-    workers = Workers(sandbox_factory=lambda: FakeSandbox(script), sessions=store, hello_timeout_s=5,
-                      wall_clock_s=15)
+    workers = Workers(sandbox_factory=lambda: FakeSandbox(script), sessions=store,
+                      **worker_kwargs(hello_timeout_s=5, wall_clock_s=15))
     monkeypatch.setattr(chat, "workers", workers)
     chat.set_registry(FakeRegistry())
     monkeypatch.setattr(chat, "HARNESS_KEEPALIVE_S", 0.2)

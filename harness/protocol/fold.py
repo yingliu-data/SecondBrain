@@ -4,6 +4,7 @@ Public contract (other modules import these names):
   class FoldError(ValueError)              .seq = the offending seq; str() = "seq N: ..."
   class State                              dataclass; to_canonical() -> plain dict
   apply(state, event) -> State             one step of the fold, in place
+  apply_valid(state, event) -> State       the same for an event already validated
   fold(events, upto_seq=None, *, state=None) -> State
                                            applies events in seq order; with `state`
                                            resumes from a kept State (seq <= last_seq
@@ -18,6 +19,15 @@ Public contract (other modules import these names):
   replay(events) -> (State, list[str])     validate_log + verify_checkpoints + fold
   turn_inputs(events, turn_id)             the chat messages that turn saw
   PLACEHOLDER                              content of a placeholder tool message
+  TASK_INPUT_KINDS                         input kinds that start a task when none runs
+
+Index fields (State, never hashed, never compared; derived from the events
+like the rest, so a fold of the same log rebuilds them): `call_args`
+(call_id -> the tool_call's args), `question_text` (question_id -> {text,
+options}), `settles_by_input` (input_id -> the settle body), `open_input`
+(the input_id of the task that has no settle yet: the first new
+task/follow_up/steer input after a settle or the run's start; None between
+tasks). The host reads them instead of re-deriving them from the log.
 
 Purity: this module never reads the clock, the environment, randomness or a
 file, and never calls the LLM, a tool or the gateway. `ts` is data; it is never
@@ -48,7 +58,8 @@ origin = range[0], the position of the range it replaces.
 from __future__ import annotations
 
 import bisect
-from dataclasses import asdict, dataclass, field
+import copy
+from dataclasses import dataclass, field, fields
 
 from protocol.allowlist import is_allowed
 from protocol.canonical import hash_value, is_int
@@ -57,6 +68,8 @@ from protocol.events import (
 )
 
 PLACEHOLDER = "[pending]"
+# the input kinds that start a task when none runs (guest.coordinator.INPUT_KINDS)
+TASK_INPUT_KINDS = ("task", "follow_up", "steer")
 
 
 class FoldError(ValueError):
@@ -68,8 +81,9 @@ class FoldError(ValueError):
         self.message = message
 
 
-# index fields: derived from the hashed fields, never emitted, never compared
-_INDEX_FIELDS = ("_unresolved", "_checkpoint_seqs")
+# index fields: derived from the events, never emitted, never hashed, never compared
+_INDEX_FIELDS = ("_unresolved", "_checkpoint_seqs", "call_args", "question_text",
+                 "settles_by_input", "open_input")
 
 
 @dataclass
@@ -110,12 +124,17 @@ class State:
     # indexes (not hashed): calls without a result; seqs of checkpoint events
     _unresolved: set = field(default_factory=set, repr=False, compare=False)
     _checkpoint_seqs: set = field(default_factory=set, repr=False, compare=False)
+    # host indexes (not hashed; see the module docstring)
+    call_args: dict = field(default_factory=dict, repr=False, compare=False)
+    question_text: dict = field(default_factory=dict, repr=False, compare=False)
+    settles_by_input: dict = field(default_factory=dict, repr=False, compare=False)
+    open_input: str | None = field(default=None, repr=False, compare=False)
 
     def to_canonical(self) -> dict:
-        """A plain dict (sets as sorted lists) hashable with canonical.hash_value."""
-        out = asdict(self)
-        for name in _INDEX_FIELDS:
-            out.pop(name)
+        """A plain dict (sets as sorted lists) hashable with canonical.hash_value.
+        The index fields are left out (and never copied)."""
+        out = {f.name: copy.deepcopy(getattr(self, f.name))
+               for f in fields(self) if f.name not in _INDEX_FIELDS}
         committed = out.pop("committed")
         out["committed_prefix"] = [it["message"] for it in committed]
         out["prefix_origins"] = [it["origin"] for it in committed]
@@ -195,6 +214,8 @@ def _input(state: State, event: dict) -> None:
     if input_id in state.seen_input_ids:
         raise FoldError(seq, f"input_id {input_id!r} seen before but dedupe is 'new'")
     state.seen_input_ids.add(input_id)
+    if state.open_input is None and kind in TASK_INPUT_KINDS:
+        state.open_input = input_id
 
     if kind == "ui_response":
         qid = body.get("question_id")
@@ -296,6 +317,7 @@ def _tool_call(state: State, event: dict) -> None:
     state.open_calls[call_id] = {
         "name": name, "side": side, "turn_id": turn_id, "state": body["state"], "seq": seq,
     }
+    state.call_args[call_id] = body["args"]
     state._unresolved.add(call_id)
     state.limits_consumed["ops"] += 1
 
@@ -371,6 +393,7 @@ def _question(state: State, event: dict) -> None:
     state.open_questions[qid] = {
         "deadline": body["deadline"], "call_id": body["call_id"], "answered": False, "seq": seq,
     }
+    state.question_text[qid] = {"text": body["text"], "options": body["options"]}
 
 
 def _parked(state: State, event: dict) -> None:
@@ -442,6 +465,8 @@ def _settle(state: State, event: dict) -> None:
     seq, body = event["seq"], event["body"]
     state.last_settle = {"seq": seq, "input_id": body["input_id"], "outcome": body["outcome"]}
     state.parked_at = None
+    state.settles_by_input[body["input_id"]] = body
+    state.open_input = None
 
 
 _HANDLERS = {
@@ -474,6 +499,13 @@ def apply(state: State, event: dict) -> State:
     if errors:
         seq = event.get("seq") if isinstance(event, dict) else None
         raise FoldError(seq if is_int(seq) else state.last_seq + 1, errors[0])
+    return apply_valid(state, event)
+
+
+def apply_valid(state: State, event: dict) -> State:
+    """apply() for an event the caller has already run through
+    validate_event (the host's StateSync validates once to refuse it with
+    the schema error): the same step without validating again."""
     seq, etype = event["seq"], event["type"]
     if seq != state.last_seq + 1:
         raise FoldError(seq, f"expected seq {state.last_seq + 1} (gapless from 1)")

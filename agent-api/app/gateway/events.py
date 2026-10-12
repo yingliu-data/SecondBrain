@@ -44,7 +44,7 @@ def record_gateway_event(payload: dict, *, sessions) -> bool:
                     user, tenant, session_id, payload.get("op"))
         return False
     body = {k: v for k, v in payload.items() if k not in IDENTITY}
-    host_log(session_dir / "events").append(session_id, "gateway", body)
+    host_log(session_dir / "events").append_durable(session_id, "gateway", body)
     return True
 
 

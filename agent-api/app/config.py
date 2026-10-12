@@ -117,6 +117,11 @@ HARNESS_SPILL_THRESHOLD = int(os.environ.get("HARNESS_SPILL_THRESHOLD", DEFAULT_
 # (one long-lived guest per session, one log run); the idle timer parks it.
 # Snapshots, park and resume
 HARNESS_SESSION_IDLE_S = float(os.environ.get("HARNESS_SESSION_IDLE_S", 1800))  # idle -> park + snapshot + destroy
+# An idle Worker (no task, VM none or parked, no adopted device call, no
+# question park, no attached stream) is dropped from memory after this long
+# (its threads and folded state released); the next request rebuilds it from
+# disk. 0 = never.
+HARNESS_WORKER_EVICT_S = float(os.environ.get("HARNESS_WORKER_EVICT_S", 300))
 HARNESS_PARK_GRACE_S = float(os.environ.get("HARNESS_PARK_GRACE_S", DEFAULT_LIMITS["park_grace_s"]))  # hello limit park_grace_s
 HARNESS_PARK_TIMEOUT_S = float(os.environ.get("HARNESS_PARK_TIMEOUT_S", 60))    # park sent -> acked `parked` (> park_grace_s)
 HARNESS_MAX_RESUMES = int(os.environ.get("HARNESS_MAX_RESUMES", 1))             # death resumes per task

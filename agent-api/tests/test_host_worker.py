@@ -60,10 +60,12 @@ async def test_text_answer_streams_legacy_tokens_and_stores_the_log(session):
                                       {"role": "assistant", "content": "Hello there world"}]
     kinds = [h["body"].get("kind") or h["body"]["op"]
              for h in w.sync.read_host() if h["type"] in ("vm", "workflow")]
-    assert kinds == ["task_signal", "boot", "completed", "destroy"]
+    # the guest exits right after settle's ack: stopped by the task's end
+    # (destroy) when it was already gone then, else seen exiting (link down)
+    assert kinds[:3] == ["task_signal", "boot", "completed"] and kinds[3:] in ([], ["destroy"])
     boot = next(h["body"] for h in w.sync.read_host() if h["type"] == "vm")
     assert boot["source"] == "rootfs" and boot["ms"] >= 0 and boot["resume"] is False
-    assert not sandbox.is_alive()
+    assert sandbox.wait_exit(5)
     await w.close()
 
 
@@ -247,7 +249,7 @@ async def test_workers_registry_and_prompt_stripping(session):
 # ---------------------------------------------------------------- hello keys, streaming
 @pytest.mark.asyncio
 async def test_hello_carries_the_m2_stream_and_limit_keys(session, monkeypatch):
-    import app.host.worker as worker_mod
+    import dataclasses
 
     sandbox = FakeSandbox([{"text": "x"}])
     w = Worker(session, FakeTenant(), FakeRegistry(), sandbox, device_calls=DeviceCalls(),
@@ -259,9 +261,8 @@ async def test_hello_carries_the_m2_stream_and_limit_keys(session, monkeypatch):
     assert "token_budget" not in limits                             # a proxy knob only
     assert limits["park_grace_s"] == 30
     # the env flip, the window, and the budget the proxy is built with
-    monkeypatch.setattr(worker_mod, "LLM_STREAM", False)
-    monkeypatch.setattr(worker_mod, "HARNESS_CONTEXT_WINDOW_TOKENS", 8192)
-    monkeypatch.setattr(worker_mod, "HARNESS_TOKEN_BUDGET", 1234)
+    w.settings = dataclasses.replace(w.settings, llm_stream=False, context_window_tokens=8192,
+                                     token_budget=1234)
     hello = w.build_hello()
     assert hello["config"]["params"]["stream"] is False
     assert hello["config"]["limits"]["context_window_tokens"] == 8192
@@ -321,7 +322,7 @@ async def test_the_tenant_wall_clock_is_the_task_s_on_the_direct_path(session, t
     sandbox = FakeSandbox([{"text": "ok"}])
     w = Worker(session, FakeTenant(wall_clock_s=tenant_wall), FakeRegistry(), sandbox,
                device_calls=DeviceCalls(), **worker_kwargs())
-    assert w.wall_clock_s == 10 and w.default_wall_clock_s() == tenant_wall
+    assert w.settings.wall_clock_s == 10 and w.default_wall_clock_s() == tenant_wall
     result = await w.act({"input_id": "in_w", "text": "hi"})
     assert result["outcome"] == "done"
     task = next(c for c in sandbox.guests[0].controls if c["type"] == "task")
@@ -337,9 +338,9 @@ async def test_the_tenant_wall_clock_is_the_task_s_on_the_direct_path(session, t
     (None, False, False), (None, True, True), (True, False, True), (False, True, False)])
 async def test_hello_async_tools_is_the_tenant_s_else_the_env_default(
         session, monkeypatch, tenant_value, env_default, expected):
-    monkeypatch.setattr("app.host.worker.HARNESS_ASYNC_TOOLS", env_default)
     w = Worker(session, FakeTenant(async_tools=tenant_value), FakeRegistry(),
-               FakeSandbox([{"text": "ok"}]), device_calls=DeviceCalls(), **worker_kwargs())
+               FakeSandbox([{"text": "ok"}]), device_calls=DeviceCalls(),
+               **worker_kwargs(async_tools=env_default))
     assert w.build_hello()["config"]["async_tools"] is expected
     await w.close()
 

@@ -68,7 +68,7 @@ async def _resume_question_parks():
     # Sessions parked on a question of the direct path before a restart:
     # their answer wait goes on (vm/parked.json holds its deadline).
     try:
-        chat.workers.load_question_parks(tenant_registry.all_tenants(), registry)
+        await chat.workers.load_question_parks(tenant_registry.all_tenants(), registry)
     except Exception:  # noqa: BLE001 - never block startup
         logging.getLogger("startup").exception("restoring question parks failed")
 

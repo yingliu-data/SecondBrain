@@ -137,7 +137,7 @@ async def _harness_turn(tenant: Tenant, session_id: str, message: str, input_id:
     answer (`answer_to`) does not queue behind the session: it goes to the
     running task as ui_response (a parked guest is restored first) and
     streams that task, as on the workflow path."""
-    worker = workers.get_or_create(tenant, session_id, _registry)
+    worker = await workers.open(tenant, session_id, _registry)
     session = worker.session
     set_current_context(session, tenant.user, tenant.name, session_id)
     if answer_to:
@@ -164,7 +164,7 @@ async def _workflow_turn(tenant: Tenant, session_id: str, message: str, input_id
     worker). The response streams the Worker's events for the task's
     input_id until `deliver` ends them; it is a projection only, a client
     disconnect never touches the task."""
-    worker = workers.get_or_create(tenant, session_id, _registry)
+    worker = await workers.open(tenant, session_id, _registry)
     set_current_context(worker.session, tenant.user, tenant.name, session_id)
     ref = session_ref(tenant.user, tenant.name, session_id)
 

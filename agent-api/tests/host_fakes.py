@@ -690,7 +690,19 @@ def session(tmp_path, users_root):
     return SessionDir.create(tmp_path / "u" / "t_s1", user_id="u", session_id="s1", tenant="t")
 
 
-def worker_kwargs(**over):
+def make_settings(**over):
+    """WorkerSettings for the tests: app.config's, short timeouts, `over`."""
+    from app.host.settings import WorkerSettings
     base = dict(hello_timeout_s=5, heartbeat_s=0.2, wall_clock_s=10)
     base.update(over)
-    return base
+    return WorkerSettings.from_config(**base)
+
+
+DEPENDENCIES = ("device_calls", "admission")
+
+
+def worker_kwargs(**over):
+    """Worker / Workers keyword arguments: the dependencies in `over` as
+    they are, every other key a WorkerSettings field (make_settings)."""
+    deps = {k: over.pop(k) for k in DEPENDENCIES if k in over}
+    return {"settings": make_settings(**over), **deps}

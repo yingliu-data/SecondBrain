@@ -21,7 +21,8 @@ from app.host.sides import DeviceCalls
 from app.host.stream import DONE
 from app.host.worker import Worker, Workers
 from app.session.dir_store import DirStore
-from host_fakes import FakeRegistry, FakeTenant, FakeUpstreamLLM, session, users_root  # noqa: F401
+from host_fakes import (FakeRegistry, FakeTenant, FakeUpstreamLLM, session,  # noqa: F401
+                        users_root, worker_kwargs)
 
 GUEST_ROOT = Path(__file__).resolve().parents[2] / "harness"
 DEVICE_RESULT = '[{"title": "Standup"}]'
@@ -42,8 +43,9 @@ def upstream():
 
 def make_worker(session, llm_url, dc):
     return Worker(session, FakeTenant(), FakeRegistry(), LocalSandbox(GUEST_ROOT),
-                  device_calls=dc, llm_url=llm_url, hello_timeout_s=20, heartbeat_s=1,
-                  wall_clock_s=60, park_grace_s=30, session_idle_s=None)
+                  device_calls=dc,
+                  **worker_kwargs(llm_url=llm_url, hello_timeout_s=20, heartbeat_s=1,
+                                  wall_clock_s=60, park_grace_s=30, session_idle_s=None))
 
 
 async def wait_until(pred, timeout=30.0, what=""):
@@ -83,8 +85,8 @@ def restarted_process(session, llm_url, dc: DeviceCalls, monkeypatch):
     from app.routes import chat, tool_result
     workers = Workers(sandbox_factory=lambda: LocalSandbox(GUEST_ROOT),
                       sessions=DirStore(session.root.parents[1]), device_calls=dc,
-                      llm_url=llm_url, hello_timeout_s=20, heartbeat_s=1, wall_clock_s=60,
-                      park_grace_s=30, session_idle_s=None)
+                      **worker_kwargs(llm_url=llm_url, hello_timeout_s=20, heartbeat_s=1,
+                                      wall_clock_s=60, park_grace_s=30, session_idle_s=None))
     monkeypatch.setattr(chat, "workers", workers)
     monkeypatch.setattr(chat, "_registry", FakeRegistry())
     monkeypatch.setattr(tool_result, "DEVICE_CALLS", dc)
