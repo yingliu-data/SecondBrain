@@ -139,7 +139,7 @@ class ParkMixin:
                      f"going idle anyway (it is resent on reconnect)", level="warning")
             self.transport.park()
         self._on_ack(self.transport.acked_seq)
-        self.log_writer.sync_acked()             # the ack marker is on disk before going idle
+        self.log_writer.sync_acked()             # the ack marker on disk (the link is idle already)
 
     def _unpark(self) -> None:
         self.parked = False

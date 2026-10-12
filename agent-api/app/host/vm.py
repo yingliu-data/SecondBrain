@@ -226,16 +226,19 @@ class VMLifecycle:
         stopped). Returns (op, source, t0) for _mark_running."""
         t0 = time.monotonic()
         self._drop_link()
+        if self.endpoints is not None:
+            # a fresh :5000 listener for this run (_open_guest_ports below): a
+            # connection the previous guest made before it was stopped (its
+            # reconnect after the link dropped), queued or accepted, is on the
+            # old listener and never taken for this run's link. No generation
+            # matches until then, so a stale `link up` the pump handles while
+            # the stop below runs is refused too
+            self.endpoints.close_port(self.ports["control"])
+            self._control_gen = -1
         if self.sandbox.is_alive():
             await asyncio.to_thread(self.sandbox.stop)
         self._guest_run += 1
         self.vm_state = "booting"
-        if self.endpoints is not None:
-            # a fresh :5000 listener for this run: a connection the previous
-            # guest made before it was stopped (its reconnect after the link
-            # dropped), queued or accepted, is on the old listener and never
-            # taken for this run's link
-            self.endpoints.close_port(self.ports["control"])
         self._open_guest_ports()
         op, source = "restore", "base" if snapshot_dir is None else "session"
         try:

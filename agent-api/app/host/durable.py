@@ -106,8 +106,9 @@ class _Shard:
             for path, recs in by_path.items():
                 try:
                     self._commit(path, recs)
-                except Exception as e:      # never let the shard's thread die
+                except Exception as exc:    # never let the shard's thread die
                     logger.exception("durable commit to %s failed", path)
+                    e = OSError(f"{type(exc).__name__}: {exc}")
                     for rec in recs:
                         if rec[2] is not None:
                             self._poison(rec[2], e)     # no later record makes a hole
@@ -135,7 +136,10 @@ class _Shard:
                 n = os.write(fd, buf)
                 buf = buf[n:]
             self._fsync(fd)
-        except OSError as e:
+        except Exception as exc:            # not only OSError: never a torn batch left behind
+            # an OSError for every waiter (poisoned() -> OSError, StateSync
+            # catches OSError), whatever went wrong
+            e = exc if isinstance(exc, OSError) else OSError(f"{type(exc).__name__}: {exc}")
             logger.error("durable append to %s failed: %s", path, e)
             if fd is not None and size is not None:
                 try:
@@ -181,7 +185,7 @@ class _Shard:
         with self._poison_lock:
             return group in self._poisoned
 
-    def _poison(self, group, error: Exception) -> None:
+    def _poison(self, group, error: OSError) -> None:
         with self._poison_lock:
             self._poisoned[group] = error
 

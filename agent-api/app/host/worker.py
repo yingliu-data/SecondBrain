@@ -1518,7 +1518,9 @@ class Workers:
             workers = [w for w in self._workers.values() if not w.closed]
             await asyncio.gather(*(w.shutdown_park(park_s) for w in workers),
                                  return_exceptions=True)
-        for key in list(self._workers):
-            await self.close(key)
+        # concurrently: each close waits (bounded) for its own log flush and
+        # accept thread; one after another, a stuck disk would cost N x that
+        await asyncio.gather(*(self.close(key) for key in list(self._workers)),
+                             return_exceptions=True)
         # the host-log records still queued (never waited for) reach the disk
         await asyncio.to_thread(durable_writer().flush, CLOSE_FLUSH_TIMEOUT_S)
