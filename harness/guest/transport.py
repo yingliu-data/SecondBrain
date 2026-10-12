@@ -32,7 +32,7 @@ as its floor (a resumed session's hello is not cseq 1); controls that
 arrive before the hello with a higher cseq are gaps and are never delivered.
 
 Idle-wait (the snapshot point): built with `idle=True`, the link thread
-tries to connect every `idle_poll_s` (IDLE_POLL_S, 50 ms), silently and
+tries to connect every `idle_poll_s` (IDLE_POLL_S, 5 ms), silently and
 without backoff, and stays in that loop until the host has sent a first line
 on a connection (any connect error, or a reset before that, e.g. the vsock
 reset a Firecracker snapshot causes, is retried the same way);
@@ -61,7 +61,10 @@ log = logging.getLogger("guest.transport")
 CONTROL_PORT = 5000
 BACKOFF_INITIAL_S = 0.1
 BACKOFF_MAX_S = 5.0
-IDLE_POLL_S = 0.05
+# 5 ms: after a restore the first connect waits half a poll on average (2.5 ms,
+# was 25 ms at 50 ms). Only an idle, not yet snapshotted VM pays for the
+# polling (a refused vsock connect is a few microseconds of guest CPU).
+IDLE_POLL_S = 0.005
 
 
 # ---------------------------------------------------------------- connectors

@@ -44,7 +44,6 @@ import random
 import socket
 import time
 from contextlib import contextmanager
-from unittest import mock
 
 PASS_REASON = "placeholder_pass"
 DECISIONS = ("allow", "deny", "ask")
@@ -112,7 +111,12 @@ def _label(owner, name: str) -> str:
 @contextmanager
 def purity_guard():
     """Inside the block, the FORBIDDEN entry points raise
-    ImpureHook(entry_point). Patches process-wide: tests only."""
+    ImpureHook(entry_point). Patches process-wide: tests only.
+    unittest.mock is imported here, not at module level: it costs ~40 ms
+    and only this test-time check needs it (the guest imports hooks via the
+    coordinator on every session)."""
+    from unittest import mock
+
     patches = []
     for owner, name in FORBIDDEN:
         label = _label(owner, name)

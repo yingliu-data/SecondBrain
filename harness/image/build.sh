@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # harness/image/build.sh -- build the guest VM image (harness/docs/IMAGE.md).
 #
-#   build.sh pyz        harness/guest + harness/protocol -> out/guest.pyz   (stdlib zipapp)
+#   build.sh pyz        harness/guest + harness/protocol -> out/guest.pyz   (stdlib zipapp
+#                       with precompiled .pyc: pyz_pack.py; measure_imports.py times it)
 #   build.sh rootfs     Dockerfile.rootfs -> docker export -> out/rootfs.ext4 (mkfs.ext4 -d)
 #   build.sh kernel     pinned Firecracker CI kernel -> out/vmlinux (sha256 verified)
 #   build.sh workspace  out/workspace-template.img (sparse ext4; HARNESS_WORKSPACE_TEMPLATE)
@@ -64,7 +65,7 @@ up_to_date() {  # up_to_date OUTPUT INPUT_PATH...  -> 0 if OUTPUT is newer than 
 # ---------------------------------------------------------------- pyz
 build_pyz() {
     local pyz="$OUT/guest.pyz"
-    if up_to_date "$pyz" "$HARNESS/guest" "$HARNESS/protocol" "$HERE/build.sh"; then
+    if up_to_date "$pyz" "$HARNESS/guest" "$HARNESS/protocol" "$HERE/build.sh" "$HERE/pyz_pack.py"; then
         log "guest.pyz up to date"; return 0
     fi
     need "$PYTHON"
@@ -87,8 +88,11 @@ if hasattr(_main_module, "main"):
 sys.stderr.write("guest.pyz: guest.main has no main() yet (stub build)\n")
 sys.exit(3)
 PY
-    "$PYTHON" -m zipapp "$stage" -o "$pyz.tmp" -p "/usr/bin/env python3" --compress
-    mv "$pyz.tmp" "$pyz"
+    # pyz_pack.py instead of `python -m zipapp`: sources plus legacy-layout .pyc
+    # (unchecked-hash, compiled by $PYTHON), sorted, fixed timestamps. The rootfs
+    # recompiles them with the guest's own python3 (Dockerfile.rootfs), so a
+    # build host on another 3.x only loses the bytecode in out/guest.pyz.
+    "$PYTHON" "$HERE/pyz_pack.py" pack "$stage" "$pyz"
     "$PYTHON" -c "import sys; sys.path.insert(0, '$pyz'); import guest, protocol, guest.main; print('guest.pyz imports ok')" >&2
     log "built $pyz ($(stat -c %s "$pyz") bytes)"
 }
@@ -153,7 +157,7 @@ rootfs_mkfs() {  # rootfs_mkfs TAR IMAGE   (extract + populate, no privileges)
 build_rootfs() {
     local img="$OUT/rootfs.ext4" tar="$BUILD/rootfs.tar"
     build_pyz
-    if up_to_date "$img" "$OUT/guest.pyz" "$HERE/Dockerfile.rootfs" "$HERE/harness-init" "$HERE/versions.env" "$HERE/build.sh"; then
+    if up_to_date "$img" "$OUT/guest.pyz" "$HERE/Dockerfile.rootfs" "$HERE/harness-init" "$HERE/versions.env" "$HERE/build.sh" "$HERE/pyz_pack.py"; then
         log "rootfs.ext4 up to date"; return 0
     fi
     need docker

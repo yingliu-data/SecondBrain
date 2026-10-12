@@ -5,6 +5,7 @@ the Outbox/Inbox resume_from."""
 from __future__ import annotations
 
 import ast
+import errno
 import hashlib
 import json
 import os
@@ -492,13 +493,60 @@ def test_mount_workspace_paths(tmp_path):
     def fail(argv, **kw):
         return subprocess.CompletedProcess(argv, 32, b"mount: wrong fs type")
 
+    def eperm(dev, target):
+        return errno.EPERM
+
     dev = tmp_path / "vdb"
-    assert mount_workspace(str(dev), str(tmp_path / "ws"), runner=ok) == "absent"
+    assert mount_workspace(str(dev), str(tmp_path / "ws"), runner=ok, syscall=eperm) == "absent"
     dev.write_bytes(b"")
-    assert mount_workspace(str(dev), str(tmp_path / "ws"), runner=ok) == "mounted"
+    # mount(2) refused -> falls back to mount(8)
+    assert mount_workspace(str(dev), str(tmp_path / "ws"), runner=ok, syscall=eperm) == "mounted"
     assert calls == [["mount", "-o", "noatime", str(dev), str(tmp_path / "ws")]]
-    assert mount_workspace(str(dev), str(tmp_path / "ws"), runner=fail) == "failed"
-    assert mount_workspace(str(dev), "/", runner=ok) == "already"
+    assert mount_workspace(str(dev), str(tmp_path / "ws"), runner=fail, syscall=eperm) == "failed"
+    assert mount_workspace(str(dev), "/", runner=ok, syscall=eperm) == "already"
+    # syscall=None: mount(8) only
+    calls.clear()
+    assert mount_workspace(str(dev), str(tmp_path / "ws"), runner=ok, syscall=None) == "mounted"
+    assert len(calls) == 1
+
+
+def test_mount_workspace_uses_mount_syscall_without_fork(tmp_path):
+    """The restore path mounts with mount(2) (ext4, MS_NOATIME): no mount(8)
+    process when the syscall succeeds."""
+    from guest.main import MS_NOATIME, WORKSPACE_FSTYPE
+    dev = tmp_path / "vdb"
+    dev.write_bytes(b"")
+    seen = []
+
+    def syscall(d, target):
+        seen.append((d, target))
+        return 0
+
+    def runner(argv, **kw):
+        raise AssertionError("mount(8) must not run when mount(2) worked")
+
+    ws = tmp_path / "ws"
+    assert mount_workspace(str(dev), str(ws), runner=runner, syscall=syscall) == "mounted"
+    assert seen == [(str(dev), str(ws))] and ws.is_dir()
+    assert MS_NOATIME == 1024 and WORKSPACE_FSTYPE == "ext4"
+
+    def broken(d, target):
+        raise AttributeError("no mount symbol")
+
+    assert mount_workspace(str(dev), str(ws), runner=lambda a, **k: subprocess.CompletedProcess(a, 0, b""),
+                           syscall=broken) == "mounted"
+
+
+def test_mount_syscall_reports_an_errno(tmp_path):
+    """The real libc mount(2) as non-root (or on a regular file) fails with
+    an errno instead of raising."""
+    from guest.main import mount_syscall
+    if os.geteuid() == 0:
+        pytest.skip("root could really mount")
+    dev = tmp_path / "vdb"
+    dev.write_bytes(b"")
+    (tmp_path / "ws").mkdir()
+    assert mount_syscall(str(dev), str(tmp_path / "ws")) in (errno.EPERM, errno.EACCES, errno.ENOTBLK)
 
 
 @pytest.mark.no_log_verify("synthetic clock-only buffers")

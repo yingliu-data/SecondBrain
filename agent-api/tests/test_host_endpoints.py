@@ -5,6 +5,7 @@ import os
 import socket
 import stat
 import threading
+import time
 
 import pytest
 
@@ -59,4 +60,93 @@ async def test_accept_control_and_channel_round_trip(tmp_path):
     item = await asyncio.wait_for(inbound.get(), 5)
     assert item[:2] == ("link", "down") and item[2] is ch
     assert ch.closed
+    ep.close()
+
+
+# ---------------------------------------------------- accept wait (restore path)
+
+
+def _accept_in_thread(ep, timeout):
+    out: dict = {}
+
+    def run():
+        t0 = time.monotonic()
+        out["conn"] = ep.accept_control(timeout=timeout)
+        out["s"] = time.monotonic() - t0
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    return t, out
+
+
+def _connect(tmp_path, port=5000):
+    c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    c.connect(str(socket_path(tmp_path, port)))
+    return c
+
+
+def test_reopen_wakes_a_parked_accept_at_once(tmp_path):
+    """While :5000 is closed accept_control waits on the Condition; reopen()
+    + the guest's connect is accepted at once, not after a polling sleep."""
+    ep = Endpoints(tmp_path, [5000])
+    ep.close_port(5000)
+    t, out = _accept_in_thread(ep, timeout=10)
+    time.sleep(0.1)
+    assert t.is_alive()                       # waiting, no listener
+    t0 = time.monotonic()
+    ep.reopen(5000)
+    c = _connect(tmp_path)
+    t.join(5)
+    assert out["conn"] is not None
+    assert time.monotonic() - t0 < 0.2        # was up to 0.5 s (sleep while closed)
+    out["conn"].close(); c.close(); ep.close()
+
+
+def test_close_port_during_accept_then_reopen(tmp_path):
+    """A close_port while accept polls the listener wakes it; it waits for
+    the reopened listener and accepts on it."""
+    ep = Endpoints(tmp_path, [5000])
+    t, out = _accept_in_thread(ep, timeout=10)
+    time.sleep(0.05)
+    ep.close_port(5000)
+    assert not socket_path(tmp_path, 5000).exists()
+    time.sleep(0.05)
+    assert t.is_alive()
+    ep.reopen(5000)
+    c = _connect(tmp_path)
+    t.join(5)
+    assert out["conn"] is not None and out["s"] < 5
+    out["conn"].close(); c.close(); ep.close()
+
+
+def test_closed_port_times_out_without_polling(tmp_path):
+    ep = Endpoints(tmp_path, [5000])
+    ep.close_port(5000)
+    t0 = time.monotonic()
+    assert ep.accept_control(timeout=0.2) is None
+    assert 0.15 <= time.monotonic() - t0 < 1.0
+    assert ep.accept_control(timeout=0) is None
+    ep.close()
+
+
+@pytest.mark.parametrize("parked", [True, False])
+def test_close_wakes_an_unbounded_accept(tmp_path, parked):
+    ep = Endpoints(tmp_path, [5000])
+    if parked:
+        ep.close_port(5000)
+    t, out = _accept_in_thread(ep, timeout=None)
+    time.sleep(0.05)
+    ep.close()
+    t.join(2)
+    assert not t.is_alive() and out["conn"] is None
+    assert ep.accept_control(timeout=None) is None   # after close: at once
+
+
+def test_reopen_is_a_noop_when_open_and_returns_the_listener(tmp_path):
+    ep = Endpoints(tmp_path, [5000, 5001])
+    lst = ep.listener(5001)
+    assert ep.reopen(5001) is lst
+    ep.close_port(5001)
+    new = ep.reopen(5001)
+    assert new is not lst and ep.listener(5001) is new
     ep.close()

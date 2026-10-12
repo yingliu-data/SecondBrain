@@ -1,3 +1,4 @@
 *
 !out/guest.pyz
 !harness-init
+!pyz_pack.py

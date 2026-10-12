@@ -10,7 +10,7 @@ The server runbooks are `docs/RUNBOOK-M1.md` (first boot) and
 
 | File | What | Built by |
 |---|---|---|
-| `guest.pyz` | `harness/guest` + `harness/protocol` as one stdlib zipapp; `python3 guest.pyz` runs `guest.main.main()` | `build.sh pyz` |
+| `guest.pyz` | `harness/guest` + `harness/protocol` as one stdlib zipapp with precompiled bytecode (see "guest.pyz bytecode"); `python3 guest.pyz` runs `guest.main.main()` | `build.sh pyz` (`pyz_pack.py`) |
 | `rootfs.ext4` | the read-only root filesystem (Debian bookworm-slim, Python 3.12, bash, git, coreutils, `/sbin/harness-init`, `/opt/harness/guest.pyz`); ~350 MiB | `build.sh rootfs` |
 | `vmlinux` | the pinned Firecracker CI kernel, uncompressed ELF, sha256-verified | `build.sh kernel` |
 | `workspace-template.img` | a 1 GiB sparse, empty ext4; `HARNESS_WORKSPACE_TEMPLATE`, the fallback when there is no `mkfs.ext4` (the agent-api image has it) | `build.sh workspace` |
@@ -34,7 +34,13 @@ Pins live in `harness/image/versions.env` (Firecracker `v1.17.0`, CI kernel
   `harness/tests/test_purity.py`). There is nothing to pip-install and no pip
   step; "updating Python packages" means bumping `ROOTFS_BASE_IMAGE` in
   `versions.env` for a newer 3.12.x and rebuilding.
-- `/opt/harness/guest.pyz` (mode 0755) and `/sbin/harness-init` (mode 0755).
+- `/opt/harness/guest.pyz` (mode 0755, its `.pyc` recompiled by the image's
+  own python3) and `/sbin/harness-init` (mode 0755).
+- Bytecode for the standard library (`compileall --invalidation-mode
+  unchecked-hash`, without test/idlelib/tkinter/ensurepip/lib2to3/pydoc_data;
+  about +17 MiB): the official python image ships no `.pyc`, and on the
+  read-only rootfs with `PYTHONDONTWRITEBYTECODE=1` every import would
+  otherwise compile from source.
 - `/workspace` (mount point for `/dev/vdb`), `/var/harness` (tmpfs at boot, the
   guest's event-log buffer), `/etc/hostname` = `harness`.
 - git configured system-wide: `user.name harness`, `safe.directory *`,
@@ -67,8 +73,10 @@ Firecracker appends `root=/dev/vda ro` for the drive marked `is_root_device`.
 5. Runs the guest as a child:
    `python3 /opt/harness/guest.pyz --connect vsock --idle-wait vsock --mount-workspace /dev/vdb --log-dir /var/harness --workspace /workspace`
    and waits. The guest sits in idle-wait (a silent connect to CID 2:5000
-   every 50 ms) until a host listener answers; that is the base-snapshot
-   point. A cold boot takes exactly the same path. After `parked` the guest
+   every 5 ms) until a host listener answers; that is the base-snapshot
+   point. Before it starts polling, the guest has imported every module a
+   session needs (`guest.main.preload()`), so they are in the snapshot's
+   memory. A cold boot takes exactly the same path. After `parked` the guest
    returns to idle-wait without exiting (PROTOCOL.md section 5), so init does not
    notice a park.
 6. On guest exit, or on SIGINT/SIGTERM (the host's `stop()`): TERM then KILL the
@@ -179,6 +187,34 @@ which the root-only guest does not mind). Hosts whose e2fsprogs is older than
 
 Image size is measured: tree size + 25 % + 64 MiB (`ROOTFS_MIB` in
 `versions.env` pins it instead).
+
+### guest.pyz bytecode
+
+`pyz_pack.py pack STAGE OUT` (called by `build.sh pyz` instead of `python -m
+zipapp`) writes every `x.py` plus a legacy-layout `x.pyc` next to it (zipimport
+never reads `__pycache__/`), compiled by the running interpreter as an
+unchecked-hash pyc (PEP 552: no mtime inside, no source check at import; the
+rootfs is read-only). Entries are sorted with fixed 1980-01-01 timestamps and
+modes, so the same sources and interpreter give the same bytes. Each code
+object's filename is `/opt/harness/guest.pyz/<module path>.py`, what zipimport
+would set compiling from source. `Dockerfile.rootfs` runs `pyz_pack.py
+recompile` with the guest's own python3 (a pyc from a different 3.x has another
+magic number and zipimport would silently fall back to the source) and fails
+the build unless `guest.main` then loads from `.pyc`.
+
+`measure_imports.py PYZ [--runs N] [--python CMD]` times, in fresh
+interpreters, what the guest imports before the idle-wait (`import guest.main`
++ `preload()`, i.e. what the snapshot holds) and what a session imports after
+hello. Measured on the dev box (x86_64, 9 runs, medians, `python3 -I -B`
+inside the rootfs docker image, i.e. the guest's Python 3.12.15):
+
+| | before idle-wait | after hello (every restore) |
+|---|---|---|
+| before (zipapp, no `.pyc`, lazy session imports, no stdlib `.pyc`) | 339 ms | 556 ms (103 modules) |
+| after (bytecode pyz + stdlib `.pyc` + `preload()`) | 142 ms | 0.06 ms (0 modules) |
+
+Run it against the image you built:
+`docker run --rm -v $PWD:/img:ro secondbrain/harness-rootfs:local python3 /img/measure_imports.py /opt/harness/guest.pyz --python "python3 -I -B"`.
 
 ### Changing the kernel
 

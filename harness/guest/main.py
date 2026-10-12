@@ -11,10 +11,13 @@ coordinator's FatalProtocolError on a second hello, a resume whose log could
 not be fetched or folded), 3 hello timeout.
 
 Idle-wait (the snapshot point): with `--idle-wait
-vsock` the transport polls :5000 every IDLE_POLL_S (50 ms), silently, until
+vsock` the transport polls :5000 every IDLE_POLL_S (5 ms), silently, until
 the host answers (Transport.wait_awake). The base snapshot is taken in this
-loop. Then `--mount-workspace DEV` mounts DEV on the workspace (`mount -o
-noatime`) unless it is already a mountpoint; a missing DEV is skipped (tests,
+loop. Before it starts, preload() imports every module a session needs, so
+they are in the snapshot's memory and nothing is imported after a restore.
+Then `--mount-workspace DEV` mounts DEV on the workspace (mount(2) through
+libc as ext4 with MS_NOATIME, no fork/exec; `mount -o noatime` when that
+fails) unless it is already a mountpoint; a missing DEV is skipped (tests,
 Local). The hello timeout counts from the end of idle-wait.
 
 Phases, testable apart: run_until_hello(inbound, timeout) drains the
@@ -73,7 +76,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--log-dir", required=True, help="where events/*.jsonl are buffered")
     p.add_argument("--workspace", required=True, help="the task's working directory")
     p.add_argument("--idle-wait", default=None, choices=["vsock"],
-                   help="'vsock': poll :5000 every 50 ms until the host answers (the snapshot point)")
+                   help="'vsock': poll :5000 every 5 ms until the host answers (the snapshot point)")
     p.add_argument("--mount-workspace", default=None, metavar="DEV",
                    help="after idle-wait, mount DEV on the workspace unless already mounted")
     p.add_argument("--hello-timeout", type=float, default=HELLO_TIMEOUT_S)
@@ -99,17 +102,45 @@ def make_connector(spec: str):
     raise ValueError(f"--connect must be unix:DIR or vsock[:CID], got {spec!r}")
 
 
-def mount_workspace(dev: str, workspace: str, runner=subprocess.run) -> str:
-    """Mount `dev` on `workspace` (noatime). Returns what happened:
-    "mounted", "already" (workspace is a mountpoint), "absent" (no such
-    device: tests and LocalSandbox) or "failed" (logged; the guest goes on
-    with whatever the directory holds)."""
+MS_NOATIME = 1024                       # <sys/mount.h>
+WORKSPACE_FSTYPE = "ext4"               # image/build.sh workspace-template.img
+
+
+def mount_syscall(dev: str, target: str, fstype: str = WORKSPACE_FSTYPE,
+                  flags: int = MS_NOATIME) -> int:
+    """mount(2) through libc: 0, or the errno. No fork/exec of mount(8), which
+    costs a process start on the restore path."""
+    import ctypes
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.mount.argtypes = (ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p,
+                           ctypes.c_ulong, ctypes.c_void_p)
+    if libc.mount(dev.encode(), target.encode(), fstype.encode(), flags, None) == 0:
+        return 0
+    return ctypes.get_errno() or -1
+
+
+def mount_workspace(dev: str, workspace: str, runner=subprocess.run, syscall=mount_syscall) -> str:
+    """Mount `dev` on `workspace` (noatime): mount(2) as ext4 first, then
+    `mount -o noatime` (type autodetected) when that fails. Returns what
+    happened: "mounted", "already" (workspace is a mountpoint), "absent" (no
+    such device: tests and LocalSandbox) or "failed" (logged; the guest goes
+    on with whatever the directory holds)."""
     if os.path.ismount(workspace):
         return "already"
     if not os.path.exists(dev):
         log.info("workspace device %s absent; not mounting", dev)
         return "absent"
     os.makedirs(workspace, exist_ok=True)
+    if syscall is not None:
+        try:
+            err = syscall(dev, workspace)
+        except (OSError, AttributeError) as exc:        # no libc / no mount symbol
+            err = f"{type(exc).__name__}: {exc}"
+        if err == 0:
+            log.info("mounted %s on %s", dev, workspace)
+            return "mounted"
+        log.info("mount(2) %s on %s as %s failed (%s); trying mount(8)", dev, workspace,
+                 WORKSPACE_FSTYPE, os.strerror(err) if isinstance(err, int) and err > 0 else err)
     try:
         proc = runner(["mount", "-o", "noatime", dev, workspace],
                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
@@ -183,6 +214,28 @@ def rebuild_eventlog(log_dir: str, events: list) -> EventLog:
     if events:
         eventlog.mark_acked(events[-1]["seq"])
     return eventlog
+
+
+# What run_session and the coordinator import. preload() loads them before
+# the idle-wait, so they are in the base snapshot's memory and a restore does
+# not pay for them after hello (image/measure_imports.py measures this).
+SESSION_MODULES = (
+    "protocol.fold", "protocol.bulk", "guest.coordinator", "guest.bulk", "guest.mcp",
+    "guest.ops", "guest.provider", "guest.hooks", "guest.context", "guest.tools",
+)
+
+
+def preload() -> None:
+    """Import SESSION_MODULES now (main() calls it before transport.start(),
+    so the base-snapshot idle detection only sees vsock traffic once every
+    import is done)."""
+    import importlib
+    for name in SESSION_MODULES:
+        importlib.import_module(name)
+    try:
+        import ctypes  # noqa: F401  (mount_syscall, right after a restore)
+    except ImportError:
+        pass
 
 
 def run_session(cfg: GuestConfig, inbound: queue.Queue, transport: Transport,
@@ -267,6 +320,7 @@ def main(argv=None) -> int:
     except ValueError as exc:
         log.error("%s", exc)
         return EXIT_PROTOCOL
+    preload()                               # before idle-wait: in the snapshot's memory
     inbound: queue.Queue = queue.Queue()
     transport = Transport(connector, inbound, port=args.control_port,
                           idle=args.idle_wait is not None)
