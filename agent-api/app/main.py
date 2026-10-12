@@ -64,6 +64,16 @@ async def _start_guest_cleanup():
 
 
 @app.on_event("startup")
+async def _resume_question_parks():
+    # Sessions parked on a question of the direct path before a restart:
+    # their answer wait goes on (vm/parked.json holds its deadline).
+    try:
+        chat.workers.load_question_parks(tenant_registry.all_tenants(), registry)
+    except Exception:  # noqa: BLE001 - never block startup
+        logging.getLogger("startup").exception("restoring question parks failed")
+
+
+@app.on_event("startup")
 async def _start_temporal():
     # TEMPORAL_ADDRESS set -> the session
     # workflow's worker runs on this loop with the real activities, and the
@@ -83,7 +93,9 @@ async def _stop_temporal():
 
 @app.on_event("shutdown")
 async def _stop_harness_workers():
-    # Stop every session's sandbox, LLM proxy and Unix-socket listeners.
+    # Park every running guest (HARNESS_SHUTDOWN_PARK_S: a restart restores
+    # it and adopts its open device calls), then stop every session's
+    # sandbox, LLM proxy and Unix-socket listeners.
     await chat.workers.shutdown()
     from app.gateway.client import aclose_clients
     await aclose_clients()

@@ -19,6 +19,8 @@
   retool(events, tools)         a migrated run re-pinned to a hello's tools
     .state                        protocol.fold.State folded from the log
     .question_bodies              question_id -> the `question` body (current run)
+    .open_input                   the input_id of the current run's task that has
+                                  no settle yet (None: the run is between tasks)
     .last_seq                     highest stored seq
 
 Segments hold HARNESS_SEGMENT_EVENTS events each (seq 1..N in 000001.jsonl,
@@ -85,6 +87,9 @@ from app.session.session_dir import SessionDir, utcnow_iso
 from app.user.memory import MemoryStore
 
 logger = logging.getLogger("host.state_sync")
+
+# the input kinds that start a task when none runs (guest.coordinator.INPUT_KINDS)
+TASK_INPUT_KINDS = ("task", "follow_up", "steer")
 
 class StateSyncError(Exception):
     """An event the host refuses to store (schema or fold error)."""
@@ -298,6 +303,7 @@ class StateSync:
         self.seen_inputs: set[str] = set()       # across runs
         self.settled: dict[str, dict] = {}       # input_id -> settle body, across runs
         self.question_bodies: dict[str, dict] = {}  # question_id -> body, current run
+        self.open_input: str | None = None          # the current run's unsettled task
         self._load()
 
     # ------------------------------------------------------------ disk
@@ -311,7 +317,7 @@ class StateSync:
     def _load(self) -> None:
         for run in self.runs():
             self.run, self.state = run, State()
-            self.question_bodies = {}
+            self.question_bodies, self.open_input = {}, None
             for ev in self.read(0, run=run):
                 try:
                     apply(self.state, ev)
@@ -328,7 +334,7 @@ class StateSync:
                 return self.run
             self.run += 1
             self.state = State()
-            self.question_bodies = {}
+            self.question_bodies, self.open_input = {}, None
             return self.run
 
     def read(self, after_seq: int = 0, *, run: int | None = None) -> list[dict]:
@@ -390,14 +396,20 @@ class StateSync:
 
     def _index(self, event: dict) -> None:
         """What must hold across runs: the input_ids seen, each task's
-        settle; and the current run's question bodies."""
+        settle; and the current run's question bodies and unsettled task
+        (the guest's: the first new task/follow_up/steer input after a
+        settle starts a task, its settle ends it)."""
         etype, b = event["type"], event["body"]
         if etype == "input":
             self.seen_inputs.add(b["input_id"])
+            if self.open_input is None and b.get("dedupe") == "new" \
+                    and b.get("kind") in TASK_INPUT_KINDS:
+                self.open_input = b["input_id"]
         elif etype == "question":
             self.question_bodies[b["question_id"]] = b
         elif etype == "settle":
             self.settled[b["input_id"]] = b
+            self.open_input = None
 
     # ------------------------------------------------------------ migrated runs
     def _migrated_events(self) -> list[dict] | None:
@@ -438,7 +450,7 @@ class StateSync:
                 logger.warning("migrated run %s keeps its tools: %s", self.run_dir, e)
                 return False
             replace_run_dir(self.run_dir, events, self.segment_events)
-            self.state, self.question_bodies = State(), {}
+            self.state, self.question_bodies, self.open_input = State(), {}, None
             for ev in events:
                 apply(self.state, ev)
                 self._index(ev)

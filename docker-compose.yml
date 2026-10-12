@@ -50,6 +50,7 @@ services:
   # previous :<git-sha> image from GHCR.
   agent-api:
     image: ghcr.io/yingliu-data/secondbrain-agent-api:latest
+    stop_grace_period: 20s                      # shutdown parks running guests (HARNESS_SHUTDOWN_PARK_S 8 s + snapshot)
     build:
       context: .                                # needs harness/ + flows/ (path deps)
       dockerfile: agent-api/Dockerfile

@@ -25,7 +25,9 @@ memory?}`.
                            an open call rebuilt from a parked session's log
                            by a new Worker (an agent-api restart): no waiter
                            in this process, its `deliver(result)` carries the
-                           result to the guest (Worker._deliver_adopted)
+                           result to the guest (Worker._deliver_adopted); the
+                           call stays open until deliver returned (a failure
+                           is DeliveryError: 503 at the route, retry-safe)
   DEVICE_CALLS             the process-wide registry the route uses
   Sides(...)               `handle_tool_call(event)` schedules the work and
                            returns the asyncio.Task (None for side guest)
@@ -46,6 +48,11 @@ from app.skills.base import set_current_context
 logger = logging.getLogger("host.sides")
 
 MEMORY_TOOLS = {"remember": "write", "forget": "remove"}
+
+
+class DeliveryError(RuntimeError):
+    """An adopted call's result could not be handed to its session (the
+    call stays open; POST /tool-result answers 503 and may be retried)."""
 
 
 class DeviceCalls:
@@ -82,7 +89,13 @@ class DeviceCalls:
         """Deliver the device's result. False when the call is unknown or
         already terminal (timed out, resolved, or never opened), or, with
         `owner_prefix`, belongs to a session whose key does not start with it
-        (another tenant's call)."""
+        (another tenant's call).
+
+        An adopted call stays open until its `deliver` returned: a deliver
+        that raises leaves it open (DeliveryError here, so the route answers
+        503 and the device retries); only a delivered result makes it
+        terminal. A deliver on another loop is scheduled there and the call
+        closes once it ran (a failure there is logged, the call stays open)."""
         entry = self._open.get(call_id)
         if entry is None:
             return False
@@ -97,17 +110,30 @@ class DeviceCalls:
         except RuntimeError:
             running = None
         fut: asyncio.Future | None = entry["future"]
-        if fut is None:                     # adopted: one result, then terminal
-            self._open.pop(call_id, None)
+        if fut is None:                     # adopted: terminal once delivered
             if loop is None or running is loop:
-                entry["deliver"](result)
+                self._deliver(call_id, entry, result)
             else:
-                loop.call_soon_threadsafe(entry["deliver"], result)
+                loop.call_soon_threadsafe(self._deliver_logged, call_id, entry, result)
         elif running is loop:
             fut.set_result(result)
         else:
             loop.call_soon_threadsafe(_set_if_pending, fut, result)
         return True
+
+    def _deliver(self, call_id: str, entry: dict, result: str) -> None:
+        try:
+            entry["deliver"](result)
+        except Exception as e:
+            raise DeliveryError(f"device result for {call_id} not delivered: {e}") from e
+        if self._open.get(call_id) is entry:
+            self._open.pop(call_id, None)
+
+    def _deliver_logged(self, call_id: str, entry: dict, result: str) -> None:
+        try:
+            self._deliver(call_id, entry, result)
+        except DeliveryError:
+            logger.exception("device call %s stays open", call_id)
 
     def discard(self, call_id: str) -> None:
         self._open.pop(call_id, None)

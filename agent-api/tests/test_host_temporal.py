@@ -35,7 +35,7 @@ from app.host import temporal
 from app.host.activities import HostActivities, ticket_id_for
 from app.host.sandbox.local import LocalSandbox
 from app.host.sides import DeviceCalls
-from app.host.worker import Workers
+from app.host.worker import WORKFLOW, Workers
 from app.session.dir_store import DirStore
 from app.tenants import TenantRegistry
 from host_fakes import FakeRegistry, FakeUpstreamLLM, users_root  # noqa: F401
@@ -85,8 +85,10 @@ class Harness:
         self.upstream = upstream
         self.session_id = "s-" + uuid.uuid4().hex[:8]
         self.ref = SessionRef(user="harn", tenant="harn", session_id=self.session_id)
-        doc = {"tenants": [{"name": "harn", "api_key": "harn-key",
-                            "answer_wait_s": answer_wait_s, "wall_clock_s": 120}]}
+        entry = {"name": "harn", "api_key": "harn-key", "wall_clock_s": 120}
+        if answer_wait_s is not None:           # None: the tenant does not set it
+            entry["answer_wait_s"] = answer_wait_s
+        doc = {"tenants": [entry]}
         path = tmp_path / "tenants.json"
         path.write_text(json.dumps(doc))
         self.tenants = TenantRegistry(path, "test-default-key")
@@ -120,6 +122,18 @@ class Harness:
                                   max_heartbeat_throttle_interval=timedelta(seconds=0.5),
                                   default_heartbeat_throttle_interval=timedelta(seconds=0.5))
         assert ok and temporal.enabled()
+
+    def restart(self, monkeypatch) -> Workers:
+        """A new agent-api process: new Workers (new DeviceCalls) over the
+        same session store, used by the routes and the activities from now
+        on; the old Workers are left to the caller to stop."""
+        from app.routes import chat
+        old = self.workers
+        self.workers = Workers(sandbox_factory=old.sandbox_factory, sessions=old.sessions,
+                               **{**old.worker_kwargs, "device_calls": DeviceCalls()})
+        self.acts.workers = self.workers
+        monkeypatch.setattr(chat, "workers", self.workers)
+        return old
 
     @property
     def worker(self):
@@ -663,4 +677,150 @@ async def test_direct_parked_sessions_do_not_hold_the_global_slots(tmp_path, use
     finally:
         for p in parked:
             p.cancel()
+        await d.close()
+
+
+# --------------------------------------------------------------------------- #
+# an agent-api restart: no model turn runs twice, parks survive
+
+
+async def test_run_task_retry_in_a_new_process_resumes_the_run(h, tmp_path, monkeypatch):
+    """The process dies mid-task (its Workers go away, the guest is killed,
+    nothing parks); Temporal retries run_task in a new process: the input is
+    unsettled in the current run, so that run is resumed (hello{resume:
+    true} + the log return), not a new one opened: the running tool is lost
+    and not run again, the logged turn is not asked again, one settle."""
+    from test_host_restart import assert_resumed_once, of_type
+    marker = tmp_path / "ran.txt"
+    h.upstream.responses = [tool_call("call_n", "bash",
+                                      {"command": f"echo ran >> {marker}; sleep 60"}),
+                            {"content": "finished once"}]
+    acts = h.acts
+
+    @activity.defn(name="run_task")
+    async def dying_run_task(inp: RunTask) -> RunResult:
+        if activity.info().attempt == 1:
+            w = acts.worker(inp.session)
+            w.start_task({"input_id": inp.input_id, "text": inp.text, "kind": inp.kind,
+                          "driver": WORKFLOW})
+            await wait_until(lambda: marker.exists() and any(
+                b["call_id"] == "call_n" and b["state"] == "running"
+                for b in of_type(w, "op_state")), 30, "the tool runs")
+            old = h.restart(monkeypatch)
+            await old.shutdown(park_s=0)            # a crash: the guest dies unparked
+            raise ApplicationError("simulated process death")
+        return await acts.run_task(inp)
+
+    await h.start([acts.prepare_vm, dying_run_task, acts.park_vm, acts.deliver])
+    await h.chat(message="slow one", input_id="in_nr")      # its stream ends with the old process
+    await h.wait_state("idle", 60)
+    w = h.worker
+    assert w.sync.settled["in_nr"]["answer"] == "finished once"
+    assert_resumed_once(w, "in_nr", "call_n", marker, h.upstream)
+    [ticket] = h.tickets()
+    assert ticket["outcome"] == "done" and ticket["answer"] == "finished once"
+    retry = [b for b in h.host_events("activity_start") if b["activity"] == "run_task"]
+    assert [r["attempt"] for r in retry] == [2]             # attempt 1 was the stand-in
+    # the client re-sends the input: the stored answer
+    again = await h.chat(message="slow one", input_id="in_nr")
+    assert "finished once" in token_text(again) and len(h.upstream.requests) == 2
+
+
+async def test_workflow_path_answer_wait_defaults_to_the_session_config(
+        tenv, tmp_path, users_root, upstream, monkeypatch):
+    """A tenant without answer_wait_s: the workflow path's guest gets
+    SessionConfig's default (86400) in its hello."""
+    harness = Harness(tenv, tmp_path, upstream, monkeypatch, answer_wait_s=None)
+    try:
+        upstream.responses = [{"content": "hi"}]
+        await harness.start()
+        body = await harness.chat(message="x", input_id="in_def")
+        assert sse_events(body)[-1] == ("done", {})
+        assert harness.worker.last_hello["config"]["limits"]["answer_wait_s"] == 86400
+    finally:
+        await harness.close()
+
+
+async def _park_then_restart(tmp_path, upstream, monkeypatch, answer_wait_s, input_id):
+    """A direct-path task parks on a question; agent-api stops (graceful:
+    its guest is killed) and starts again: the parked question is restored
+    at startup (load_question_parks). (harness, the new Worker, question_id,
+    the park's monotonic time)"""
+    monkeypatch.setattr("app.host.worker.HARNESS_QUESTION_TIMEOUT_S", 1)
+    d = Harness(None, tmp_path, upstream, monkeypatch, answer_wait_s=answer_wait_s)
+    upstream.responses = [tool_call("call_q", "question", {"text": "Which colour?",
+                                                          "options": ["red", "blue"]}),
+                          {"content": "You picked blue"}]
+    first = asyncio.ensure_future(d.chat(message="ask me", input_id=input_id))
+    w1 = await wait_until(lambda: d.worker is not None and d.worker.question_park is not None
+                          and d.worker, 30, "question park")
+    t_park = time.monotonic()
+    qid = w1.question_park["question_id"]
+    old = d.restart(monkeypatch)
+    await old.shutdown()
+    await asyncio.wait_for(first, 30)                   # the old process's stream ended
+    info = json.loads(w1.parked_file.read_text())
+    assert info["question"] == {"input_id": input_id, "question_id": qid}
+    assert info["driver"] == "direct" and info["answer_wait_s"] == answer_wait_s
+    [w2] = d.workers.load_question_parks(d.tenants.all_tenants(), d.registry)
+    assert w2.vm_state == "parked" and w2.question_park == {"input_id": input_id,
+                                                            "question_id": qid}
+    assert 0 < w2.answer_left_s() <= answer_wait_s
+    return d, w2, qid, t_park
+
+
+async def test_direct_question_park_survives_a_restart_and_the_answer_completes(
+        tmp_path, users_root, upstream, monkeypatch):
+    d, w, qid, _ = await _park_then_restart(tmp_path, upstream, monkeypatch, 3600, "in_rq1")
+    try:
+        body = await asyncio.wait_for(d.chat(message="blue", answer_to=qid,
+                                             input_id="in_rq1_a"), 60)
+        events = sse_events(body)
+        assert events[-1] == ("done", {}) and not any(e == "error" for e, _ in events)
+        assert "You picked blue" in token_text(body)
+        assert w.sync.settled["in_rq1"]["outcome"] == "done"
+        assert len(upstream.requests) == 2
+        assert upstream.requests[1]["messages"][-1]["content"] == "blue"
+        assert w.sync.runs() == [1]
+        assert not d.host_events("answer_timeout")
+        # the client re-sends the task: its stored answer
+        again = await d.chat(message="ask me", input_id="in_rq1")
+        assert "You picked blue" in token_text(again) and len(upstream.requests) == 2
+    finally:
+        await d.close()
+
+
+async def test_direct_question_park_restart_resumes_the_answer_wait(
+        tmp_path, users_root, upstream, monkeypatch):
+    """No answer: the restored driver escalates when the rest of the
+    answer wait (from the park, not from the restart) has run out."""
+    d, w, qid, t_park = await _park_then_restart(tmp_path, upstream, monkeypatch, 6, "in_rq2")
+    try:
+        await wait_until(lambda: "in_rq2" in w.sync.settled, 60, "escalated settle")
+        elapsed = time.monotonic() - t_park
+        assert w.sync.settled["in_rq2"]["outcome"] == "escalated"
+        assert 5 <= elapsed < 20
+        assert [b["question_id"] for b in d.host_events("answer_timeout")] == [qid]
+        assert len(upstream.requests) == 1
+    finally:
+        await d.close()
+
+
+async def test_direct_new_input_waits_for_a_restored_question_park(
+        tmp_path, users_root, upstream, monkeypatch):
+    """A new input after the restart does not wake the guest behind the
+    restored answer wait: it waits for that task (answered here) and then
+    runs as its own task."""
+    d, w, qid, _ = await _park_then_restart(tmp_path, upstream, monkeypatch, 3600, "in_rq3")
+    try:
+        upstream.responses = upstream.responses + [{"content": "next answer"}]
+        nxt = asyncio.ensure_future(d.chat(message="next", input_id="in_rq3_next"))
+        await asyncio.sleep(1.0)
+        assert w.vm_state == "parked" and w.question_park is not None and not nxt.done()
+        await asyncio.wait_for(d.chat(message="blue", answer_to=qid, input_id="in_rq3_a"), 60)
+        body = await asyncio.wait_for(nxt, 60)
+        assert "next answer" in token_text(body)
+        assert [s["input_id"] for s in (e["body"] for e in w.sync.read(0)
+                                        if e["type"] == "settle")] == ["in_rq3", "in_rq3_next"]
+    finally:
         await d.close()

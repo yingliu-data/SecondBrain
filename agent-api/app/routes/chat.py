@@ -125,7 +125,11 @@ async def _harness_turn(tenant: Tenant, session_id: str, message: str, input_id:
     set_current_context(session, tenant.user, tenant.name, session_id)
     if answer_to:
         await worker.settle_park()      # a question park in progress ends first
-        async for item in _answer_stream(worker, worker.current_input_id, answer_to,
+        # the running task's; after a restart no task runs yet: the parked
+        # question's (vm/parked.json), whose restored driver re-attaches it
+        qp = worker.question_park
+        task_id = worker.current_input_id or (qp["input_id"] if qp is not None else None)
+        async for item in _answer_stream(worker, task_id, answer_to,
                                          message, input_id):
             yield item
         return

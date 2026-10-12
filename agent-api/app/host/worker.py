@@ -38,14 +38,32 @@ One long-lived guest per session.
 
 Two drivers over one task API. The
 Temporal activities (activities.py) are one; act() is the other, in-process
-(the direct path). `answer_wait_s` (the tenant's, session_config, on either
-path) > 0: hello limits carry it, the guest parks
+(the direct path). `answer_wait_s` is decided per guest run by the driver of
+the task that boots it (answer_wait_for: the tenant's on either path; unset,
+0 on the direct path, SessionConfig's 86400 on the workflow path). > 0:
+hello limits carry it, the guest parks
 itself on a question deadline (parked{reason: question, question_id}), the
 worker adopts the park and records `question_park` on the parked state; the
 task's wall clock stops while it waits. Both drivers handle that park the
 same way: wait up to answer_wait_s for the answer (the workflow's timer;
 act()'s _drive), else abort_and_wait(escalated): wake + abort so the guest
 settles it, bounded by abort_wait_s.
+
+Across an agent-api restart (a new Worker on the same session directory):
+  unsettled     the task's input is acked in the current run, no settle,
+                no guest: the task's next start (a run_task retry, a re-sent
+                input) resumes that run like a death (ensure_ready) - never
+                a new run, never a second turn for a logged llm_response
+  parked        vm/parked.json: the parked guest is woken from it; a
+                question park comes back as `question_park` with its answer
+                deadline, and on the direct path a restored driver
+                (_drive_restored) holds the answer wait; device calls the log
+                has open are adopted (DeviceCalls keeps each open until its
+                result was handed to the guest)
+  orphan        a different input on a guest that still holds an unsettled
+                task: abort{aborted} settles that one first (_settle_orphan)
+  shutdown      Workers.shutdown parks running guests (shutdown_park) so
+                the next process can do the above
   .ensure_ready()               boot / wake the guest (prepare_vm)
   .start_task(task_input)       the task of an input, worker-owned (a retry
                                 re-attaches to it by input_id); task_input may
@@ -87,7 +105,7 @@ from app.config import (
     HARNESS_ABORT_WAIT_S, HARNESS_CONTEXT_WINDOW_TOKENS, HARNESS_GUEST_ROOT, HARNESS_HEARTBEAT_S,
     HARNESS_HELLO_TIMEOUT_S, HARNESS_HOST_TOOL_TIMEOUT_S, HARNESS_MAX_RESUMES,
     HARNESS_MAX_TURNS, HARNESS_PARK_GRACE_S, HARNESS_PARK_TIMEOUT_S, HARNESS_PORTS, HARNESS_QUESTION_TIMEOUT_S,
-    HARNESS_RESERVE_TOKENS, HARNESS_SANDBOX, HARNESS_SESSION_IDLE_S,
+    HARNESS_RESERVE_TOKENS, HARNESS_SANDBOX, HARNESS_SESSION_IDLE_S, HARNESS_SHUTDOWN_PARK_S,
     HARNESS_SPILL_THRESHOLD, HARNESS_STOP_AT_SETTLE,
     HARNESS_TOKEN_BUDGET, HARNESS_WALL_CLOCK_S, LLM_ENABLE_THINKING,
     LLM_MAX_TOKENS, LLM_MODEL, LLM_STREAM, LLM_TEMPERATURE, LLM_URL, MAX_TOOLS,
@@ -121,6 +139,8 @@ DROPPED_WHILE_PARKED = frozenset({"heartbeat", "park"})
 NOT_CARRIED = frozenset({"hello", "heartbeat", "park"})
 # the only controls that wake a guest parked on a question (send_control)
 QUESTION_PARK_WAKERS = ("ui_response", "abort")
+# the drivers of a task (task_input["driver"]): act() and the workflow's run_task
+DIRECT, WORKFLOW = "direct", "workflow"
 
 
 def wake_order(item: tuple[str, dict]) -> bool:
@@ -160,8 +180,8 @@ def strip_current_time(prompt: str) -> str:
 
 
 def session_config(tenant) -> SessionConfig:
-    """The tenant's SessionConfig (the task signal's config; a Worker's
-    answer_wait_s on either path)."""
+    """The tenant's SessionConfig (the task signal's config, so the
+    workflow's answer timer)."""
     return SessionConfig.from_tenant(tenant.workflow_entry())
 
 
@@ -241,10 +261,11 @@ class Worker:
         # the session's gateway entries from the first successful fetch:
         # pins are fixed per session, a resume hello reuses them
         self.gateway_entries: list[dict] | None = None
-        # the tenant's (either path); > 0 = a question deadline parks the
-        # task, the driver waits this long for the answer (0 = the guest
-        # denies)
-        self.answer_wait_s = session_config(tenant).answer_wait_s
+        # the live guest's hello limits.answer_wait_s: > 0 = a question
+        # deadline parks the task, its driver waits this long for the answer
+        # (0 = the guest denies). Decided per task run by the driver that
+        # boots the guest (answer_wait_for, _boot)
+        self.answer_wait_s = self.answer_wait_for(DIRECT)
         self._changed = asyncio.Event()             # replaced (and set) on every change
         # none | booting | running | parking | parked; the session snapshot
         # itself is the sandbox's business (has_snapshot / restore)
@@ -266,8 +287,19 @@ class Worker:
         self._beats: dict[str, set[Callable[[], None]]] = {}   # input_id -> on_heartbeat
         # call_id -> its deliver, for the device calls this Worker adopted
         self._adopted: dict[str, Callable[[str], None]] = {}
+        self._delivered: set[str] = set()           # adopted calls whose result went out
+        # the driver of the running task (direct | workflow; None: not given)
+        self._task_driver: str | None = None
+        # a question park's answer deadline (epoch ms; the direct path's
+        # answer wait, kept in vm/parked.json across a restart)
+        self._answer_deadline_ms: int | None = None
+        self._park_driver: str | None = None        # the driver of a restored question park
+        # (input_id, task): the direct path's driver of a question park this
+        # process restored from vm/parked.json (_drive_restored)
+        self._restored: tuple[str, asyncio.Task] | None = None
         self._load_parked()
         self._adopt_open_device_calls()
+        self._resume_restored_park()
 
     def _spawn(self, coro) -> asyncio.Task:
         """A background task the loop would otherwise only hold weakly."""
@@ -382,15 +414,28 @@ class Worker:
                                                  "options", "deadline")})
         return out
 
-    async def ensure_ready(self) -> None:
+    async def ensure_ready(self, input_id: str | None = None, driver: str | None = None) -> None:
         """A guest that can take a control: wake a parked one, boot one
-        that is not running (prepare_vm; also the start of every task)."""
+        that is not running (prepare_vm; also the start of every task).
+        `driver` (DIRECT | WORKFLOW) decides a booted guest's answer_wait_s.
+
+        `input_id` is the task about to run: when the current run holds it
+        unsettled (its input was acked, no settle: the process that drove it
+        died, or its guest went away), the boot resumes that run instead of
+        opening a new one - hello{resume: true} and the log return, as after
+        a guest death: open calls end op_state{lost}, a turn whose
+        llm_response is logged is never asked again."""
         self._ensure_plumbing()
         async with self._vm_lock:        # waits out a park in progress
             if self.vm_state == "parked":
                 await self._wake_locked()
             elif not self._guest_ready():
-                await self._boot(resume=False)
+                resume = input_id is not None and self.sync.open_input == input_id
+                if resume:
+                    self.sync.host_event("workflow", {"kind": "resume", "reason": "unsettled_input",
+                                                      "input_id": input_id,
+                                                      "acked_seq": self.sync.last_seq})
+                await self._boot(resume=resume, driver=driver)
 
     def start_task(self, task_input: dict) -> asyncio.Task:
         """The task of `task_input` (queued behind the running one), owned by
@@ -667,6 +712,21 @@ class Worker:
             "answer_wait_s": int(self.answer_wait_s),
         }
 
+    def answer_wait_for(self, driver: str | None) -> int:
+        """limits.answer_wait_s of a guest booted for a task of `driver`
+        (DIRECT | WORKFLOW). The tenant's answer_wait_s when it sets one, on
+        either path. Unset: the workflow path takes SessionConfig's default
+        (86400; the workflow's durable timer waits for the answer), the
+        direct path 0, the guest denies an unanswered question (as before
+        question parks: no durable timer holds a direct park, and a 24 h
+        park would hold the client's request). Applied where the hello is
+        built (_boot), so per guest run: a guest booted by one driver keeps
+        its value for later tasks (a wake keeps its hello)."""
+        explicit = self.tenant.workflow_entry().get("answer_wait_s")
+        if explicit is not None:
+            return int(explicit)
+        return SessionConfig().answer_wait_s if driver == WORKFLOW else 0
+
     def build_hello(self, resume: bool = False) -> dict:
         params: dict = {"max_tokens": self.tenant.max_tokens or LLM_MAX_TOKENS,
                         "temperature": LLM_TEMPERATURE,
@@ -888,7 +948,7 @@ class Worker:
         self._vm_event(op, source, t0, **extra)
         self._send_held(held)
 
-    async def _boot(self, *, resume: bool) -> None:
+    async def _boot(self, *, resume: bool, driver: str | None = None) -> None:
         """Start a guest run and send hello. Fresh (resume=False): a new log
         run, cseq from 1. Resume (death, or a park whose snapshot is gone):
         cseq continues, `hello{resume: true}`, the guest takes the log return
@@ -897,7 +957,11 @@ class Worker:
         restore when the sandbox has one, else a rootfs boot (start).
         A fresh boot whose current run is a migrated legacy history no
         guest continued yet (StateSync.migrated_run) is a resume: the guest
-        folds the migrated run, so the prior conversation is in context."""
+        folds the migrated run, so the prior conversation is in context.
+        `driver`: the task's (answer_wait_for); None keeps the previous
+        guest's answer_wait_s (a death resume, a wake's fallback)."""
+        if driver is not None:
+            self.answer_wait_s = self.answer_wait_for(driver)
         carried: list[tuple[str, dict]] = []
         migrated = not resume and self.sync.migrated_run
         resume = resume or migrated
@@ -999,6 +1063,11 @@ class Worker:
             await asyncio.to_thread(self.sandbox.stop)   # its memory is lost: resume from the log
         self._drop_link()
         self.vm_state = "parked"
+        # the answer wait runs from the park: a restarted process resumes
+        # the direct path's wait with what is left (vm/parked.json)
+        self._answer_deadline_ms = (now_ms() + int(self.answer_wait_s * 1000)
+                                    if question else None)
+        self._park_driver = self._task_driver if question else None
         self.question_park = question
         cp = self.sync.state.parked_at
         self._write_parked_file(reason, cp)
@@ -1081,13 +1150,20 @@ class Worker:
     # ------------------------------------------------------------ parked file
     def _write_parked_file(self, reason: str, checkpoint_seq) -> None:
         """What a new Worker (agent-api restart) needs to resume the parked
-        guest: cseq continues. Whether the session snapshot is still usable
-        is the sandbox's to say (restore() refuses one that is not)."""
-        try:
-            atomic_write_json(self.parked_file, {
-                "cseq": self._outbox.highest_sent if self._outbox is not None else 0,
+        guest: cseq continues, the guest's answer_wait_s; for a question
+        park its {input_id, question_id}, the answer deadline (epoch ms) and
+        the driver of the task (direct: the new process drives the answer
+        wait itself, _drive_restored). Whether the session snapshot is still
+        usable is the sandbox's to say (restore() refuses one that is not)."""
+        info = {"cseq": self._outbox.highest_sent if self._outbox is not None else 0,
                 "reason": reason, "checkpoint_seq": checkpoint_seq,
-                "last_seq": self.sync.last_seq, "at": now_ms()})
+                "last_seq": self.sync.last_seq, "at": now_ms(),
+                "answer_wait_s": self.answer_wait_s}
+        if self.question_park is not None:
+            info.update(question=dict(self.question_park), driver=self._park_driver,
+                        answer_deadline_ms=self._answer_deadline_ms)
+        try:
+            atomic_write_json(self.parked_file, info)
         except OSError as e:
             logger.warning("could not write %s: %s", self.parked_file, e)
 
@@ -1105,6 +1181,70 @@ class Worker:
         self.vm_state = "parked"
         self._outbox = Outbox(self.session_id, "cseq")
         self._outbox.resume_from(int(info.get("cseq", 0)))
+        if info.get("answer_wait_s") is not None:
+            self.answer_wait_s = info["answer_wait_s"]   # the parked guest's hello
+        q = info.get("question")
+        if isinstance(q, dict) and q.get("input_id") and q.get("question_id") \
+                and q["input_id"] not in self.sync.settled:
+            self._question_park = {"input_id": q["input_id"], "question_id": q["question_id"]}
+            self._answer_deadline_ms = info.get("answer_deadline_ms")
+            self._park_driver = info.get("driver")
+
+    def _resume_restored_park(self) -> None:
+        """A question park of the direct path restored from vm/parked.json
+        (an agent-api restart): no act() holds its task, so this process
+        drives it (_drive_restored): the answer wait goes on with what is
+        left of it. The workflow path's parks are its timer's business."""
+        qp = self._question_park
+        if qp is None or self._park_driver != DIRECT:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.warning("session %s: question park restored without a loop: nothing "
+                           "drives its answer wait", self.session_key)
+            return
+        task = loop.create_task(self._drive_restored(qp["input_id"]),
+                                name=f"restored:{self.session_key}:{qp['input_id']}")
+        self._restored = (qp["input_id"], task)
+        self.sync.host_event("workflow", {"kind": "question_park_restored", **qp,
+                                          "answer_left_s": round(self.answer_left_s(), 3)})
+
+    def answer_left_s(self) -> float:
+        """What the answer wait of the current question park has left."""
+        if self._answer_deadline_ms is None:
+            return float(self.answer_wait_s)
+        return max(0.0, (self._answer_deadline_ms - now_ms()) / 1000)
+
+    async def _drive_restored(self, input_id: str) -> dict | None:
+        """The direct path's driver of a restored question park: wait for
+        the answer (POST /chat answer_to -> answer(): the guest wakes, the
+        task is re-attached here and driven as act() would, _drive) or the
+        rest of the answer wait (abort{escalated}: the guest settles it).
+        The task's streams end at its end (finish_input). A new input of
+        the session waits for this one (_act)."""
+        park = self.question_park
+        never = asyncio.get_running_loop().create_future()
+        try:
+            await self._until(lambda: self.question_park != park, never, self.answer_left_s())
+        finally:
+            never.cancel()
+        if self.closed:
+            return None
+        if self.question_park == park:
+            await self.abort_and_wait(input_id, "escalated", question_id=park["question_id"],
+                                      reattach=True)
+            task = self.task_for(input_id)
+            if task is None:
+                return None
+        else:
+            task = self.start_task({"input_id": input_id, "text": "", "driver": DIRECT})
+
+        def _finish(t: asyncio.Task) -> None:
+            outcome = task_outcome(t)
+            self.finish_input(input_id, end_error(t, outcome), outcome=outcome)
+        task.add_done_callback(_finish)
+        return await self._drive(input_id, task)
 
     # ------------------------------------------------------------ restart
     def _adopt_open_device_calls(self) -> None:
@@ -1150,16 +1290,30 @@ class Worker:
 
     def _deliver_adopted(self, call_id: str, name: str, result: str) -> None:
         """The result of an adopted device call: side_result to the guest
-        (held while parked: the guest wakes for it, as for any control)."""
-        self._adopted.pop(call_id, None)
-        if self.closed:
+        (held while parked: the guest wakes for it, as for any control).
+        Raises when no guest run can take it (a closed Worker, no guest):
+        DeviceCalls keeps the call open and the device may POST again. Once
+        handed over, the call_id is remembered: a second delivery is not
+        sent again (the guest would ignore it too: a side_result for a
+        terminal call)."""
+        if call_id in self._delivered:
             return
+        if self.closed:
+            raise GuestError("worker closed")
         self._ensure_plumbing()
         content, ok = device_content(result)
         status = self.send_control("side_result", {"call_id": call_id, "side": "device",
                                                    "content": content, "ok": ok})
-        self.sync.host_event("side_call", {"side": "device", "call_id": call_id, "name": name,
-                                           "ok": ok, "adopted": True, "sent": status})
+        if status == "no_guest":
+            raise GuestError("no guest run takes the result")
+        self._delivered.add(call_id)
+        self._adopted.pop(call_id, None)
+        try:
+            self.sync.host_event("side_call", {"side": "device", "call_id": call_id,
+                                               "name": name, "ok": ok, "adopted": True,
+                                               "sent": status})
+        except Exception:       # delivered: the trace never makes it a failure
+            logger.exception("session %s: side_call host event", self.session_key)
 
     # ------------------------------------------------------------ act
     async def act(self, task_input: dict) -> dict:
@@ -1170,12 +1324,21 @@ class Worker:
         the guest dedupes - and shares the running task; one that already
         settled gets its answer replayed, no guest."""
         input_id = task_input["input_id"]
+        task_input = {**task_input, "driver": DIRECT}
         task = self._acts.get(input_id)
         if task is not None and not task.done():
             if self.current_input_id == input_id and (self.vm_state == "parked"
                                                       or self._guest_ready()):
                 self.send_control(*self._task_message(task_input))
             return await asyncio.shield(task)
+        restored = self._restored_driver(input_id)
+        if restored is not None:
+            # parked on a question of this input since before a restart: the
+            # restored driver holds it (a start here would wake the guest
+            # behind the answer wait); its end ends this request's stream too
+            res = await asyncio.shield(restored)
+            return res if res is not None else self._fail(input_id, "failed",
+                                                          "The parked task could not be resumed.")
         body = self.replay(input_id)      # settled: its answer again, its streams end
         if body is not None:
             return self._settled_again(input_id, body)
@@ -1188,6 +1351,15 @@ class Worker:
         task.add_done_callback(_finish)
         return await self._drive(input_id, task)
 
+    def _restored_driver(self, input_id: str | None = None) -> asyncio.Task | None:
+        """The running driver of a restored question park (of `input_id`, if
+        given), else None."""
+        if self._restored is None or self._restored[1].done():
+            return None
+        if input_id is not None and self._restored[0] != input_id:
+            return None
+        return self._restored[1]
+
     async def _drive(self, input_id: str, task: asyncio.Task) -> dict:
         """`task`'s result, as the session workflow drives it: at a
         question park the stream stays open (the question went out) and the
@@ -1199,8 +1371,7 @@ class Worker:
             if res.get("outcome") != "parked":
                 return res
             park = self.question_park
-            await self._until(lambda: self.question_park != park, task,
-                              float(self.answer_wait_s))
+            await self._until(lambda: self.question_park != park, task, self.answer_left_s())
             if self.question_park == park and not task.done():
                 await self.abort_and_wait(input_id, "escalated",
                                           question_id=res.get("question_id"))
@@ -1223,6 +1394,11 @@ class Worker:
         if self.closed:
             raise GuestError("worker closed")
         input_id = task_input["input_id"]
+        restored = self._restored_driver()
+        if restored is not None and self._restored[0] != input_id:
+            # a question park restored after a restart holds the session
+            # (as act()'s session lock did before it): wait for its task
+            await asyncio.gather(asyncio.shield(restored), return_exceptions=True)
         try:
             self._ensure_plumbing()
         except Exception as e:      # e.g. the unix socket path is too long
@@ -1236,6 +1412,7 @@ class Worker:
                 return self._settled_again(input_id, body)
             fut = self._loop.create_future()
             self._current = (input_id, fut, task_input.get("wall_clock_s") or self.wall_clock_s)
+            self._task_driver = task_input.get("driver")
             try:
                 result = await self._run(task_input, fut)
             except BaseException as e:
@@ -1270,7 +1447,8 @@ class Worker:
         self._resumes = 0
         guest_settled = False
         try:
-            await self.ensure_ready()
+            await self._settle_orphan(input_id, task_input.get("driver"))
+            await self.ensure_ready(input_id, task_input.get("driver"))
             self.projector.begin_task()         # before any delta can arrive
             self.send_control(*self._task_message(task_input))
             try:
@@ -1297,6 +1475,41 @@ class Worker:
         if self.vm_state == "running" and not self.closed:
             self._arm_idle()
         return result
+
+    async def _settle_orphan(self, input_id: str, driver: str | None) -> None:
+        """Before `input_id` runs on a guest that holds another input's
+        unsettled task no driver in this process waits for (its process
+        went away while the guest was parked, or its driver gave up while
+        the guest stayed parked): abort{aborted} so the guest settles it
+        first (the new task would otherwise only be staged into it). A guest
+        exits after an abort's settle: it is stopped and the run resumed
+        (hello{resume: true}, the log return ends with that settle), so the
+        new task continues the same conversation. No settle within
+        abort_wait_s: the guest is destroyed and the next boot opens a new
+        run. Without a guest the boot opens a new run (ensure_ready resumes
+        only the task's own run)."""
+        orphan = self.sync.open_input
+        if orphan is None or orphan == input_id or self.vm_state not in ("parked", "running"):
+            return
+        status = self.send_control("abort", {"reason": "aborted"})
+        self.sync.host_event("workflow", {"kind": "orphan_abort", "input_id": orphan,
+                                          "before": input_id, "sent": status})
+        if status == "no_guest":
+            return
+        never = self._loop.create_future()
+        try:
+            await self._until(lambda: orphan in self.sync.settled, never, self.abort_wait_s)
+        finally:
+            never.cancel()
+        async with self._vm_lock:
+            await self._destroy("orphan")
+            self._clear_parked_file()
+            self.vm_state = "none"          # not the parked guest that holds it again
+            if orphan in self.sync.settled:
+                await self._boot(resume=True, driver=driver)
+            else:
+                logger.warning("session %s: orphan task %s did not settle after abort",
+                               self.session_key, orphan)
 
     def _fail(self, input_id: str, outcome: str, message: str) -> dict:
         """The host's failure result of a task: its message as the answer
@@ -1391,6 +1604,8 @@ class Worker:
         await asyncio.sleep(0.2)      # a settled guest exits right after settle's ack
         if self.sandbox.is_alive() or self._channel is not None:
             return                      # a stream drop: the guest reconnects
+        if self.vm_state in ("none", "booting"):
+            return                      # stopped on purpose, or a new guest is starting
         if fut is None or self._current_future() is not fut:
             if self.vm_state == "running":
                 self.vm_state = "none"  # an idle guest went away (exit at settle)
@@ -1470,6 +1685,9 @@ class Worker:
             fut = self._current_future()
             if fut is not None and body["input_id"] == self._current[0]:
                 fut.set_result(body)
+            elif fut is None and self.vm_state == "running" and not self.closed:
+                self._arm_idle()        # a task no driver held (woken by a side result)
+            self._pulse()
         elif etype == "error" and body["class"] == "fatal":
             fut = self._current_future()
             if fut is not None:
@@ -1500,6 +1718,25 @@ class Worker:
         self._emit_many(self.projector.live(msg))
 
     # ------------------------------------------------------------ close
+    async def shutdown_park(self, timeout_s: float) -> bool:
+        """Graceful shutdown: park a running guest (also mid-task: side
+        calls and questions do not hold a park; a provider call in flight
+        finishes first, guest ops get park_grace_s) instead of losing its
+        memory with the process, so the next process restores it and adopts
+        its open device calls. Waits at most `timeout_s` for `parked` (then
+        the snapshot); False when it did not park (close() destroys it, a
+        retry resumes from the log)."""
+        if self.closed or self.vm_state != "running" or not self._guest_ready():
+            return False
+        saved, self.park_timeout_s = self.park_timeout_s, min(self.park_timeout_s, timeout_s)
+        try:
+            return await self.park("shutdown")
+        except Exception:
+            logger.exception("session %s: park at shutdown failed", self.session_key)
+            return False
+        finally:
+            self.park_timeout_s = saved
+
     async def close(self) -> None:
         if self.closed:
             return
@@ -1511,6 +1748,8 @@ class Worker:
             fut.set_exception(GuestError("worker closed"))
         if self._wake_task is not None and not self._wake_task.done():
             self._wake_task.cancel()
+        if self._restored is not None and not self._restored[1].done():
+            self._restored[1].cancel()
         if self.sides is not None:
             await self.sides.cancel_all()
         for cid, deliver in self._adopted.items():
@@ -1611,20 +1850,39 @@ class Workers:
     def get(self, key: str) -> Worker | None:
         return self._workers.get(key)
 
-    def load_parked(self, tenant, registry) -> list[Worker]:
-        """A Worker for each of `tenant`'s parked sessions (vm/parked.json)
-        that has none in this process yet, as after an agent-api restart:
-        each rebuilds its open device calls from its log
-        (Worker._adopt_open_device_calls). The tool-result route calls it
-        for a call_id it does not know."""
+    def load_parked(self, tenant, registry,
+                    want: Callable[[dict], bool] | None = None) -> list[Worker]:
+        """A Worker for each of `tenant`'s parked sessions (vm/parked.json;
+        with `want`, those whose parked info it accepts) that has none in
+        this process yet, as after an agent-api restart: each rebuilds its
+        open device calls from its log (Worker._adopt_open_device_calls) and
+        its question park. The tool-result route calls it for a call_id it
+        does not know."""
         loaded = []
         for meta in self.sessions.list_for_tenant(tenant.user, tenant.name):
             sid = meta.get("session_id")
-            if not sid or not (meta["root"] / "vm" / "parked.json").exists():
+            path = meta["root"] / "vm" / "parked.json"
+            if not sid or not path.exists():
                 continue
+            if want is not None:
+                try:
+                    if not want(json.loads(path.read_text())):
+                        continue
+                except (OSError, ValueError):
+                    continue
             w = self._workers.get(session_key(tenant.user, tenant.name, sid))
             if w is None or w.closed:
                 loaded.append(self.get_or_create(tenant, sid, registry))
+        return loaded
+
+    def load_question_parks(self, tenants, registry) -> list[Worker]:
+        """At startup: a Worker for every session parked on a question of
+        the direct path, so its answer wait goes on (a restored driver,
+        Worker._drive_restored) without waiting for a request to load it."""
+        loaded = []
+        for tenant in tenants:
+            loaded += self.load_parked(tenant, registry, want=lambda info: bool(
+                info.get("question")) and info.get("driver") == DIRECT)
         return loaded
 
     async def close(self, key: str) -> None:
@@ -1632,6 +1890,12 @@ class Workers:
         if w is not None:
             await w.close()
 
-    async def shutdown(self) -> None:
+    async def shutdown(self, park_s: float = HARNESS_SHUTDOWN_PARK_S) -> None:
+        """Every Worker closed; first (park_s > 0) every running guest is
+        parked, concurrently (Worker.shutdown_park), so a restart adopts it."""
+        if park_s > 0:
+            workers = [w for w in self._workers.values() if not w.closed]
+            await asyncio.gather(*(w.shutdown_park(park_s) for w in workers),
+                                 return_exceptions=True)
         for key in list(self._workers):
             await self.close(key)

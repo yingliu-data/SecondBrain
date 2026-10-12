@@ -102,6 +102,11 @@ HARNESS_SESSION_IDLE_S = float(os.environ.get("HARNESS_SESSION_IDLE_S", 1800))  
 HARNESS_PARK_GRACE_S = float(os.environ.get("HARNESS_PARK_GRACE_S", 30))        # hello limit park_grace_s
 HARNESS_PARK_TIMEOUT_S = float(os.environ.get("HARNESS_PARK_TIMEOUT_S", 60))    # park sent -> acked `parked` (> park_grace_s)
 HARNESS_MAX_RESUMES = int(os.environ.get("HARNESS_MAX_RESUMES", 1))             # death resumes per task
+# Graceful shutdown parks every running guest (snapshot; a restart adopts its
+# open device calls) waiting this long for each `parked`; a guest that does
+# not park in time is destroyed (a retry resumes it from the log). 0 = destroy.
+# Keep the container's stop grace period above it (+ the snapshot time).
+HARNESS_SHUTDOWN_PARK_S = float(os.environ.get("HARNESS_SHUTDOWN_PARK_S", 8))
 HARNESS_BULK_MAX_BYTES = int(os.environ.get("HARNESS_BULK_MAX_BYTES", 64 * 1024 * 1024))  # one :5001 put
 HARNESS_TOKEN_BUDGET = int(os.environ.get("HARNESS_TOKEN_BUDGET", 0))        # total_tokens per session; 0 = unlimited
 # Context window the guest plans against (compaction trigger: estimate > window - reserve).

@@ -36,7 +36,7 @@ from temporalio.exceptions import ApplicationError
 from flows.activities import Deliver, ParkVM, PrepareVM, RunResult, RunTask, SessionRef
 from protocol.canonical import derive_key_id
 
-from app.host.worker import Worker, end_error, settle_outcome, task_ok
+from app.host.worker import WORKFLOW, Worker, end_error, settle_outcome, task_ok
 from app.util.ipc import atomic_write_json
 
 logger = logging.getLogger("host.activities")
@@ -92,7 +92,7 @@ class HostActivities:
     async def prepare_vm(self, inp: PrepareVM) -> None:
         w = self.worker(inp.session)
         await self._started(w, "prepare_vm", inp.input_id, resume_from_park=inp.resume_from_park)
-        await w.ensure_ready()
+        await w.ensure_ready(inp.input_id, WORKFLOW)
 
     @activity.defn(name="run_task")
     async def run_task(self, inp: RunTask) -> RunResult:
@@ -116,6 +116,12 @@ class HostActivities:
                 # resends the same input_id and the guest dedupes it
                 sent = w.answer(inp.question_id, inp.answer or "",
                                 answer_input_id(inp.input_id, inp.question_id))
+                if sent == "no_guest" and w.sync.open_input == inp.input_id:
+                    # the parked state is gone (no vm/parked.json) but the log
+                    # holds the task unsettled: resume its run, then answer
+                    await w.ensure_ready(inp.input_id, WORKFLOW)
+                    sent = w.answer(inp.question_id, inp.answer or "",
+                                    answer_input_id(inp.input_id, inp.question_id))
                 if sent == "no_guest" and inp.input_id not in w.sync.settled:
                     # no guest holds the parked task: start_task would run
                     # it again from scratch in a fresh run (a second turn)
@@ -124,8 +130,10 @@ class HostActivities:
                         non_retryable=True)
             # a running task for this input is re-attached, a settled one
             # returns its stored settle: never a second turn
+            # a retry in a new process (the first one died) finds the input
+            # unsettled in the log: the run resumes (ensure_ready), no rerun
             w.start_task({"input_id": inp.input_id, "text": inp.text, "kind": inp.kind,
-                          "wall_clock_s": inp.wall_clock_s})
+                          "wall_clock_s": inp.wall_clock_s, "driver": WORKFLOW})
             res = await w.wait_outcome(inp.input_id)
         except asyncio.CancelledError:
             # a workflow abort or the activity's timeout; not our own
