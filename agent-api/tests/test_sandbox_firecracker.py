@@ -146,7 +146,7 @@ def fake_mkfs(tmp_path):
 
 @pytest.fixture
 def session_dir(tmp_path):
-    d = tmp_path / "sessions" / "owner" / "default_abc123"
+    d = tmp_path / "sessions" / "owner" / "default.abc123"
     d.mkdir(parents=True)
     return d
 
@@ -230,7 +230,7 @@ def test_start_sends_the_documented_sequence(fake_fc, fake_mkfs, session_dir, tm
         vsock = by_path["/vsock"]
         assert _from_vm_dir(session_dir, vsock["uds_path"]) == str(session_dir / "ipc" / "v.sock")
         assert vsock["uds_path"] == os.path.join("..", "ipc", "v.sock")
-        assert vsock["guest_cid"] == derive_guest_cid("default_abc123")
+        assert vsock["guest_cid"] == derive_guest_cid("default.abc123")
         assert vsock["guest_cid"] >= 3
         # A guest connect(CID 2, port P) is forwarded to {uds_path}_P on the host.
         assert sb.vsock_port_path(5000) == session_dir / "ipc" / "v.sock_5000"
@@ -334,7 +334,7 @@ def test_short_session_dir_gets_absolute_api_socket(fake_fc, fake_mkfs, tmp_path
     """With a path that fits sun_path, the API socket is absolute; the vsock
     uds_path is always relative (it is recorded in snapshots)."""
     with tempfile.TemporaryDirectory(prefix="fc-", dir="/tmp") as short:
-        session_dir = Path(short) / "default_s1"
+        session_dir = Path(short) / "default.s1"
         session_dir.mkdir()
         assert len(str(session_dir / "ipc" / "v.sock_5010")) <= UNIX_PATH_MAX
         cfg = _config(fake_fc, fake_mkfs, tmp_path)
@@ -511,7 +511,7 @@ def test_guest_cid_override_and_derivation(fake_fc, fake_mkfs, session_dir, tmp_
 
 
 def test_instance_id_rules():
-    assert instance_id("default_abc123") == "default-abc123"
+    assert instance_id("default.abc123") == "default-abc123"
     assert instance_id("tenant one/x.y") == "tenant-one-x-y"
     assert instance_id("___") == "session"
     assert len(instance_id("a" * 100)) == 64

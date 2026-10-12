@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from protocol.mcp import is_safe_id
 from flows.activities import SessionRef
 
-__all__ = ["SessionRef", "is_safe_id", "legacy_dir_name", "make_session_id",
+__all__ = ["SessionRef", "is_safe_id", "make_session_id",
            "session_dir_name", "session_key", "session_ref"]
 
 
@@ -40,9 +40,3 @@ def session_dir_name(tenant: str, session_id: str) -> str:
         raise ValueError(f"session_id fails safe-path validation: {session_id!r}")
     return f"{tenant}.{session_id}"
 
-
-def legacy_dir_name(tenant: str, session_id: str) -> str:
-    """The pre-``.`` directory name ``{tenant}_{session_id}``: ambiguous
-    (tenant ``a`` + session ``b_c`` == tenant ``a_b`` + session ``c``), so
-    only ever matched together with the directory's session.json."""
-    return f"{tenant}_{session_id}"

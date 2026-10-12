@@ -189,7 +189,7 @@ def test_device_call_ownership_is_the_exact_tenant_not_a_prefix():
     loop = asyncio.new_event_loop()
     try:
         theirs = session_ref("u", "wcc_event", "s1")
-        mine = session_ref("u", "wcc", "event_s1")       # the same legacy dir name
+        mine = session_ref("u", "wcc", "event_s1")       # the same old-layout dir name
         fut = dc.open("call_w", "get_calendar_events", {}, theirs, loop=loop)
         assert dc.resolve("call_w", "x", owner=("u", "wcc")) is False
         assert dc.open_for(mine) == [] and dc.is_open("call_w") and not fut.done()

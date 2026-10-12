@@ -64,6 +64,19 @@ async def _start_guest_cleanup():
 
 
 @app.on_event("startup")
+async def _warn_legacy_layout():
+    # Old-layout session directories ({user}/{tenant}_{session_id}) are
+    # ignored; one WARNING names them (nothing is deleted automatically).
+    import asyncio
+    from app.session.dir_store import warn_legacy_layout
+    try:
+        await asyncio.to_thread(warn_legacy_layout, chat.sessions.root,
+                                logging.getLogger("startup"))
+    except Exception:  # noqa: BLE001 - never block startup
+        logging.getLogger("startup").exception("scanning for old-layout sessions failed")
+
+
+@app.on_event("startup")
 async def _resume_question_parks():
     # Sessions parked on a question of the direct path before a restart:
     # their answer wait goes on (vm/parked.json holds its deadline).

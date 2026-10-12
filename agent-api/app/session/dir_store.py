@@ -6,23 +6,27 @@ owns those tenants. The directory name is injective: user, tenant and
 session ids are safe ids (``[A-Za-z0-9_-]``), so ``.`` cannot occur in
 either half.
 
-Legacy layout: ``{root}/{user}/{tenant}_{session_id}/`` (before the
-``.`` separator). It is ambiguous — tenant ``wcc`` + session ``event_x``
-and tenant ``wcc_event`` + session ``x`` share one name — so a legacy
-directory is only ever taken for the session its ``session.json`` names
-exactly (user, tenant, session_id); it stays readable in place, and
-``python -m app.session.migrate --layout`` renames legacy directories to
-the new layout. Every lookup and listing compares the parsed identity
-(``session.json``), never a name prefix.
+A directory counts as a session only when its name is exactly
+``{tenant}.{session_id}`` of its own ``session.json`` (user, tenant,
+session_id compared exactly): a copied or hand-made directory is never
+some other session. Every lookup and listing compares that parsed
+identity, never a name prefix.
+
+The old layout ``{user}/{tenant}_{session_id}/`` is not supported (it was
+ambiguous across tenants whose names contain ``_``). Such directories are
+ignored — never opened, listed or collided with; `legacy_layout_dirs`
+finds them, agent-api logs them once at startup, and
+``python -m app.session.migrate --purge-legacy-layout`` deletes them.
 """
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 from pathlib import Path
 from typing import Any
 
-from app.session.ids import is_safe_id, session_dir_name, legacy_dir_name
+from app.session.ids import is_safe_id, session_dir_name
 from app.session.session_dir import SessionDir
 
 
@@ -61,16 +65,9 @@ class DirStore:
         return self.root / user / session_dir_name(tenant, session_id)
 
     def path_for(self, user: str, tenant: str, session_id: str) -> Path:
-        """The directory of the session: the canonical one, or a legacy
-        `{tenant}_{session_id}` directory whose session.json names exactly
-        this session; the canonical path when neither exists yet."""
-        canonical = self.canonical_path(user, tenant, session_id)
-        if (canonical / "session.json").exists():
-            return canonical
-        legacy = self.root / user / legacy_dir_name(tenant, session_id)
-        if _is_session(legacy, user, tenant, session_id):
-            return legacy
-        return canonical
+        """The directory of the session, `{user}/{tenant}.{session_id}`
+        (whether or not it exists yet)."""
+        return self.canonical_path(user, tenant, session_id)
 
     def get(self, user: str, tenant: str, session_id: str) -> SessionDir | None:
         p = self.path_for(user, tenant, session_id)
@@ -101,8 +98,7 @@ class DirStore:
         """Sessions belonging to one tenant of one user (session.json's
         tenant, compared exactly), newest first:
         {session_id, tenant, updated_at, state, title, root}. Only
-        directories named for that tenant (`{tenant}.` or legacy
-        `{tenant}_`) have their session.json read; with `require` (a path
+        directories named `{tenant}.*` have their session.json read; with `require` (a path
         relative to the session directory, e.g. "vm/parked.json") only
         those that also hold it. Blocking I/O: call it off the loop."""
         return self._scan(user, tenant=tenant, require=require)
@@ -119,11 +115,11 @@ class DirStore:
         if not user_dir.is_dir():
             return []
         # a cheap name filter before any session.json is read; the identity
-        # below still decides (a legacy `{tenant}_` prefix is ambiguous)
-        prefixes = (f"{tenant}.", f"{tenant}_") if tenant is not None else None
-        found: dict[tuple, dict[str, Any]] = {}
+        # below still decides
+        prefix = f"{tenant}." if tenant is not None else None
+        out: list[dict[str, Any]] = []
         for entry in sorted(user_dir.iterdir()):
-            if prefixes is not None and not entry.name.startswith(prefixes):
+            if prefix is not None and not entry.name.startswith(prefix):
                 continue
             if require is not None and not (entry / require).exists():
                 continue
@@ -142,21 +138,61 @@ class DirStore:
                 continue
             # only a directory named for its own identity counts (a copied
             # or hand-made directory is not some other session)
-            canonical = entry.name == session_dir_name(t, sid)
-            if not canonical and entry.name != legacy_dir_name(t, sid):
+            if entry.name != session_dir_name(t, sid):
                 continue
-            key = (t, sid)
-            if key in found and not canonical:
-                continue                    # the canonical directory wins
             meta = ident["meta"]
-            found[key] = {
+            out.append({
                 "session_id": sid,
                 "tenant": t,
                 "updated_at": meta.get("updated_at"),
                 "state": meta.get("state"),
                 "title": meta.get("title", ""),
                 "root": entry,
-            }
-        out = list(found.values())
+            })
         out.sort(key=lambda m: m.get("updated_at") or "", reverse=True)
         return out
+
+
+# ---------------------------------------------------------------- old layout
+def legacy_layout_dirs(root: Path | str) -> list[Path]:
+    """Session directories of the unsupported old layout
+    `{user}/{tenant}_{session_id}` under `root`, sorted. Conservative: a
+    directory (not a symlink) directly under a user directory (not a
+    symlink) whose name holds no `.` and which holds a `session.json` file.
+    A new-layout name always holds the `.` (safe ids never do), so no
+    current session directory -- valid, copied or hand-made -- matches;
+    nor does anything without a session.json. Blocking I/O."""
+    root = Path(root)
+    found: list[Path] = []
+    try:
+        users = sorted(root.iterdir())
+    except OSError:
+        return []
+    for user_dir in users:
+        if user_dir.is_symlink() or not user_dir.is_dir():
+            continue
+        try:
+            entries = sorted(user_dir.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            if "." in entry.name or entry.is_symlink() or not entry.is_dir():
+                continue
+            sj = entry / "session.json"
+            if sj.is_file() and not sj.is_symlink():
+                found.append(entry)
+    return found
+
+
+def warn_legacy_layout(root: Path | str, logger: logging.Logger | None = None) -> list[Path]:
+    """Log one WARNING naming every old-layout session directory under
+    `root` (they are ignored; nothing is deleted). Returns them."""
+    found = legacy_layout_dirs(root)
+    if found:
+        (logger or logging.getLogger(__name__)).warning(
+            "%d session director%s in the old {tenant}_{session_id} layout ignored; "
+            "remove with `python -m app.session.migrate --purge-legacy-layout "
+            "[--dry-run] %s`: %s",
+            len(found), "y" if len(found) == 1 else "ies", root,
+            ", ".join(str(p.relative_to(root)) for p in found))
+    return found

@@ -119,12 +119,14 @@ tenant, listings and `Workers.load_parked` compare `session.json`'s tenant,
 never a name prefix. Tenant names may contain `_`.
 
 Directory: `{SESSIONS_ROOT}/{user}/{tenant}.{session_id}/` (`.` is in no safe
-id, so the name is injective). The legacy `{tenant}_{session_id}/` is
+id, so the name is injective), and only a directory named exactly for its own
+`session.json` identity counts. The old layout `{tenant}_{session_id}/` was
 ambiguous (tenant `wcc` + session `event_x` = tenant `wcc_event` + session
-`x`): it is still read in place, but only for the session its `session.json`
-names; a new session never goes there. Rename legacy directories with
-`python -m app.session.migrate --layout [--dry-run] [<sessions_root>]`
-(agent-api stopped; section 5).
+`x`) and is not supported: such directories are never opened, listed or
+collided with. agent-api logs one WARNING at startup naming them ("ignored;
+remove with ... --purge-legacy-layout") and never deletes them itself; remove
+them with `python -m app.session.migrate --purge-legacy-layout [--dry-run]
+<sessions_root>` (section 5).
 
 ### Task cap, wall clock, tickets
 
@@ -273,13 +275,19 @@ Read once at startup; restart to apply.
 ## 5. Legacy sessions → event logs (`app/session/migrate.py`)
 
 ```
-python -m app.session.migrate --layout [--dry-run] [<sessions_root>]   # {tenant}_{sid} -> {tenant}.{sid}
+python -m app.session.migrate --purge-legacy-layout [--dry-run] <sessions_root>   # delete old {tenant}_{sid} dirs
 python -m app.session.migrate --events [--dry-run] <sessions_root>
 python -m app.session.migrate [--db data/conversations.db] [--root data/sessions]   # sqlite rows
 ```
 
-`--events` gives every session with a non-empty `history.jsonl` and no run
-under `events/` one run `events/r0000`; the sqlite step builds the same run
+`--purge-legacy-layout` deletes every old-layout session directory: directly
+under a user directory, no `.` in its name, holding a `session.json` (a
+new-layout name always has the `.`, so no current session matches, nor does
+anything without a `session.json`); `--dry-run` lists them with their size.
+Back up first. Nothing else ever deletes them.
+
+`--events` gives every new-layout session directory (old-layout ones are
+skipped) with a non-empty `history.jsonl` and no run under `events/` one run `events/r0000`; the sqlite step builds the same run
 straight from its rows. A run holds:
 
 - `session_start` with the session's user/tenant, `resumed: false`,

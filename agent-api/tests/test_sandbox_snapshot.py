@@ -104,7 +104,7 @@ def test_snapshot_pauses_creates_with_relative_paths_and_kills(fake_fc, fake_mkf
     meta = json.loads((snap / "META.json").read_text())
     assert meta["image_version"] == "img-1"
     assert meta["firecracker_version"] == "v1.17.0"
-    assert meta["guest_cid"] == derive_guest_cid("default_abc123")
+    assert meta["guest_cid"] == derive_guest_cid("default.abc123")
     assert isinstance(meta["created_ms"], int)
     assert sb.last_vm_event["op"] == "snapshot" and sb.last_vm_event["ms"] >= 0
     assert not (session_dir / "vm" / "firecracker.sock").exists()

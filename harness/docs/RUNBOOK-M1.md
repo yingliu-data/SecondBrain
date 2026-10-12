@@ -187,7 +187,7 @@ API_SECRET_KEY=... LLM_URL=http://localhost:8080 uv run uvicorn app.main:app --p
 ```
 
 Then the same `chat`. What to look at per session directory
-`data/sessions/{user}/{tenant}_{session}/`:
+`data/sessions/{user}/{tenant}.{session}/`:
 
 | Path | Content |
 |---|---|
@@ -266,7 +266,7 @@ Dockerfile copies `harness/protocol` and `harness/guest` for
 `HARNESS_GUEST_ROOT` and the local sandbox.)
 
 Session directories inside the container are
-`/root/agent-api/data/sessions/{user}/{tenant}_{session}` - short enough for
+`/root/agent-api/data/sessions/{user}/{tenant}.{session}` - short enough for
 the 108-byte Unix-socket path limit. If sessions ever move deeper, the
 sandbox manager already switches to paths relative to Firecracker's cwd
 (`vm/`) and connects through `/proc/self/fd`; `endpoints.py`'s `bind()` of

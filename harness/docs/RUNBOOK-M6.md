@@ -70,7 +70,7 @@ prints `{"ok", "targets", "failed", "results": [{"target", "problems"}]}`:
 ```sh
 docker compose exec -T agent-api python -m protocol.replay verify --all --json data/sessions \
   | jq -r '.results[] | select(.problems != []) | .target'      # the failed sessions
-docker compose exec agent-api python -m protocol.replay replay data/sessions/<user>/<tenant>_<sid>
+docker compose exec agent-api python -m protocol.replay replay data/sessions/<user>/<tenant>.<sid>
 #   data/sessions/...: r0001: session <sid> seq 1..N turns=.. calls=.. open=.. settle=done parked=False state_hash=...
 ```
 
@@ -100,16 +100,40 @@ Two kinds of legacy data; both end as an event log run `events/r0000/`:
 - session directories with a non-empty `history.jsonl` and no run under
   `events/`: `python -m app.session.migrate --events <root>`.
 
+Session directories are `{user}/{tenant}.{session_id}` only; old-layout
+directories (`{user}/{tenant}_{session_id}`) are ignored (agent-api logs
+them in one startup WARNING) and are removed first, step 2-0.
+
 Run the migration after the M6 deploy and before old sessions are reopened:
 a legacy session that gets a message first starts a fresh run `r0001`
 without its history, and the migration then skips it (`skipped_existing`).
+
+### 2-0. Remove old-layout session directories
+
+With agent-api stopped: back up, list them, then delete them.
+
+```sh
+docker compose stop agent-api
+tar -C agent-api/data -czf sessions-backup-$(date +%F).tgz sessions
+docker compose run --rm --no-deps agent-api python -m app.session.migrate --purge-legacy-layout --dry-run data/sessions
+#     would delete wcc/wcc-event_sess_2026-05-01_101500_ab12 (48211 bytes)
+#   Done (dry run): 1 old-layout directory, 48211 bytes
+docker compose run --rm --no-deps agent-api python -m app.session.migrate --purge-legacy-layout data/sessions
+#     delete wcc/wcc-event_sess_2026-05-01_101500_ab12 (48211 bytes)
+#   Done: 1 old-layout directory, 48211 bytes deleted
+```
+
+Only directories directly under a user directory with no `.` in their name
+and a `session.json` are deleted; new-layout sessions and anything without a
+`session.json` are left alone. Idempotent. Afterwards the startup log has no
+"old {tenant}_{session_id} layout ignored" WARNING.
 
 ### 2a. Dry run
 
 ```sh
 docker compose exec agent-api python -m app.session.migrate --events --dry-run data/sessions
-#     default/default_abc: would_migrate {"exchanges": 12, "replies": 12, "tool_calls": 3, "unanswered": 0, "skipped_rows": 0, "events": 97}
-#     wcc-event/wcc-event_x1: failed {"problems": ["seq 14: ..."], ...}
+#     default/default.abc: would_migrate {"exchanges": 12, "replies": 12, "tool_calls": 3, "unanswered": 0, "skipped_rows": 0, "events": 97}
+#     wcc-event/wcc-event.x1: failed {"problems": ["seq 14: ..."], ...}
 #   Done (dry run): {'would_migrate': 40, 'skipped_existing': 170, 'skipped_empty': 4}
 ```
 
@@ -133,10 +157,10 @@ With agent-api stopped, so no worker opens a session in between:
 docker compose stop agent-api
 # only if agent-api/data/conversations.db exists:
 docker compose run --rm --no-deps agent-api python -m app.session.migrate
-#     'abc' -> default/default_abc (8 msgs)
+#     'abc' -> default/default.abc (8 msgs)
 #   Done: {'migrated': 3, 'skipped_existing': 0, 'skipped_invalid': 0, 'failed': 0}
 docker compose run --rm --no-deps agent-api python -m app.session.migrate --events data/sessions
-#     default/default_abc: migrated {...}
+#     default/default.abc: migrated {...}
 #   Done: {'migrated': 40, 'skipped_existing': 170, 'skipped_empty': 4}
 docker compose run --rm --no-deps agent-api python -m protocol.replay verify --all data/sessions
 #   verified 254 target(s): 254 ok, 0 failed
@@ -156,7 +180,7 @@ legacy (its history is then not in context when it is next used).
 
 ### 2c. A migrated session continues
 
-Pick one migrated session (`S=agent-api/data/sessions/<user>/<tenant>_<sid>`)
+Pick one migrated session (`S=agent-api/data/sessions/<user>/<tenant>.<sid>`)
 and look at its run before using it:
 
 ```sh
@@ -189,7 +213,7 @@ Pass:
   the console shows `hello for session <sid> (<user>/<tenant>) resume` and
   `log return: N events through seq N`;
 - the answer refers to the old conversation;
-- `docker compose exec agent-api python -m protocol.replay verify data/sessions/<user>/<tenant>_<sid>` is clean.
+- `docker compose exec agent-api python -m protocol.replay verify data/sessions/<user>/<tenant>.<sid>` is clean.
 
 ```sh
 jq -c 'select(.type=="session_start") | [.body.tools[].name]' $S/events/r0000/000001.jsonl
@@ -276,10 +300,10 @@ For each tenant with a key (and the guest page):
 
 ```sh
 KEY=<tenant api_key> chat '{"session_id": "m6-smoke", "input_id": "m6-1", "message": "Which tools do you have? One line."}'
-ls agent-api/data/sessions/<user>/<tenant>_m6-smoke/events/     # host-000001.jsonl  r0001
-hostev agent-api/data/sessions/<user>/<tenant>_m6-smoke vm      # restore (or boot) of this session
+ls agent-api/data/sessions/<user>/<tenant>.m6-smoke/events/     # host-000001.jsonl  r0001
+hostev agent-api/data/sessions/<user>/<tenant>.m6-smoke vm      # restore (or boot) of this session
 jq -c 'select(.type=="session_start") | [.body.tools[].name]' \
-   agent-api/data/sessions/<user>/<tenant>_m6-smoke/events/r0001/000001.jsonl
+   agent-api/data/sessions/<user>/<tenant>.m6-smoke/events/r0001/000001.jsonl
 #   the tenant's local skills, its promoted MCP tools, search_tools/describe_tool/call_tool when it has upstreams
 docker compose logs agent-api | grep 'starting without MCP tools'   # must be empty
 docker compose exec -T agent-api python - <<'EOF'
@@ -455,6 +479,6 @@ deploy while no task is running.
 | # | Criterion | Evidence | Done |
 |---|---|---|---|
 | 1 | every session on the box verifies | `verify --all data/sessions`: `N ok, 0 failed`, before and after §2 | |
-| 2 | legacy sessions migrated and continuing | `--events --dry-run` then real: `failed` 0 (or listed); one migrated session resumed (`vm{resume: true}`, re-pinned tools, no `r0001`, verify clean) | |
+| 2 | legacy sessions migrated and continuing | backup + `--purge-legacy-layout --dry-run` then real (no startup WARNING after); `--events --dry-run` then real: `failed` 0 (or listed); one migrated session resumed (`vm{resume: true}`, re-pinned tools, no `r0001`, verify clean) | |
 | 3 | all tenants on harness | `[tenants]` warnings only for retired keys; gateway.json generated; each tenant's smoke session settles; guest page OK | |
 | 4 | async finding recorded | `--runs 3` totals and per-task table in ASYNC-TOOLS.md; §4c answered; default decided (stays `False` unless §4d holds) | |

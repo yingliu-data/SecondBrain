@@ -687,7 +687,7 @@ def users_root(tmp_path, monkeypatch):
 
 @pytest.fixture
 def session(tmp_path, users_root):
-    return SessionDir.create(tmp_path / "u" / "t_s1", user_id="u", session_id="s1", tenant="t")
+    return SessionDir.create(tmp_path / "u" / "t.s1", user_id="u", session_id="s1", tenant="t")
 
 
 def make_settings(**over):

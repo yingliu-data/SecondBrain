@@ -50,6 +50,11 @@ def test_migrate_and_idempotency(tmp_path, monkeypatch):
 
     wcc_session = store.get("wcc", "wcc-event", "e1")
     assert wcc_session is not None
+    # new-layout directories only
+    assert default_session.root == root / "default" / "default.abc"
+    assert wcc_session.root == root / "wcc" / "wcc-event.e1"
+    from app.session.dir_store import legacy_layout_dirs
+    assert legacy_layout_dirs(root) == []
     assert wcc_session.read_meta()["tenant"] == "wcc-event"
     assert conversation(wcc_session) == [{"role": "user", "content": "draft event"}]
     assert verify_session(wcc_session.root) == []
@@ -257,27 +262,62 @@ def test_events_migration_finishes_an_interrupted_one(tmp_path):
     assert verify_session(session.root) == []
 
 
-def test_layout_migration_renames_legacy_directories_by_their_session_json(tmp_path, capsys):
-    """--layout: {tenant}_{session_id} -> {tenant}.{session_id}, decided by
-    session.json, so tenants `wcc` and `wcc_event` never swap sessions."""
+def _purge_tree(store):
+    from app.session.session_dir import SessionDir
+    user_dir = store.root / "u"
+    old = SessionDir.create(user_dir / "wcc_event_s1", user_id="u", session_id="s1",
+                            tenant="wcc_event")
+    (old.workspace / "keep.txt").write_text("a" * 100)
+    SessionDir.create(user_dir / "wcc_x", user_id="u", session_id="x", tenant="wcc")
+    new = store.get_or_create("u", "wcc_event", "s1")         # the new layout
+    (new.workspace / "keep.txt").write_text("b")
+    (user_dir / "scratch").mkdir()                            # no session.json
+    (user_dir / "scratch" / "f").write_text("c")
+    (user_dir / "loose_file").write_text("d")                 # not a directory
+    return user_dir
+
+
+def test_purge_legacy_layout_dry_run_lists_without_deleting(tmp_path, capsys):
+    store = DirStore(tmp_path / "sessions")
+    user_dir = _purge_tree(store)
+    before = sorted(p.name for p in user_dir.iterdir())
+    result = migrate.purge_legacy_layout(store.root, dry_run=True)
+    assert sorted(result["dirs"]) == ["u/wcc_event_s1", "u/wcc_x"]
+    assert result["dirs"]["u/wcc_event_s1"] >= 100 and result["deleted"] is False
+    out = capsys.readouterr().out
+    assert "would delete u/wcc_event_s1" in out and "bytes" in out
+    assert migrate.main(["--purge-legacy-layout", "--dry-run", str(store.root)]) == 0
+    assert sorted(p.name for p in user_dir.iterdir()) == before
+
+
+def test_purge_legacy_layout_deletes_only_old_layout_dirs(tmp_path):
+    store = DirStore(tmp_path / "sessions")
+    user_dir = _purge_tree(store)
+    assert migrate.main(["--purge-legacy-layout", str(store.root)]) == 0
+    assert sorted(p.name for p in user_dir.iterdir()) == [
+        "loose_file", "scratch", "wcc_event.s1"]
+    assert (user_dir / "scratch" / "f").read_text() == "c"
+    assert (store.get("u", "wcc_event", "s1").workspace / "keep.txt").read_text() == "b"
+    again = migrate.purge_legacy_layout(store.root, quiet=True)   # idempotent
+    assert again["dirs"] == {}
+
+
+def test_purge_legacy_layout_needs_an_explicit_root():
+    with pytest.raises(SystemExit):
+        migrate.main(["--purge-legacy-layout"])
+
+
+def test_events_migration_skips_old_layout_dirs(tmp_path):
+    """--events writes new-layout directories only: an old-layout directory
+    with a history.jsonl is left alone (purge it instead)."""
     from app.session.session_dir import SessionDir
     store = DirStore(tmp_path / "sessions")
-    user_dir = store.root / "u"
-    a = SessionDir.create(user_dir / "wcc_event_s1", user_id="u", session_id="s1",
-                          tenant="wcc_event")
-    (a.workspace / "keep.txt").write_text("a")
-    SessionDir.create(user_dir / "wcc_x", user_id="u", session_id="x", tenant="wcc")
-    # a directory whose session.json names another session is left alone
-    SessionDir.create(user_dir / "wcc_y", user_id="u", session_id="z", tenant="wcc")
-    store.get_or_create("u", "wcc", "new")                      # already the new layout
-    dry = migrate.migrate_layout(store.root, dry_run=True, quiet=True)
-    assert dry["stats"] == {"would_rename": 2, "mismatch": 1}
-    assert (user_dir / "wcc_event_s1").exists()
-    assert migrate.main(["--layout", str(store.root)]) == 0
-    assert sorted(p.name for p in user_dir.iterdir()) == [
-        "wcc.new", "wcc.x", "wcc_event.s1", "wcc_y"]
-    assert (user_dir / "wcc_event.s1" / "workspace" / "keep.txt").read_text() == "a"
-    assert store.get("u", "wcc_event", "s1").root == user_dir / "wcc_event.s1"
-    assert sorted(r["session_id"] for r in store.list_for_tenant("u", "wcc")) == ["new", "x"]
-    again = migrate.migrate_layout(store.root, quiet=True)
-    assert again["stats"] == {"mismatch": 1}                    # idempotent
+    old = SessionDir.create(store.root / "wcc" / "wcc-event_s9", user_id="wcc",
+                            session_id="s9", tenant="wcc-event")
+    (old.root / migrate.HISTORY_FILE).write_text(
+        "".join(json.dumps(r) + "\n" for r in REAL_SHAPED_HISTORY))
+    session = _legacy(store, history=REAL_SHAPED_HISTORY)
+    result = migrate.migrate_events(store.root, quiet=True)
+    assert result["stats"] == {"migrated": 1}
+    assert list(result["sessions"]) == [str(session.root.relative_to(store.root))]
+    assert not (old.root / "events").exists() or not any((old.root / "events").iterdir())

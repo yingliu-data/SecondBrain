@@ -166,7 +166,7 @@ chat '{"session_id": "m2-compact", "input_id": "c-1",
        "message": "Create files n01.txt ... n30.txt in the workspace, one bash call per file, each containing its own number, then cat them all and tell me the sum."}'
 ```
 
-What to look at (`S=agent-api/data/sessions/<user>/<tenant>_m2-compact`):
+What to look at (`S=agent-api/data/sessions/<user>/<tenant>.m2-compact`):
 
 ```sh
 ls $S/memory/                       # compaction-<seq>.md (+ MEMORY.md index)
@@ -181,7 +181,7 @@ Replay: `protocol.fold.replay(events)` validates the log, verifies the
 checkpoints and folds it once; an empty problem list and a state whose
 `committed_prefix` starts with the summary message is the exit criterion.
 Since M6 the CLI does the first half
-(`docker compose exec agent-api python -m protocol.replay verify data/sessions/<user>/<tenant>_m2-compact`
+(`docker compose exec agent-api python -m protocol.replay verify data/sessions/<user>/<tenant>.m2-compact`
 -> `verified 1 target(s): 1 ok, 0 failed`; `replay` instead of `verify`
 prints turns, settle and `state_hash` per run). For the compaction fields,
 run the function over the run's segments:

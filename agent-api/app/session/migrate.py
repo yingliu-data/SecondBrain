@@ -1,19 +1,15 @@
 """Session migrations.
 
-0. session directory layout {tenant}_{session_id} → {tenant}.{session_id}:
+0. remove old-layout session directories (`{user}/{tenant}_{session_id}`;
+   the layout is `{user}/{tenant}.{session_id}` only):
 
-     python -m app.session.migrate --layout [--dry-run] [<sessions_root>]
+     python -m app.session.migrate --purge-legacy-layout [--dry-run] <sessions_root>
 
-   The old name is ambiguous (tenant `wcc` + session `event_x` and tenant
-   `wcc_event` + session `x` share `wcc_event_x`); agent-api still reads a
-   legacy directory in place, but only for the session its session.json
-   names. This renames every legacy directory whose name is exactly
-   `{tenant}_{session_id}` of its own session.json to the injective
-   `{tenant}.{session_id}` (app.session.dir_store). Skipped: a directory
-   whose session.json is missing/invalid or names another session
-   (`mismatch`), and one whose new name is taken (`target_exists`). Run it
-   with agent-api stopped (a parked VM's snapshot is relocatable: its
-   Firecracker paths are relative to the session directory). Idempotent.
+   Deletes every directory `dir_store.legacy_layout_dirs` finds: directly
+   under a user directory, no `.` in its name, holding a session.json (no
+   new-layout directory ever matches). --dry-run lists them with their
+   size and deletes nothing. agent-api ignores these directories and logs
+   them once at startup; it never deletes them itself. Back up first.
 
 1. conversations.db rows → session directories (one-time, legacy store):
 
@@ -31,8 +27,8 @@
 
      python -m app.session.migrate --events [--dry-run] <sessions_root>
 
-   Every session directory ({root}/{user}/{tenant}.{session_id}/, or a legacy
-   {tenant}_{session_id}/) with a
+   Every session directory {root}/{user}/{tenant}.{session_id}/ (named for
+   its own session.json; old-layout directories are skipped) with a
    non-empty `history.jsonl` and no run under `events/` gets one run:
 
      session_start  user/tenant from session.json, resumed: false,
@@ -66,6 +62,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sqlite3
 from pathlib import Path
 
@@ -375,8 +372,7 @@ def build_events(meta: dict, history: list[tuple[int, dict]],
 
 def _meta(session: SessionDir) -> dict | None:
     """user / tenant / session_id of a session directory, from session.json
-    (tenant falls back to the directory name {tenant}.{session_id} or the
-    legacy {tenant}_{session_id})."""
+    (tenant falls back to the directory name {tenant}.{session_id})."""
     try:
         meta = session.read_meta()
     except (OSError, json.JSONDecodeError):
@@ -385,11 +381,8 @@ def _meta(session: SessionDir) -> dict | None:
     user = meta.get("user_id") or session.root.parent.name
     tenant = meta.get("tenant") or ""
     name = session.root.name
-    if not tenant and isinstance(session_id, str):
-        for sep in (".", "_"):              # {tenant}.{sid}, legacy {tenant}_{sid}
-            if name.endswith(sep + session_id):
-                tenant = name[: -len(session_id) - 1]
-                break
+    if not tenant and isinstance(session_id, str) and name.endswith("." + session_id):
+        tenant = name[: -len(session_id) - 1]
     if not all(isinstance(v, str) and is_safe_id(v) for v in (user, tenant, session_id)):
         return None
     return {"user": user, "tenant": tenant, "session_id": session_id,
@@ -427,8 +420,13 @@ def migrate_session(session: SessionDir, *, dry_run: bool = False,
 
 
 def _session_dirs(root: Path):
+    """The new-layout session directories ({user}/{tenant}.{session_id})
+    holding a legacy history.jsonl; an old-layout directory (no `.`) is
+    never migrated in place."""
     for user_dir in sorted(p for p in root.iterdir() if p.is_dir()) if root.is_dir() else []:
         for entry in sorted(p for p in user_dir.iterdir() if p.is_dir()):
+            if "." not in entry.name:
+                continue
             if (entry / "session.json").exists() and (entry / HISTORY_FILE).exists():
                 yield SessionDir(entry)
 
@@ -456,48 +454,40 @@ def migrate_events(root: str | Path = SESSIONS_ROOT, *, dry_run: bool = False,
     return {"stats": stats, "sessions": sessions}
 
 
-# ---------------------------------------------------------------- layout
-def migrate_layout(root: str | Path = SESSIONS_ROOT, *, dry_run: bool = False,
-                   quiet: bool = False) -> dict:
-    """Rename legacy `{tenant}_{session_id}` session directories to
-    `{tenant}.{session_id}`. Returns {stats: {status: count}, sessions:
-    {old relative path: status}}; status renamed | would_rename |
-    target_exists | mismatch."""
-    from app.session.dir_store import read_identity
-    from app.session.ids import legacy_dir_name, session_dir_name
+# ---------------------------------------------------------------- old layout
+def _du(path: Path) -> int:
+    """Bytes under `path` (files only, symlinks not followed)."""
+    total = 0
+    for p in path.rglob("*"):
+        try:
+            if p.is_file() and not p.is_symlink():
+                total += p.stat().st_size
+        except OSError:
+            pass
+    return total
+
+
+def purge_legacy_layout(root: str | Path, *, dry_run: bool = False,
+                        quiet: bool = False) -> dict:
+    """Delete every old-layout session directory under `root`
+    (dir_store.legacy_layout_dirs). Returns {dirs: {relative path: bytes},
+    bytes: total, deleted: bool}."""
+    from app.session.dir_store import legacy_layout_dirs
     root = Path(root)
-    stats: dict[str, int] = {}
-    sessions: dict[str, str] = {}
-    user_dirs = sorted(p for p in root.iterdir() if p.is_dir()) if root.is_dir() else []
-    for user_dir in user_dirs:
-        for entry in sorted(p for p in user_dir.iterdir() if p.is_dir()):
-            ident = read_identity(entry)
-            if ident is None:
-                continue
-            tenant, sid, user = ident["tenant"], ident["session_id"], ident["user"]
-            if not all(isinstance(v, str) and is_safe_id(v) for v in (tenant, sid)):
-                status = "mismatch"
-            elif entry.name == session_dir_name(tenant, sid):
-                continue                                    # already the new layout
-            elif entry.name != legacy_dir_name(tenant, sid) or user not in (None, user_dir.name):
-                status = "mismatch"
-            else:
-                target = user_dir / session_dir_name(tenant, sid)
-                if target.exists():
-                    status = "target_exists"
-                elif dry_run:
-                    status = "would_rename"
-                else:
-                    entry.rename(target)
-                    status = "renamed"
-            rel = str(entry.relative_to(root))
-            sessions[rel] = status
-            stats[status] = stats.get(status, 0) + 1
-            if not quiet:
-                print(f"  {rel}: {status}")
+    dirs: dict[str, int] = {}
+    for d in legacy_layout_dirs(root):
+        rel = str(d.relative_to(root))
+        dirs[rel] = _du(d)
+        if not quiet:
+            print(f"  {'would delete' if dry_run else 'delete'} {rel} ({dirs[rel]} bytes)")
+        if not dry_run:
+            shutil.rmtree(d)
+    total = sum(dirs.values())
     if not quiet:
-        print(f"Done{' (dry run)' if dry_run else ''}: {stats}")
-    return {"stats": stats, "sessions": sessions}
+        print(f"Done{' (dry run)' if dry_run else ''}: {len(dirs)} old-layout "
+              f"director{'y' if len(dirs) == 1 else 'ies'}, {total} bytes"
+              f"{'' if dry_run else ' deleted'}")
+    return {"dirs": dirs, "bytes": total, "deleted": not dry_run}
 
 
 def main(argv=None) -> int:
@@ -505,23 +495,28 @@ def main(argv=None) -> int:
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--events", action="store_true",
                         help="convert legacy history.jsonl sessions to event logs")
-    parser.add_argument("--layout", action="store_true",
-                        help="rename legacy {tenant}_{session_id} session directories "
-                             "to {tenant}.{session_id}")
+    parser.add_argument("--purge-legacy-layout", action="store_true",
+                        help="delete old-layout {tenant}_{session_id} session directories "
+                             "(needs <sessions_root>)")
     parser.add_argument("--dry-run", action="store_true",
-                        help="with --events / --layout: report what would change, change nothing")
+                        help="with --events / --purge-legacy-layout: report what would "
+                             "change, change nothing")
     parser.add_argument("sessions_root", nargs="?", default=None)
     parser.add_argument("--db", default=SESSION_DB_PATH)
     parser.add_argument("--root", default=SESSIONS_ROOT)
     args = parser.parse_args(argv)
-    if args.layout:
-        migrate_layout(args.sessions_root or args.root, dry_run=args.dry_run)
+    if args.purge_legacy_layout:
+        if args.events:
+            parser.error("--purge-legacy-layout and --events are separate runs")
+        if not args.sessions_root:
+            parser.error("--purge-legacy-layout needs an explicit <sessions_root>")
+        purge_legacy_layout(args.sessions_root, dry_run=args.dry_run)
         return 0
     if args.events:
         result = migrate_events(args.sessions_root or args.root, dry_run=args.dry_run)
         return 1 if result["stats"].get("failed") else 0
     if args.dry_run:
-        parser.error("--dry-run needs --events or --layout")
+        parser.error("--dry-run needs --events or --purge-legacy-layout")
     migrate(args.db, args.root)
     return 0
 

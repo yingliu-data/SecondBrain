@@ -18,8 +18,8 @@ def test_nested_layout(store, tmp_path):
     assert session.read_meta()["tenant"] == "wcc-event"
 
 
-def _legacy(store, user, tenant, sid):
-    """A session directory in the pre-`.` layout {tenant}_{session_id}."""
+def _old_layout(store, user, tenant, sid):
+    """A session directory in the unsupported old layout {tenant}_{session_id}."""
     return SessionDir.create(store.root / user / f"{tenant}_{sid}", user_id=user,
                              session_id=sid, tenant=tenant)
 
@@ -38,20 +38,43 @@ def test_tenant_names_with_underscores_never_collide(store):
     assert store.list_for_tenant("u", "wcc") == []
 
 
-def test_legacy_directories_are_read_by_their_session_json_only(store):
-    legacy = _legacy(store, "u", "wcc_event", "s1")          # dir u/wcc_event_s1
-    _legacy(store, "u", "wcc", "x")                          # dir u/wcc_x
-    # the legacy name is also tenant `wcc` + session `event_s1`: not that session
+def test_old_layout_directories_are_never_listed_opened_or_collided_with(store):
+    old = _old_layout(store, "u", "wcc_event", "s1")          # dir u/wcc_event_s1
+    _old_layout(store, "u", "wcc", "x")                      # dir u/wcc_x
+    (old.workspace / "keep.txt").write_text("old")
+    # neither its own session nor the ambiguous reading (wcc + event_s1)
+    assert store.get("u", "wcc_event", "s1") is None
     assert store.get("u", "wcc", "event_s1") is None
-    assert store.path_for("u", "wcc", "event_s1").name == "wcc.event_s1"
-    assert store.get("u", "wcc_event", "s1").root == legacy.root
-    assert [r["session_id"] for r in store.list_for_tenant("u", "wcc")] == ["x"]
-    assert [r["session_id"] for r in store.list_for_tenant("u", "wcc_event")] == ["s1"]
-    assert store.get_or_create("u", "wcc_event", "s1").root == legacy.root   # kept in place
-    new = store.get_or_create("u", "wcc", "event_s1")        # a new, separate directory
-    assert new.root.name == "wcc.event_s1" and legacy.read_meta()["tenant"] == "wcc_event"
-    assert sorted(r["tenant"] for r in store.list_for_user("u")) == ["wcc", "wcc", "wcc_event"]
-    assert store.delete("u", "wcc", "event_s1") and (legacy.root / "session.json").exists()
+    assert store.get("u", "wcc", "x") is None
+    assert store.path_for("u", "wcc_event", "s1").name == "wcc_event.s1"
+    assert store.list_for_tenant("u", "wcc") == []
+    assert store.list_for_tenant("u", "wcc_event") == []
+    assert store.list_for_user("u") == []
+    assert store.delete("u", "wcc_event", "s1") is False
+    # a session of that identity is a new, separate directory
+    new = store.get_or_create("u", "wcc_event", "s1")
+    assert new.root.name == "wcc_event.s1" and not (new.workspace / "keep.txt").exists()
+    assert [r["root"] for r in store.list_for_user("u")] == [new.root]
+    assert store.delete("u", "wcc_event", "s1") is True
+    assert (old.workspace / "keep.txt").read_text() == "old"
+
+
+def test_startup_warning_names_old_layout_directories(store, caplog):
+    import logging
+    from app.session.dir_store import legacy_layout_dirs, warn_legacy_layout
+    store.get_or_create("u", "t", "s1")                      # new layout: not named
+    old = _old_layout(store, "u", "t", "s2")
+    (store.root / "u" / "notes").mkdir()                     # no session.json: not named
+    assert legacy_layout_dirs(store.root) == [old.root]
+    with caplog.at_level(logging.WARNING):
+        assert warn_legacy_layout(store.root) == [old.root]
+    [rec] = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert "u/t_s2" in rec.getMessage() and "--purge-legacy-layout" in rec.getMessage()
+    assert "t.s1" not in rec.getMessage() and "notes" not in rec.getMessage()
+    caplog.clear()
+    import shutil
+    shutil.rmtree(old.root)
+    assert warn_legacy_layout(store.root) == [] and not caplog.records
 
 
 def test_a_directory_not_named_for_its_session_is_not_listed(store):

@@ -107,7 +107,7 @@ with urllib.request.urlopen(req) as r:
 EOF
 }
 chat() { api /api/v1/chat "$1"; }
-# the default tenant's user (sessions live in agent-api/data/sessions/$U/default_<session_id>)
+# the default tenant's user (sessions live in agent-api/data/sessions/$U/default.<session_id>)
 U=$(jq -r '[.tenants[] | select(.is_default)][0] | .user // .name // "default"' agent-api/data/tenants.json)
 hostev() { jq -c "select(.type==\"$2\") | .body" "$1"/events/host-*.jsonl; }   # hostev $S vm
 ```
@@ -234,7 +234,7 @@ EOF
 Run it 10 times on fresh sessions (`m3a1..m3a10`) and record min / median /
 max of `ready_ms`. Pass: median < 200 ms with `source: base`. A
 `vm{op: boot, source: rootfs}` instead means restore was refused; the reason
-is in the agent-api log (`session <user>/default_<sid>: base restore failed
+is in the agent-api log (`session <user>/default.<sid>: base restore failed
 (...)`). Baseline to compare: the M1 rootfs boot time (RUNBOOK-M1 §8).
 
 ## 4. Exit 2: park and resume across an hour, same `seq`

@@ -10,7 +10,7 @@ from app.session import migrate
 
 @pytest.fixture
 def session(tmp_path):
-    return SessionDir.create(tmp_path / "u_s1", user_id="u", session_id="s1", tenant="t")
+    return SessionDir.create(tmp_path / "u" / "t.s1", user_id="u", session_id="s1", tenant="t")
 
 
 def test_create_layout_and_meta(session):

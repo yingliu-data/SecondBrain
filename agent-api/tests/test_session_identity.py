@@ -2,9 +2,10 @@
 
 Tenant names may contain `_`: tenant `wcc` and tenant `wcc_event` of one
 user once shared prefixes (`u/wcc_` of the device-call owner key, the
-`wcc_` listing prefix of DirStore) and even directory names (`wcc_event_s1`
-= tenant `wcc` + session `event_s1` = tenant `wcc_event` + session `s1`).
-No listing, tool result or parked-session load may cross between them.
+`wcc_` listing prefix of DirStore) and even directory names in the old
+layout (`wcc_event_s1` = tenant `wcc` + session `event_s1` = tenant
+`wcc_event` + session `s1`; that layout is no longer read at all). No
+listing, tool result or parked-session load may cross between them.
 """
 import asyncio
 import json
@@ -37,8 +38,9 @@ def _dirs(store: DirStore) -> list[str]:
 @pytest.fixture
 def store(tmp_path, users_root):  # noqa: F811
     store = DirStore(tmp_path / "sessions")
-    # wcc_event's legacy session s1 (dir wcc_event_s1, which also reads as
-    # tenant wcc + session event_s1) and a new-layout one, both parked
+    # an old-layout dir wcc_event_s1 (ambiguous: tenant wcc + session
+    # event_s1, or tenant wcc_event + session s1; ignored by every lookup)
+    # and a new-layout session of wcc_event, both parked
     _park(SessionDir.create(store.root / "u" / "wcc_event_s1", user_id="u", session_id="s1",
                             tenant="wcc_event"))
     _park(store.get_or_create("u", "wcc_event", "s2"))
@@ -53,8 +55,9 @@ def test_session_keys_are_injective():
 
 def test_no_cross_listing(store):
     assert [r["session_id"] for r in store.list_for_tenant("u", "wcc")] == ["event_s2"]
-    assert sorted(r["session_id"] for r in store.list_for_tenant("u", "wcc_event")) == ["s1", "s2"]
-    assert store.get("u", "wcc", "event_s1") is None           # the legacy dir is wcc_event's
+    assert [r["session_id"] for r in store.list_for_tenant("u", "wcc_event")] == ["s2"]
+    assert store.get("u", "wcc", "event_s1") is None           # the old-layout dir is
+    assert store.get("u", "wcc_event", "s1") is None           # nobody's session
 
 
 @pytest.mark.asyncio
@@ -65,8 +68,8 @@ async def test_load_parked_loads_only_the_tenant_s_sessions_and_makes_no_dir(sto
         assert await workers.load_parked(WCC, FakeRegistry()) == []
         assert _dirs(store) == before                          # no stray wcc.event_s1
         loaded = await workers.load_parked(WCC_EVENT, FakeRegistry())
-        assert sorted(w.session_id for w in loaded) == ["s1", "s2"]
-        assert {w.session.root.name for w in loaded} == {"wcc_event_s1", "wcc_event.s2"}
+        assert [w.session_id for w in loaded] == ["s2"]      # never the old-layout s1
+        assert [w.session.root.name for w in loaded] == ["wcc_event.s2"]
         assert all(w.ref.tenant == "wcc_event" for w in loaded)
         assert _dirs(store) == before
     finally:
@@ -114,7 +117,7 @@ def test_listing_reads_only_the_tenant_s_directories_and_what_they_require(store
     monkeypatch.setattr(ds, "read_identity", lambda p: read.append(p.name) or real(p))
     rows = store.list_for_tenant("u", "wcc")
     assert [r["session_id"] for r in rows] == ["event_s2"]
-    assert all(n.startswith(("wcc.", "wcc_")) for n in read)
+    assert all(n.startswith("wcc.") for n in read)
     read.clear()
     assert store.list_for_tenant("u", "wcc", require="vm/parked.json") == []
     assert "wcc.event_s2" not in read      # no parked.json: its session.json is never read
