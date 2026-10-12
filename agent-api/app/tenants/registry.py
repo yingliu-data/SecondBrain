@@ -82,8 +82,14 @@ class TenantRegistry:
 
     def tenants_doc(self) -> dict:
         """{"tenants": [...]} in the shape flows.schedules.ensure_schedules
-        reads (Tenant.workflow_entry: no api keys)."""
-        return {"tenants": [t.workflow_entry() for t in self._tenants]}
+        reads (Tenant.workflow_entry: no api keys); a tenant without
+        `wall_clock_s` gets HARNESS_WALL_CLOCK_S, as worker.session_config
+        gives it on the chat path."""
+        from app.config import HARNESS_WALL_CLOCK_S
+        return {"tenants": [{**t.workflow_entry(),
+                             "wall_clock_s": (HARNESS_WALL_CLOCK_S if t.wall_clock_s is None
+                                              else t.wall_clock_s)}
+                            for t in self._tenants]}
 
     def all_origins(self) -> list[str]:
         """Every tenant's registered origins, the guest's included (CORS)."""

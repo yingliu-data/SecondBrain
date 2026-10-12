@@ -848,8 +848,9 @@ def wait_guest_idle(sb: FirecrackerSandbox, *, timeout_s: float = 120.0, poll_s:
                     log=None) -> str:
     """Block until the guest sits in its `--idle-wait vsock` loop.
 
-    With no host listener on v.sock_5000, each 50 ms connect attempt is a
-    REQUEST the VMM answers with RST: vsock packets in every metrics window,
+    With no host listener on v.sock_5000, each connect attempt (every 5 ms,
+    the guest's IDLE_POLL_S) is a REQUEST the VMM answers with RST: vsock
+    packets in every metrics window,
     and nothing else in the guest touches vsock before hello. `windows`
     consecutive windows with traffic -> idle; then `settle_s` for the rest of
     the system to quiesce. `fixed_delay_s` skips detection (sleep only).

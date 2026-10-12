@@ -881,6 +881,26 @@ def test_wall_clock_settles_timeout_and_ignores_the_late_response():
     check_log(scn)
 
 
+@pytest.mark.parametrize("task_wall_s", [WALL_S / 3, WALL_S * 4])
+def test_the_task_message_wall_clock_wins_over_hello_limits(task_wall_s):
+    """The host carries each task's wall clock in its task message (above
+    or below hello limits.wall_clock_s): the guest arms that one and logs
+    it on the input event."""
+    scn = Scenario(script=[text("too late")])
+    scn.provider.hold = True
+    scn.task("x", wall_clock_s=int(task_wall_s))
+    scn.start()
+    scn.wait_event("turn_start")
+    assert scn.bodies("input")[0]["wall_clock_s"] == int(task_wall_s)
+    assert scn.clock.pending(WALL_S) == []          # not the hello limit
+    assert scn.clock.fire(task_wall_s) == 1
+    result = scn.run()
+    assert result["outcome"] == "timeout"
+    assert scn.bodies("clock")[-1]["kind"] == "wall_clock"
+    scn.provider.release()
+    check_log(scn)
+
+
 def test_wall_clock_kills_open_side_calls():
     scn = Scenario(cfg=make_cfg(DEVICE), script=[tool_calls([("c", "calendar", {})])])
     scn.task("x")

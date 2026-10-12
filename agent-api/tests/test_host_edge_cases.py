@@ -130,13 +130,13 @@ async def test_device_result_after_an_agent_api_restart_is_accepted_and_the_task
     dc2 = DeviceCalls()
     workers, client = restarted_process(session, upstream.url, dc2, monkeypatch)
     try:
-        assert workers.get("u/t_s1") is None
+        assert workers.get("u/t/s1") is None
         r = await client.post("/api/v1/tool-result", json={"tool_call_id": "call_x", "result": "?"})
         assert r.status_code == 409                                  # unknown id: still 409
-        w2 = workers.get("u/t_s1")                                   # ... the parked session loaded
+        w2 = workers.get("u/t/s1")                                   # ... the parked session loaded
         assert w2 is not None and w2.vm_state == "parked"
         # rebuilt from the log: open, and re-emitted to a stream that attaches
-        assert dc2.open_for(w2.session_key) == [
+        assert dc2.open_for(w2.ref) == [
             {"id": "call_d", "name": "get_calendar_events", "arguments": {"day": "today"}}]
         sink = w2.attach("in_rs")
         assert sink.get_nowait().startswith("event: tool_call")

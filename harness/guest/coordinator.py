@@ -51,7 +51,9 @@ provider call in flight it wakes on any unseen result or staged input:
   - max_turns with calls running kills them first (error tool results);
     wall_clock, abort and escalation close them as in sync mode.
 
-Limits (cfg.limits): wall_clock_s → settle{timeout}; max_tools → one final
+Limits (cfg.limits): the task's wall clock → settle{timeout} (the task
+message's `wall_clock_s`, logged on its input event; limits.wall_clock_s
+when the message names none); max_tools → one final
 turn without tools, then settle{done}; max_turns → error{limit} +
 settle{failed}; finish_reason "length" → no tool runs, settle{done} with the
 partial text; question deadline → guard_decision{deny, unanswered}, three →
@@ -361,6 +363,9 @@ class Coordinator:
         self._last_response_had_calls = False
         self._preambles: dict[str, str] = {}
         self._attachments: dict[str, list] = {}
+        # input_id -> the wall clock its task message named (task.wall_clock_s;
+        # logged on its input event, so a restore knows it too)
+        self._task_walls: dict[str, int] = {}
         self._call_counts: dict[str, int] = {}
         self._pending_inputs: list[str] = []   # input_ids staged since the last turn start
         self._unseen: list[str] = []           # call_ids with a result since the last regular turn start
@@ -595,11 +600,15 @@ class Coordinator:
         event_body = {"input_id": input_id, "kind": kind, "text": str(text)}
         if "attachments" in body:
             event_body["attachments"] = body["attachments"]
+        if is_int(body.get("wall_clock_s"), 1):
+            event_body["wall_clock_s"] = body["wall_clock_s"]
         if input_id in self.state.seen_input_ids:
             self.emit("input", {**event_body, "dedupe": "duplicate"})
             return
         if isinstance(body.get("attachments"), list):
             self._attachments[input_id] = body["attachments"]
+        if "wall_clock_s" in event_body:
+            self._task_walls[input_id] = event_body["wall_clock_s"]
         self.emit("input", {**event_body, "dedupe": "new"})
         self._pending_inputs.append(input_id)
         if self.task_input_id is None:
@@ -614,10 +623,17 @@ class Coordinator:
         self._task_turns = 0
         self._user_memory = []
         self._cancel("idle")
-        wall = _limit(self.limits, "wall_clock_s", None)
+        wall = self._task_wall_s()
         if wall:
             self._arm("wall_clock", "wall", float(wall))
         self._start_turn()
+
+    def _task_wall_s(self):
+        """The running task's wall clock: what its task message named
+        (`wall_clock_s`, the host's per-task value), else hello
+        limits.wall_clock_s."""
+        wall = self._task_walls.get(self.task_input_id) if self.task_input_id else None
+        return wall or _limit(self.limits, "wall_clock_s", None)
 
     def _on_ui_response(self, body: dict) -> None:
         input_id = body.get("input_id") or f"ui:{body.get('question_id')}"
@@ -1598,7 +1614,7 @@ class Coordinator:
                     for token, (kind, remaining) in self._paused.items() if kind == "question_deadline")
         if left:
             body["question_left_ms"] = left
-        wall, paused = _limit(self.limits, "wall_clock_s", None), self._paused.get("wall")
+        wall, paused = self._task_wall_s(), self._paused.get("wall")
         if wall and paused is not None:          # the task's wall clock used so far (restore reads it)
             body["wall_used_ms"] = max(0, int(round((float(wall) - paused[1]) * 1000)))
         parked = self.emit("parked", body)
@@ -1647,6 +1663,8 @@ class Coordinator:
             if etype == "input" and body["dedupe"] == "new" and body["kind"] in INPUT_KINDS:
                 if isinstance(body.get("attachments"), list):
                     self._attachments[body["input_id"]] = body["attachments"]
+                if is_int(body.get("wall_clock_s"), 1):
+                    self._task_walls[body["input_id"]] = body["wall_clock_s"]
                 self._pending_inputs.append(body["input_id"])
                 if self.task_input_id is None:
                     self.task_input_id = body["input_id"]
@@ -1823,7 +1841,7 @@ class Coordinator:
             self.emit("clock", {"kind": "host_hello", "at": at})
         if self.task_input_id is not None:
             self._cancel("idle")
-            wall = _limit(self.limits, "wall_clock_s", None)
+            wall = self._task_wall_s()
             if wall:
                 used_ms = restored["wall_used_ms"]
                 if restored["live_since"] is not None:

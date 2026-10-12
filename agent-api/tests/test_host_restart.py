@@ -28,6 +28,9 @@ from app.host.sides import DeliveryError, DeviceCalls
 from app.host.worker import DIRECT, WORKFLOW, Worker, Workers
 from app.session.dir_store import DirStore
 from host_fakes import FakeRegistry, FakeTenant, FakeUpstreamLLM, session, users_root  # noqa: F401
+from app.session.ids import session_ref
+
+REF = session_ref("u", "t", "s1")
 
 GUEST_ROOT = Path(__file__).resolve().parents[2] / "harness"
 LOST = "error: operation lost (VM restarted)"
@@ -179,13 +182,13 @@ async def test_adopted_device_call_stays_open_until_delivered():
         if fail[0]:
             raise RuntimeError("no guest")
         delivered.append(result)
-    dc.adopt("call_a", "get_calendar_events", {}, "u/t_s1", deliver=deliver,
+    dc.adopt("call_a", "get_calendar_events", {}, REF, deliver=deliver,
              loop=asyncio.get_running_loop())
     with pytest.raises(DeliveryError):
-        dc.resolve("call_a", "r1", owner_prefix="u/t_")
-    assert dc.is_open("call_a") and dc.open_for("u/t_s1")[0]["id"] == "call_a"
+        dc.resolve("call_a", "r1", owner=("u", "t"))
+    assert dc.is_open("call_a") and dc.open_for(REF)[0]["id"] == "call_a"
     fail[0] = False
-    assert dc.resolve("call_a", "r2", owner_prefix="u/t_") is True
+    assert dc.resolve("call_a", "r2", owner=("u", "t")) is True
     assert delivered == ["r2"] and not dc.is_open("call_a")
     assert dc.resolve("call_a", "r3") is False                  # terminal now: 409
 
@@ -209,7 +212,7 @@ async def test_device_result_route_503_then_retry_and_worker_dedupe(session, mon
     monkeypatch.setattr(w, "send_control", fake_send)
     deliver = lambda result: w._deliver_adopted("call_r", "get_calendar_events", result)  # noqa: E731
     w._adopted["call_r"] = deliver
-    dc.adopt("call_r", "get_calendar_events", {}, w.session_key, deliver=deliver,
+    dc.adopt("call_r", "get_calendar_events", {}, w.ref, deliver=deliver,
              loop=asyncio.get_running_loop())
     monkeypatch.setattr(tool_result, "DEVICE_CALLS", dc)
     monkeypatch.setattr(chat, "workers", Workers(sessions=DirStore(session.root.parents[1])))
@@ -295,7 +298,7 @@ async def test_shutdown_parks_a_running_session_and_a_restart_adopts_its_device_
         r = await client.post("/api/v1/tool-result",
                               json={"tool_call_id": "call_s", "result": '[{"title": "Standup"}]'})
         assert r.status_code == 200
-        w2 = workers2.get("u/t_s1")
+        w2 = workers2.get("u/t/s1")
         await wait_until(lambda: "in_sd" in w2.sync.settled, 60, "settle after the restart")
         assert w2.sync.settled["in_sd"]["answer"] == "Standup at 9"
         assert w2.sync.runs() == [1]

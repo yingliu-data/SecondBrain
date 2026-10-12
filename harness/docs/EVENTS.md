@@ -33,7 +33,7 @@ strings. Times (`at`, `deadline`) are int milliseconds since the epoch.
 | type | body | writer |
 |---|---|---|
 | `session_start` | `user` str, `tenant` str, `workflow_run_id` str, `config_hash` str, `system_hash` str, `tools` list of `{name: str, side: guest/host/device/mcp, pin: str or null}` (unique names, `pin` key required), `harness_version` str, `image_version` str, `resumed` bool, `migrated`? bool (a run converted from a legacy `history.jsonl` by `app.session.migrate --events`, docs/HOST.md) | guest main / migrate |
-| `input` | `input_id` str, `kind` in `task`/`follow_up`/`steer`/`ui_response`, `text` str, `dedupe` in `new`/`duplicate`/`late`, `question_id`? str, `answer`? str | inbox |
+| `input` | `input_id` str, `kind` in `task`/`follow_up`/`steer`/`ui_response`, `text` str, `dedupe` in `new`/`duplicate`/`late`, `question_id`? str, `answer`? str, `wall_clock_s`? int (the task message's wall clock) | inbox |
 | `clock` | `kind` in `host_hello`/`host_heartbeat`/`turn_clock`/`idle_timer`/`question_deadline`/`wall_clock`/`resumed` or any `grace_*`, `at` int ms, `ref`? str (with `question_deadline`, the question whose deadline passed) | coordinator |
 | `turn_start` | `turn_id` str, `type` in `regular`/`compaction`, `includes_through_seq` int `>= 0`, `model` str, `params` dict, `request_hash` str, `preamble_hash` str, `workspace_tree_id` str or null | coordinator |
 | `llm_response` | `turn_id` str, `message` dict (the assistant message verbatim), `finish_reason` str, `usage` dict, `response_id`? str or null | provider |
@@ -136,7 +136,7 @@ and `POST /internal/gateway-events` share it.
 | type | body | writer |
 |---|---|---|
 | `vm` | `op` in `boot`/`restore`/`snapshot`/`destroy`, `source` in `rootfs`/`base`/`session`, `ms` (the sandbox's figure when it has one), `ready_ms`, `run`, `sandbox`, plus `ok`, `error`, `resume`, `reason` where they apply | worker |
-| `workflow` | `kind` in `task_signal`/`activity_start`/`heartbeat`/`completed`/`parked`/`delivered`/`idle`/`park_timeout`/`resume`/`answer_signal`/`answer_timeout`/`abort`, with the kind's fields (`input_id`, `outcome`, `ticket_id`, `attempt`, `floor_seq`, ...) | worker, activities |
+| `workflow` | `kind` in `task_signal`/`activity_start`/`heartbeat`/`completed`/`parked`/`delivered`/`idle`/`park_timeout`/`resume`/`answer_signal`/`answer_timeout`/`abort`/`dropped` (a queued task that never started, `reason`), with the kind's fields (`input_id`, `outcome`, `ticket_id`, `attempt`, `floor_seq`, ...) | worker, activities |
 | `side_call` | `side`, `call_id`, `name`, `ok`, `duration_ms`; `state: adopted` / `state: lost` for device calls a restarted worker adopted or a resume cancelled | sides, worker |
 | `gateway` | `op` in `list`/`call`/`quarantine`/`error`, `tool`?, `upstream`?, `ok`?, `ms`?, `error`?, `source`? (`forwarder` when the gateway could not be reached) | gateway (posted), forwarder |
 | `usage` | one LLM request's usage and status | LLM proxy |

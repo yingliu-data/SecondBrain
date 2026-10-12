@@ -20,7 +20,10 @@ memory?}`.
 
   DeviceCalls              call_id -> open call; `resolve(call_id, result)`
                            is False for an unknown or terminal id (409 at
-                           the route); `open_for(session_key)` lists what a
+                           the route); every entry carries its session's
+                           SessionRef: `resolve(..., owner=(user, tenant))`
+                           compares it exactly (another tenant's call is
+                           unknown to it), `open_for(ref)` lists what a
                            re-attaching stream must re-emit. `adopt(...)`:
                            an open call rebuilt from a parked session's log
                            by a new Worker (an agent-api restart): no waiter
@@ -43,6 +46,7 @@ from typing import Callable
 from app.host.sanitize import sanitize
 from app.skills.avatar_control import AVATAR_TOOLS
 from app.config import HARNESS_HOST_TOOL_TIMEOUT_S, TOOL_TIMEOUT
+from app.session.ids import SessionRef
 from app.skills.base import set_current_context
 
 logger = logging.getLogger("host.sides")
@@ -63,33 +67,34 @@ class DeviceCalls:
     def __init__(self) -> None:
         self._open: dict[str, dict] = {}
 
-    def open(self, call_id: str, name: str, arguments: dict, session_key: str,
+    def open(self, call_id: str, name: str, arguments: dict, session: SessionRef,
              loop: asyncio.AbstractEventLoop | None = None) -> asyncio.Future:
         loop = loop or asyncio.get_running_loop()
         fut = loop.create_future()
         self._open[call_id] = {"future": fut, "name": name, "arguments": arguments,
-                               "session_key": session_key, "loop": loop}
+                               "session": session, "loop": loop}
         return fut
 
-    def adopt(self, call_id: str, name: str, arguments: dict, session_key: str,
+    def adopt(self, call_id: str, name: str, arguments: dict, session: SessionRef,
               deliver: Callable[[str], None],
               loop: asyncio.AbstractEventLoop | None = None) -> None:
         """An open call no Sides waits on: the session's log has it open
         (a new Worker rebuilt it from the fold). resolve() hands the result
         to `deliver` (on `loop`, when given) and the call is terminal."""
         self._open[call_id] = {"future": None, "deliver": deliver, "name": name,
-                               "arguments": arguments, "session_key": session_key,
+                               "arguments": arguments, "session": session,
                                "loop": loop}
 
     @staticmethod
     def _pending(entry: dict) -> bool:
         return entry["future"] is None or not entry["future"].done()
 
-    def resolve(self, call_id: str, result: str, owner_prefix: str | None = None) -> bool:
+    def resolve(self, call_id: str, result: str,
+                owner: tuple[str, str] | None = None) -> bool:
         """Deliver the device's result. False when the call is unknown or
         already terminal (timed out, resolved, or never opened), or, with
-        `owner_prefix`, belongs to a session whose key does not start with it
-        (another tenant's call).
+        `owner` = (user, tenant), belongs to a session of another tenant
+        (its SessionRef's user and tenant, compared exactly).
 
         An adopted call stays open until its `deliver` returned: a deliver
         that raises leaves it open (DeliveryError here, so the route answers
@@ -99,7 +104,7 @@ class DeviceCalls:
         entry = self._open.get(call_id)
         if entry is None:
             return False
-        if owner_prefix is not None and not entry["session_key"].startswith(owner_prefix):
+        if owner is not None and not owns(owner, entry["session"]):
             return False
         if not self._pending(entry):
             self._open.pop(call_id, None)
@@ -149,16 +154,21 @@ class DeviceCalls:
         entry = self._open.get(call_id)
         return entry is not None and self._pending(entry)
 
-    def open_for(self, session_key: str) -> list[dict]:
+    def open_for(self, session: SessionRef) -> list[dict]:
         return [
             {"id": cid, "name": e["name"], "arguments": e["arguments"]}
             for cid, e in self._open.items()
-            if e["session_key"] == session_key and self._pending(e)
+            if e["session"] == session and self._pending(e)
         ]
 
     def count(self) -> int:
         """Open calls. (No __len__: an empty registry must stay truthy.)"""
         return sum(1 for e in self._open.values() if self._pending(e))
+
+
+def owns(owner: tuple[str, str], session: SessionRef) -> bool:
+    """`owner` (user, tenant) is exactly the user and tenant of `session`."""
+    return (session.user, session.tenant) == tuple(owner)
 
 
 def _memory_change(name: str, args: dict, result: str) -> dict | None:
@@ -203,7 +213,7 @@ class Sides:
                  host_event: Callable[[str, dict], object] | None = None,
                  device_calls: DeviceCalls = DEVICE_CALLS,
                  note_host_result: Callable[[str, str], None] | None = None,
-                 session_key: str = "",
+                 session_ref: SessionRef | None = None,
                  host_timeout_s: float = HARNESS_HOST_TOOL_TIMEOUT_S,
                  device_timeout_s: float = TOOL_TIMEOUT) -> None:
         self.registry = registry
@@ -214,7 +224,7 @@ class Sides:
         self.host_event = host_event or (lambda t, b: None)
         self.device_calls = device_calls
         self.note_host_result = note_host_result or (lambda c, r: None)
-        self.session_key = session_key
+        self.session_ref = session_ref
         self.host_timeout_s = host_timeout_s
         self.device_timeout_s = device_timeout_s
         self.tasks: set[asyncio.Task] = set()
@@ -287,7 +297,7 @@ class Sides:
     async def _run_device(self, body: dict) -> dict:
         started = time.monotonic()
         name, call_id = body["name"], body["call_id"]
-        fut = self.device_calls.open(call_id, name, body["args"], self.session_key)
+        fut = self.device_calls.open(call_id, name, body["args"], self.session_ref)
         try:
             raw = await asyncio.wait_for(fut, timeout=self.device_timeout_s)
         except asyncio.TimeoutError:

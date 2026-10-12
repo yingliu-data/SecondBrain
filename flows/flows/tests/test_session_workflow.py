@@ -12,7 +12,8 @@ from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from flows import activities as acts
-from flows.activities import RunResult, RunTask, SessionConfig, SessionRef, TaskSignal
+from flows.activities import (MAX_QUEUE_WAIT_S, WALL_CLOCK_GRACE_S, RunResult, RunTask,
+                              SessionConfig, SessionRef, TaskSignal, run_task_timeout_s)
 from flows.client import session_handle, signal_abort, signal_answer
 from flows.session_workflow import (
     AnswerSignal,
@@ -212,10 +213,30 @@ async def test_g_abort_while_running(make_session):
     await s.send(TaskSignal(input_id="in-1", text="long", wall_clock_s=60))
     await s.wait_for(lambda: len(s.calls("run_task")) == 1, what="run_task start")
     assert s.calls("run_task")[0]["input"].wall_clock_s == 60  # the task's override
+    # the guest settles `timeout` at the wall clock (counted from the task's
+    # start on the host); the activity's timeouts are a safety net on top
+    rec = s.calls("run_task")[0]
+    assert rec["start_to_close_s"] == 60 + WALL_CLOCK_GRACE_S + MAX_QUEUE_WAIT_S
     await signal_abort(s.client, s.ref, "user cancelled")
     delivered = await s.wait_delivered(1)
     assert delivered[0]["input"].outcome == "aborted"
     await s.wait_state("idle")
+
+
+async def test_g2_run_task_timeouts_leave_room_for_the_queue(make_session):
+    """run_task's Temporal timeouts never cut a task's slot wait short: both
+    are wall clock + grace + max_queue_wait_s (configurable), for all
+    attempts together; the heartbeat timeout covers liveness."""
+    s = await make_session(SessionConfig(max_queue_wait_s=900))
+    await s.send(TaskSignal(input_id="in-1", text="go", wall_clock_s=45))
+    await s.wait_delivered(1)
+    [rec] = s.calls("run_task")
+    want = 45 + WALL_CLOCK_GRACE_S + 900
+    assert want == run_task_timeout_s(45, 900)
+    assert rec["start_to_close_s"] == want and rec["schedule_to_close_s"] == want
+    assert rec["heartbeat_s"] == SessionConfig().activities["run_task"].heartbeat_s == 120
+    # the default: an hour to start
+    assert SessionConfig().max_queue_wait_s == MAX_QUEUE_WAIT_S == 3600
 
 
 async def test_h_schedule_kind_task(make_session):

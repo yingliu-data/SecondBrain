@@ -118,7 +118,9 @@ REQUIRED_BODY: dict[str, dict[str, tuple]] = {
 OPTIONAL_BODY: dict[str, dict[str, tuple]] = {
     # a run converted from a legacy history.jsonl (app.session.migrate --events)
     "session_start": {"migrated": BOOL},
-    "input": {"question_id": STR, "answer": STR},
+    # wall_clock_s: the wall clock the task message named (the guest arms
+    # it for the task the input starts; a restore reads it back)
+    "input": {"question_id": STR, "answer": STR, "wall_clock_s": INT},
     "llm_response": {"response_id": OPT_STR},
     # `attempt` = the gateway POST of an mcp call (0 = the first);
     # `input_request` {request_state, schema} only with state input_required

@@ -200,6 +200,26 @@ def test_fresh_process_resume_then_answer_completes_and_wall_clock_skips_the_par
     assert state_hash(state) == state_hash(b.state)
 
 
+def test_restore_rearms_the_wall_clock_the_task_message_named():
+    """A fresh process restoring a parked task re-arms the task's own wall
+    clock (logged on its input event), not hello limits.wall_clock_s."""
+    task_wall = int(WALL_S * 3)
+    a = Scenario(cfg=m5_cfg(), script=[q_call()])
+    a.task("ask", wall_clock_s=task_wall)
+    q, _ = park_on_question(a)
+    log = list(a.events)
+    b = Scenario(cfg=m5_cfg(resume=True), script=[text("Resumed.")])
+    b.clock.ms = a.clock.ms
+    b.coord.restore(log)
+    b.start()
+    b.wait_for(lambda: len(b.events) >= 2)
+    wall = [h.delay_s for h in b.clock.pending()]
+    assert len(wall) == 1 and task_wall - 5 < wall[0] <= task_wall
+    answer(b, q["question_id"], "a")
+    assert b.run()["outcome"] == "done"
+    check(log + b.events)
+
+
 def test_parked_records_the_wall_clock_used_and_restore_reads_it():
     """parked.wall_used_ms is the task's wall clock up to the park; a fresh
     process restoring after a resume adds only the guest time since the

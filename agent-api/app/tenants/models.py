@@ -43,11 +43,14 @@ class Tenant(BaseModel):
     max_tools: int | None = None           # None -> config.MAX_TOOLS
     max_tokens: int | None = None          # None -> LLM default
     exclude_builtins: list[str] = []       # guest built-ins this tenant's sessions do not get
+    # hello.config.async_tools (tools run while the model goes on; see
+    # harness/docs/ASYNC-TOOLS.md); None -> HARNESS_ASYNC_TOOLS (default false)
+    async_tools: bool | None = None
     is_default: bool = False
     # Temporal session workflow: flows.SESSION_CONFIG_KEYS, read by
     # SessionConfig.from_tenant (None keeps the flows default);
     # `schedules` = [{cron, prompt, session, tz?}]
-    wall_clock_s: int | None = None
+    wall_clock_s: int | None = None        # a task's wall clock, both paths; None -> HARNESS_WALL_CLOCK_S
     answer_wait_s: int | None = None       # parked question wait (phone 86400)
     max_tasks_per_run: int | None = None
     max_history_events: int | None = None  # history length before continue-as-new

@@ -1,23 +1,26 @@
-"""POST /api/v1/chat — one input through the harness engine (every tenant):
-the session workflow when Temporal is up, else the direct path
-(Worker.act). `turn_stream` is shared with the guest avatar route."""
+"""POST /api/v1/chat — one input through the harness engine (every tenant).
+
+The path is configuration (temporal.configured(): TEMPORAL_ADDRESS set):
+the session workflow only, else the direct path (Worker.act) only; never a
+switch mid-session. While the configured Temporal is connecting or down the
+request waits TEMPORAL_READY_WAIT_S, then answers 503 + Retry-After.
+`open_turn` is shared with the guest avatar route."""
 import asyncio
 import logging
 
-from fastapi import APIRouter, Request, Depends
-from flows.activities import SessionRef, TaskSignal
+from fastapi import APIRouter, HTTPException, Request, Depends
+from flows.activities import TaskSignal
 from flows.client import signal_answer, signal_task
 from flows.session_workflow import AnswerSignal
 from fastapi.responses import StreamingResponse
 from app.auth.middleware import verify
-from app.config import HARNESS_KEEPALIVE_S, MAX_INPUT
+from app.config import (HARNESS_KEEPALIVE_S, MAX_INPUT, TEMPORAL_READY_WAIT_S,
+                        TEMPORAL_RETRY_AFTER_S)
 from app.host import temporal
 from app.host.stream import KEEPALIVE, SSE_HEADERS, fatal_items, tokens
 from app.host.worker import Workers, new_input_id, session_config
 from app.session.factory import create_session_store
-from app.session.ids import session_key
-from app.session.queue import SessionQueue
-from app.session.ticket import Ticket
+from app.session.ids import is_safe_id, session_ref
 from app.skills.base import set_current_context
 from app.tenants import Tenant
 
@@ -27,8 +30,7 @@ router = APIRouter()
 
 
 sessions = create_session_store()
-session_queue = SessionQueue()
-workers = Workers(sessions=sessions)   # one Worker per running session
+workers = Workers(sessions=sessions)   # one Worker per running session; the task cap
 _registry = None
 
 
@@ -37,14 +39,27 @@ def set_registry(registry):
     _registry = registry
 
 
-def turn_stream(tenant: Tenant, session_id: str, message: str, input_id: str | None = None,
-                *, answer_to: str | None = None):
-    """The SSE items of one input of `tenant`'s session: the workflow path
-    when Temporal is up, else the direct path. A missing input_id is minted."""
+async def open_turn(tenant: Tenant, session_id: str, message: str,
+                    input_id: str | None = None, *, answer_to: str | None = None):
+    """The SSE items of one input of `tenant`'s session, on the configured
+    path. Raises HTTPException 400 for an unsafe session id, 503 (+
+    Retry-After) when the workflow path is configured but Temporal is not
+    ready within TEMPORAL_READY_WAIT_S. A missing input_id is minted."""
+    if not is_safe_id(session_id):
+        raise HTTPException(400, "Invalid session id")
     input_id = input_id or new_input_id()
-    if temporal.enabled():
-        return _workflow_turn(tenant, session_id, message, input_id, answer_to=answer_to)
-    return _harness_turn(tenant, session_id, message, input_id, answer_to=answer_to)
+    if not temporal.configured():
+        return _harness_turn(tenant, session_id, message, input_id, answer_to=answer_to)
+    await require_workflow_ready()
+    return _workflow_turn(tenant, session_id, message, input_id, answer_to=answer_to)
+
+
+async def require_workflow_ready() -> None:
+    """Temporal ready within TEMPORAL_READY_WAIT_S, else HTTPException 503 +
+    Retry-After (the workflow path is configured, its service is not up)."""
+    if not await temporal.wait_ready(TEMPORAL_READY_WAIT_S):
+        raise HTTPException(503, "The session workflow service is not available; retry.",
+                            headers={"Retry-After": str(TEMPORAL_RETRY_AFTER_S)})
 
 
 @router.post("/api/v1/chat")
@@ -52,8 +67,8 @@ async def chat(request: Request, tenant: Tenant = Depends(verify)):
     body = await request.json()
     message = body.get("message", "")[:MAX_INPUT]
     session_id = body.get("session_id", "default")
-    generator = turn_stream(tenant, session_id, message, body.get("input_id"),
-                            answer_to=body.get("answer_to"))
+    generator = await open_turn(tenant, session_id, message, body.get("input_id"),
+                                answer_to=body.get("answer_to"))
     return StreamingResponse(
         generator,
         media_type="text/event-stream",
@@ -91,16 +106,16 @@ async def _drain(worker, sink, task: asyncio.Future | None = None):
         worker.detach(sink)
 
 
-async def _answer_stream(worker, task_id: str | None, answer_to: str, message: str,
-                         input_id: str):
+async def _answer_stream(worker, task_id: str | None, answer_to: str, message: str):
     """An answer to question `answer_to` as ui_response to the worker's
     live or parked guest (a parked one is restored first), then the
-    stream of `task_id`, the task it belongs to; NO_QUESTION when there is
+    stream of `task_id`, the task it belongs to (the ui_response's
+    input_id derives from it: Worker.answer); NO_QUESTION when there is
     no such task, no guest takes it, or the guest is parked on another
     question (Worker.answer refuses it)."""
     sink = worker.attach(task_id) if task_id is not None else None
-    if sink is None or worker.answer(answer_to, message, input_id) in ("no_guest",
-                                                                       "other_question"):
+    if sink is None or worker.answer(answer_to, message, task_id) in ("no_guest",
+                                                                      "other_question"):
         if sink is not None:
             worker.detach(sink)
         async for item in _error_stream(NO_QUESTION):
@@ -113,8 +128,10 @@ async def _answer_stream(worker, task_id: str | None, answer_to: str, message: s
 async def _harness_turn(tenant: Tenant, session_id: str, message: str, input_id: str,
                         *, answer_to: str | None = None):
     """One input through the harness engine without Temporal: the session's
-    Worker runs the task in the sandbox (act(), the in-process driver);
-    this generator streams the Worker's SSE sink and keeps the connection
+    Worker runs the task in the sandbox (act(), the in-process driver; the
+    Worker serialises the session's tasks, its admission caps running
+    tasks across sessions, its finish_input writes the ticket); this
+    generator streams the Worker's SSE sink and keeps the connection
     alive. The task outlives a client disconnect; a redelivered `input_id`
     attaches to the running task or gets the stored answer again. An
     answer (`answer_to`) does not queue behind the session: it goes to the
@@ -129,47 +146,14 @@ async def _harness_turn(tenant: Tenant, session_id: str, message: str, input_id:
         # question's (vm/parked.json), whose restored driver re-attaches it
         qp = worker.question_park
         task_id = worker.current_input_id or (qp["input_id"] if qp is not None else None)
-        async for item in _answer_stream(worker, task_id, answer_to,
-                                         message, input_id):
+        async for item in _answer_stream(worker, task_id, answer_to, message):
             yield item
         return
 
-    async with session_queue.run(session_key(tenant.user, tenant.name, session_id)) as slot:
-        ticket = await asyncio.to_thread(Ticket.start, session, "chat.turn",
-                                         inputs={"message": message, "input_id": input_id})
-        sink = worker.attach(input_id)
-        task = asyncio.ensure_future(worker.act({"input_id": input_id, "text": message}))
-
-        def _finish(t: asyncio.Task) -> None:
-            try:
-                result = t.result()
-                state = "success" if result.get("outcome") == "done" else "failed"
-                summary = f"turn: {message[:80]} ({result.get('outcome')})"
-            except BaseException as e:  # noqa: BLE001 - the ticket records any failure
-                state, summary = "failed", f"turn: {message[:80]} ({e})"
-            try:
-                ticket.finish(state, summary=summary)
-            except Exception as e:
-                logger.warning(f"ticket finish failed: {e}")
-
-        task.add_done_callback(_finish)
-        unparked = asyncio.ensure_future(_slot_unless_parked(worker, input_id, task, slot))
-        try:
-            async for item in _drain(worker, sink, task):
-                yield item
-        finally:
-            unparked.cancel()
-
-
-async def _slot_unless_parked(worker, input_id: str, task: asyncio.Future, slot) -> None:
-    """Give the global slot back while the input is parked on a question (a
-    wait of up to answer_wait_s, not work), take it again when it resumes;
-    the session lock still orders the session."""
-    async for parked in worker.parked_states(input_id, task):
-        if parked:
-            slot.release()
-        else:
-            await slot.acquire()
+    sink = worker.attach(input_id)
+    task = asyncio.ensure_future(worker.act({"input_id": input_id, "text": message}))
+    async for item in _drain(worker, sink, task):
+        yield item
 
 
 async def _workflow_turn(tenant: Tenant, session_id: str, message: str, input_id: str,
@@ -182,13 +166,16 @@ async def _workflow_turn(tenant: Tenant, session_id: str, message: str, input_id
     disconnect never touches the task."""
     worker = workers.get_or_create(tenant, session_id, _registry)
     set_current_context(worker.session, tenant.user, tenant.name, session_id)
-    ref = SessionRef(user=tenant.user, tenant=tenant.name, session_id=session_id)
+    ref = session_ref(tenant.user, tenant.name, session_id)
 
     if not answer_to:
         sink = worker.attach(input_id)
         if worker.replay(input_id, sink) is None:       # a settled input: its answer again
-            await signal_task(temporal.client, ref, TaskSignal(input_id=input_id, text=message),
-                              task_queue=temporal.task_queue, config=session_config(tenant))
+            config = session_config(tenant)
+            # the tenant's current wall clock (SessionConfig), as on the direct path
+            task = TaskSignal(input_id=input_id, text=message, wall_clock_s=config.wall_clock_s)
+            await signal_task(temporal.client, ref, task,
+                              task_queue=temporal.task_queue, config=config)
         async for item in _drain(worker, sink):
             yield item
         return
@@ -210,7 +197,7 @@ async def _workflow_turn(tenant: Tenant, session_id: str, message: str, input_id
                 yield item
             return
     if not parked:
-        async for item in _answer_stream(worker, task_id, answer_to, message, input_id):
+        async for item in _answer_stream(worker, task_id, answer_to, message):
             yield item
         return
     sink = worker.attach(task_id)

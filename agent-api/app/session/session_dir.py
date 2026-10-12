@@ -2,7 +2,7 @@
 
 Layout::
 
-    {root}/{user_id}_{session_id}/
+    {sessions_root}/{user}/{tenant}.{session_id}/      (app.session.dir_store)
         session.json         # metadata + forward-only state
         events/              # the event log (canonical): rNNNN/ runs, host-*.jsonl
         workspace/           # agent-produced files

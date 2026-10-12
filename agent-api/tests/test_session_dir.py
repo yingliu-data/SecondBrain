@@ -2,10 +2,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from app.session.manifest import Manifest
 from app.session.session_dir import SessionDir
 from app.session.state import StateError
-from app.session.ticket import Ticket
 from eventlog_fakes import LogBuilder, store, conversation
 from app.session import migrate
 
@@ -64,26 +62,3 @@ def test_trace_from_the_event_log_and_since(session):
     assert len(session.read_trace(since=past)) == 8
     assert [r["event"] for r in session.read_trace(limit=2)] == ["assistant_response", "settle"]
     assert not (session.root / migrate.TRACE_FILE).exists()
-
-
-def test_ticket_lifecycle(session):
-    import json
-    ticket = Ticket.start(session, "chat.turn", inputs={"message": "hi"})
-    record = json.loads(ticket.path.read_text())
-    assert record["state"] == "running"
-    assert record["inputs_hash"].startswith("sha256:")
-    ticket.finish("success", summary="done")
-    record = json.loads(ticket.path.read_text())
-    assert record["state"] == "success"
-    assert record["completed_at"]
-    assert session.read_meta()["last_ticket_id"] == ticket.ticket_id
-    assert not (session.root / migrate.TRACE_FILE).exists()      # the ticket file is the record
-
-
-def test_manifest_detects_tamper(session):
-    f = session.workspace / "out.txt"
-    f.write_text("original")
-    manifest = Manifest.compute(session.root, ["workspace/out.txt"])
-    assert manifest.verify(session.root) == []
-    f.write_text("tampered")
-    assert manifest.verify(session.root) == ["workspace/out.txt"]

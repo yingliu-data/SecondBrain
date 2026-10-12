@@ -51,7 +51,8 @@ class TaskSignal:
     kind: str = "task"
     """``task`` (chat) or ``schedule`` (Temporal Schedule fire)."""
     wall_clock_s: int | None = None
-    """Overrides ``SessionConfig.wall_clock_s`` for this task."""
+    """Overrides ``SessionConfig.wall_clock_s`` for this task (agent-api sets it
+    from the tenant's current config on every chat input)."""
 
 
 @dataclass
@@ -74,6 +75,28 @@ def _default_activity_options() -> dict[str, ActivityOptions]:
     }
 
 
+WALL_CLOCK_GRACE_S = 30
+"""What the host waits past a task's wall clock, counted from when the task
+took its slot of the task cap (the guest settles ``timeout`` at the wall
+clock itself; this covers boot and the settle's way back): the host's
+backstop on both paths.  ``run_task``'s Temporal timeouts add
+``SessionConfig.max_queue_wait_s`` on top (``run_task_timeout_s``)."""
+
+MAX_QUEUE_WAIT_S = 3600
+"""Default ``SessionConfig.max_queue_wait_s``."""
+
+
+def run_task_timeout_s(wall_clock_s: int, max_queue_wait_s: int) -> int:
+    """``run_task``'s start-to-close and schedule-to-close timeout: a safety
+    net only.  The task's time limit counts from its start on the host (the
+    guest's wall clock, the host's backstop of it + ``WALL_CLOCK_GRACE_S``);
+    the time before it - Temporal's task queue, the wait for a slot of the
+    task cap - is bounded by ``max_queue_wait_s``, liveness by the heartbeat
+    (which ticks while the task is queued too).  A cancel before the task
+    started drops it on the host: it never runs later."""
+    return wall_clock_s + WALL_CLOCK_GRACE_S + max_queue_wait_s
+
+
 SESSION_CONFIG_KEYS = ("wall_clock_s", "answer_wait_s", "max_tasks_per_run",
                        "max_history_events")
 """The ``tenants.json`` keys ``SessionConfig.from_tenant`` reads (agent-api's
@@ -94,6 +117,11 @@ class SessionConfig:
     max_history_events: int = 10_000
     """History length past which a run continues-as-new (between tasks, or
     while a task is parked); the other trigger next to ``max_tasks_per_run``."""
+    max_queue_wait_s: int = MAX_QUEUE_WAIT_S
+    """How long a task may wait to start (Temporal's task queue, a slot of
+    agent-api's task cap) before ``run_task`` times out; added to its
+    Temporal timeouts only (``run_task_timeout_s``), never to the task's own
+    wall clock.  agent-api: ``HARNESS_MAX_QUEUE_WAIT_S``."""
     activities: dict[str, ActivityOptions] = field(default_factory=_default_activity_options)
     """Timeouts and retries per activity name; ``run_task.timeout_s`` is the
     default wall clock of a task (``TaskSignal.wall_clock_s`` overrides it)."""
@@ -144,6 +172,9 @@ class RunTask:
     answer: str | None = None
     question_id: str | None = None
     wall_clock_s: int = 600
+    """The task's wall clock: the guest gets it in the ``task`` message and
+    settles ``timeout`` at it, counted from the task's start on the host;
+    the activity's Temporal timeout is ``run_task_timeout_s``."""
 
 
 @dataclass
@@ -223,6 +254,12 @@ def _record(name: str, inp: Any, **extra: Any) -> dict[str, Any]:
         "attempt": info.attempt,
         "input": inp,
         "heartbeat_details": list(info.heartbeat_details),
+        "start_to_close_s": (info.start_to_close_timeout.total_seconds()
+                             if info.start_to_close_timeout else None),
+        "schedule_to_close_s": (info.schedule_to_close_timeout.total_seconds()
+                                if info.schedule_to_close_timeout else None),
+        "heartbeat_s": (info.heartbeat_timeout.total_seconds()
+                        if info.heartbeat_timeout else None),
         **extra,
     }
     CALLS.append(rec)

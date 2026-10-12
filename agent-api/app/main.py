@@ -75,10 +75,11 @@ async def _resume_question_parks():
 
 @app.on_event("startup")
 async def _start_temporal():
-    # TEMPORAL_ADDRESS set -> the session
-    # workflow's worker runs on this loop with the real activities, and the
-    # tenants' schedules are ensured, in the background: startup never waits
-    # for Temporal, the direct path serves /chat until (unless) it is up.
+    # TEMPORAL_ADDRESS set -> every input goes through the session workflow:
+    # its worker runs on this loop with the real activities (a supervisor
+    # reconnects / restarts it), and the tenants' schedules are ensured, in
+    # the background: startup never waits for Temporal; /chat answers 503
+    # (Retry-After) while it is not ready. Unset -> the direct path only.
     from app.host import temporal
     from app.host.activities import HostActivities
     acts = HostActivities(chat.workers, tenant_registry, registry)

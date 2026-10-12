@@ -55,7 +55,7 @@ class Principal:
 
 @dataclass
 class Limits:
-    wall_clock_s: int = 600
+    wall_clock_s: int = 600              # a task whose task message names no wall_clock_s
     max_tools: int = 10
     max_turns: int = 12
     max_tokens: int = 512

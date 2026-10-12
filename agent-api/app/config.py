@@ -88,7 +88,20 @@ HARNESS_HELLO_TIMEOUT_S = int(os.environ.get("HARNESS_HELLO_TIMEOUT_S", 30))   #
 # workflow's heartbeat timeout is 120 s; an abort reaches the activity on one)
 HARNESS_HEARTBEAT_S = int(os.environ.get("HARNESS_HEARTBEAT_S", 60))
 HARNESS_KEEPALIVE_S = int(os.environ.get("HARNESS_KEEPALIVE_S", 15))            # SSE comment
-HARNESS_WALL_CLOCK_S = int(os.environ.get("HARNESS_WALL_CLOCK_S", 600))        # per task
+# A task's wall clock when its tenant sets no `wall_clock_s` (the tenant's
+# value wins; both paths read it through SessionConfig, worker.session_config).
+# It travels in the `task` message; the guest settles `timeout` at it.
+HARNESS_WALL_CLOCK_S = int(os.environ.get("HARNESS_WALL_CLOCK_S", 600))
+# Running tasks across all sessions (both paths; a task parked on a question
+# holds none). Tasks over the cap wait for a slot.
+HARNESS_MAX_CONCURRENT_TASKS = int(os.environ.get("HARNESS_MAX_CONCURRENT_TASKS", 5))
+# Workflow path: how long a task may wait to start (Temporal's task queue, a
+# slot of the cap above) before run_task times out. Its Temporal timeouts are
+# wall_clock_s + 30 + this (flows.activities.run_task_timeout_s), a safety net:
+# the task's own time limit counts from when it took its slot.
+HARNESS_MAX_QUEUE_WAIT_S = int(os.environ.get("HARNESS_MAX_QUEUE_WAIT_S", 3600))
+# hello.config.async_tools when the tenant sets no `async_tools`
+HARNESS_ASYNC_TOOLS = os.environ.get("HARNESS_ASYNC_TOOLS", "false").lower() in ("1", "true", "yes")
 HARNESS_MAX_TURNS = int(os.environ.get("HARNESS_MAX_TURNS", 12))
 HARNESS_QUESTION_TIMEOUT_S = int(os.environ.get("HARNESS_QUESTION_TIMEOUT_S", 300))
 HARNESS_HOST_TOOL_TIMEOUT_S = int(os.environ.get("HARNESS_HOST_TOOL_TIMEOUT_S", 120))
@@ -114,9 +127,14 @@ HARNESS_CONTEXT_WINDOW_TOKENS = int(os.environ.get("HARNESS_CONTEXT_WINDOW_TOKEN
 HARNESS_RESERVE_TOKENS = int(os.environ.get("HARNESS_RESERVE_TOKENS", 4096))
 
 # ── Temporal ──
-# Set -> POST /chat of a harness tenant goes through the session workflow
-# (flows.SessionWorkflow); unset -> the direct path (Worker.act).
+# Configuration, not liveness: set -> every input goes through the session
+# workflow (flows.SessionWorkflow), never the direct path; while Temporal is
+# connecting or down, POST /chat waits TEMPORAL_READY_WAIT_S, then answers
+# 503 + Retry-After. Unset -> the direct path (Worker.act) only.
 TEMPORAL_ADDRESS = os.environ.get("TEMPORAL_ADDRESS", "")
+TEMPORAL_READY_WAIT_S = float(os.environ.get("TEMPORAL_READY_WAIT_S", 5))
+TEMPORAL_RETRY_AFTER_S = int(os.environ.get("TEMPORAL_RETRY_AFTER_S", 5))
+TEMPORAL_RECONNECT_S = float(os.environ.get("TEMPORAL_RECONNECT_S", 5))   # connect / worker restart backoff
 TEMPORAL_NAMESPACE = os.environ.get("TEMPORAL_NAMESPACE", "secondbrain")
 TEMPORAL_TASK_QUEUE = os.environ.get("TEMPORAL_TASK_QUEUE", "secondbrain-agent")   # flows.TASK_QUEUE
 TEMPORAL_CONNECT_TIMEOUT_S = float(os.environ.get("TEMPORAL_CONNECT_TIMEOUT_S", 10))

@@ -4,7 +4,9 @@ host log.
 Body `{user, tenant, session_id, op, tool?, upstream?, ok?, ms?, error?}`,
 bearer INTERNAL_TOKEN (empty token = no check). The event is appended as a
 `gateway` host event (body = the payload without user/tenant/session_id) to
-`{SESSIONS_ROOT}/{user}/{tenant}_{session_id}/events/host-*.jsonl` through
+the session's directory (`DirStore.path_for`: `{SESSIONS_ROOT}/{user}/
+{tenant}.{session_id}/`, or a legacy directory of exactly that session)
+`events/host-*.jsonl` through
 the directory's process-wide HostLog (state_sync.host_log): the same writer
 and hseq counter a live worker's StateSync uses, so it does not matter
 whether one is running.
@@ -39,8 +41,8 @@ def record_gateway_event(payload: dict, *, sessions) -> bool:
     """Append one gateway event; False when the session directory is absent."""
     user, tenant, session_id = (payload[k] for k in IDENTITY)
     session_dir = sessions.path_for(user, tenant, session_id)
-    if not (session_dir / "session.json").exists():
-        logger.info("gateway event for unknown session %s/%s_%s dropped (%s)",
+    if sessions.get(user, tenant, session_id) is None:
+        logger.info("gateway event for unknown session %s/%s/%s dropped (%s)",
                     user, tenant, session_id, payload.get("op"))
         return False
     body = {k: v for k, v in payload.items() if k not in IDENTITY}

@@ -115,7 +115,7 @@ def test_events_migration_of_a_real_shaped_session(tmp_path):
 
     result = migrate.migrate_events(store.root, quiet=True)
     assert result["stats"] == {"migrated": 1}
-    report = result["sessions"][f"wcc/wcc-event_{sid}"]
+    report = result["sessions"][f"wcc/wcc-event.{sid}"]
     assert report["exchanges"] == 3 and report["replies"] == 2
     assert report["tool_calls"] == 2 and report["unanswered"] == 1
 
@@ -225,7 +225,7 @@ def test_events_migration_history_tool_rows_and_segments(tmp_path):
     _legacy(store, sid="empty", history=())
     result = migrate.migrate_events(store.root, quiet=True, segment_events=4)
     assert result["stats"] == {"migrated": 1, "skipped_empty": 1}
-    assert result["sessions"]["wcc/wcc-event_s2"]["skipped_rows"] == 1
+    assert result["sessions"]["wcc/wcc-event.s2"]["skipped_rows"] == 1
     segments = sorted(p.name for p in (session.root / "events" / "r0000").iterdir())
     assert segments[0] == "000001.jsonl" and len(segments) > 1
     assert verify_session(session.root) == []
@@ -255,3 +255,29 @@ def test_events_migration_finishes_an_interrupted_one(tmp_path):
     assert migrate.migrate_events(store.root, quiet=True)["stats"] == {"migrated": 1}
     assert [p.name for p in (session.root / "events").iterdir()] == ["r0000"]
     assert verify_session(session.root) == []
+
+
+def test_layout_migration_renames_legacy_directories_by_their_session_json(tmp_path, capsys):
+    """--layout: {tenant}_{session_id} -> {tenant}.{session_id}, decided by
+    session.json, so tenants `wcc` and `wcc_event` never swap sessions."""
+    from app.session.session_dir import SessionDir
+    store = DirStore(tmp_path / "sessions")
+    user_dir = store.root / "u"
+    a = SessionDir.create(user_dir / "wcc_event_s1", user_id="u", session_id="s1",
+                          tenant="wcc_event")
+    (a.workspace / "keep.txt").write_text("a")
+    SessionDir.create(user_dir / "wcc_x", user_id="u", session_id="x", tenant="wcc")
+    # a directory whose session.json names another session is left alone
+    SessionDir.create(user_dir / "wcc_y", user_id="u", session_id="z", tenant="wcc")
+    store.get_or_create("u", "wcc", "new")                      # already the new layout
+    dry = migrate.migrate_layout(store.root, dry_run=True, quiet=True)
+    assert dry["stats"] == {"would_rename": 2, "mismatch": 1}
+    assert (user_dir / "wcc_event_s1").exists()
+    assert migrate.main(["--layout", str(store.root)]) == 0
+    assert sorted(p.name for p in user_dir.iterdir()) == [
+        "wcc.new", "wcc.x", "wcc_event.s1", "wcc_y"]
+    assert (user_dir / "wcc_event.s1" / "workspace" / "keep.txt").read_text() == "a"
+    assert store.get("u", "wcc_event", "s1").root == user_dir / "wcc_event.s1"
+    assert sorted(r["session_id"] for r in store.list_for_tenant("u", "wcc")) == ["new", "x"]
+    again = migrate.migrate_layout(store.root, quiet=True)
+    assert again["stats"] == {"mismatch": 1}                    # idempotent

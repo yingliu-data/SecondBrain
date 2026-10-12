@@ -202,17 +202,27 @@ The wire side is docs/PROTOCOL.md sections 5, 6 and 8. What the guest does:
   (`canonical.derive_id`) from what hello brings (session_id), so two VMs
   restored from one snapshot write distinct ids and logs.
 - **Flags** (`guest.main`): `--idle-wait vsock` (the snapshot point: the
-  transport tries :5000 every 50 ms, silently, no backoff; idle-wait ends with
+  transport tries :5000 every 5 ms (`IDLE_POLL_S`), silently, no backoff; before
+  the transport starts, `preload()` imports every session module so the
+  snapshot holds them and a restore imports nothing; idle-wait ends with
   the first line the host sends, so any connect error *or* a reset right after
   connecting, as a Firecracker snapshot causes, goes back to polling);
   main waits on `Transport.wait_awake()`; `--mount-workspace DEV` (after
-  idle-wait, before hello is read: `mount -o noatime DEV WORKSPACE` unless the
+  idle-wait, before hello is read: mount(2) through libc, ext4 + MS_NOATIME,
+  no fork/exec; `mount -o noatime DEV WORKSPACE` when that fails; unless the
   workspace is already a mountpoint; a missing DEV is skipped; a failed mount
   is logged and the guest goes on). One lifecycle: the guest always stays up
   after a settle (`Coordinator.run()` handles one task per call) and returns
   to idle-wait after a park; it ends on an abort, a fatal error or when the
   host stops it.
 - **Limits**: `park_grace_s` (default 30) joins `hello.config.limits`.
+- **Wall clock per task**: a `task` / `follow_up` / `steer` message may carry
+  `wall_clock_s` (the host always sends the task's: the tenant's value, else
+  `HARNESS_WALL_CLOCK_S`). The input event logs it; the task the input
+  starts arms that clock (`Coordinator._task_wall_s`), parks pause it
+  (`parked.wall_used_ms`) and a restore re-arms what is left of it from the
+  logged value. `hello.config.limits.wall_clock_s` is only the default for a
+  message without one. Expiry → `clock{wall_clock}` → `settle{timeout}`.
 - **Park** (`Coordinator`): honoured when no provider call is in flight and no
   guest operation runs; host/device/mcp calls and open questions do not hold
   it. While a park waits, no turn starts. Guest ops still running after

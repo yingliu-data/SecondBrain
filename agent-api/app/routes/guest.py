@@ -2,7 +2,7 @@
 
 The route's own loop is gone; the
 input goes through the same harness chat path as every tenant
-(routes/chat.turn_stream) with the guest tenant profile (app/auth/guest.py).
+(routes/chat.open_turn: the configured path, 503 while it is not ready) with the guest tenant profile (app/auth/guest.py).
 This route keeps only what is the page's: the Origin check, the page's
 limits (GuestSessionManager) and the wire shape the page consumes —
 `token`, `avatar_command`, `done` (and keepalive comments); the harness's
@@ -78,6 +78,6 @@ async def guest_chat(request: Request):
         return JSONResponse({"error": error}, status_code=429)
 
     session.message_count += 1
-    items = chat.turn_stream(_tenant, harness_session_id(session_id), message)
+    items = await chat.open_turn(_tenant, harness_session_id(session_id), message)
     return StreamingResponse(_page_view(items), media_type="text/event-stream",
                              headers=SSE_HEADERS)

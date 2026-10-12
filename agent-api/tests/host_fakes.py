@@ -540,8 +540,9 @@ class FakeRegistry:
 class FakeTenant:
     def __init__(self, name="t", user="u", system_prompt=None,
                  local_skills=None, max_tools=None, max_tokens=None, exclude_builtins=(),
-                 answer_wait_s=0):
+                 answer_wait_s=0, wall_clock_s=None, async_tools=None):
         self.name, self.user = name, user
+        self.wall_clock_s, self.async_tools = wall_clock_s, async_tools
         self.exclude_builtins = list(exclude_builtins)
         self.system_prompt = system_prompt
         self.local_skills = local_skills
@@ -549,7 +550,10 @@ class FakeTenant:
         self.answer_wait_s = answer_wait_s    # 0: the guest denies a question deadline
 
     def workflow_entry(self):
-        return {"name": self.name, "user": self.user, "answer_wait_s": self.answer_wait_s}
+        entry = {"name": self.name, "user": self.user, "answer_wait_s": self.answer_wait_s}
+        if self.wall_clock_s is not None:
+            entry["wall_clock_s"] = self.wall_clock_s
+        return entry
 
     def allowed_skill_names(self):
         return None if self.local_skills is None else set(self.local_skills)

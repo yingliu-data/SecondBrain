@@ -118,7 +118,7 @@ def test_harness_chat_streams_and_device_result_resolves(client):
                                    "input_id": "in_route_1"})
     r = c.post("/api/v1/chat", content=raw, headers=h)
     assert "event: done" in r.text and '"text": "one "' in r.text
-    w = workers.get("harn/harn_s1")
+    w = workers.get("harn/harn/s1")
     assert w.sandbox.starts == 1
     assert (w.session.root / "events" / "r0001" / "000001.jsonl").exists()
     # a server-minted input_id when the body has none: a second guest run

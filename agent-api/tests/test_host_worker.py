@@ -47,7 +47,10 @@ async def test_text_answer_streams_legacy_tokens_and_stores_the_log(session):
     # the guest's task message carried attachments and got acked
     guest = sandbox.guests[0]
     task = next(c for c in guest.controls if c["type"] == "task")
-    assert task["body"] == {"input_id": "in_1", "text": "hi", "attachments": []}
+    # ... and the task's wall clock (the tenant sets none: the Worker's default)
+    assert task["body"] == {"input_id": "in_1", "text": "hi", "attachments": [],
+                            "wall_clock_s": 10}
+    assert hello["config"]["async_tools"] is False
     assert guest.acked == guest.seq
     # stored log == guest log; projections; host events; sandbox stopped at settle
     stored = w.sync.read(0)
@@ -235,7 +238,7 @@ async def test_workers_registry_and_prompt_stripping(session):
     store.session = None
     assert reg.get_or_create(t, "s1", FakeRegistry()) is a
     await reg.shutdown()
-    assert a.closed and reg.get("u/t_s1") is None
+    assert a.closed and reg.get("u/t/s1") is None
     assert strip_current_time("a\n- Current time: {current_time}\nb") == "a\nb"
     assert strip_current_time("WCC prompt. Current time: {current_time}") == "WCC prompt."
     assert strip_current_time("x {current_time} y") == "x  y"
@@ -292,3 +295,41 @@ async def test_streamed_deltas_reach_the_sink_verbatim_once(session):
     assert token_text(sse).strip() == "Second answer" and sse[-1] == DONE
     assert sse[1:] == tokens("Second answer") + [DONE]            # the non-streamed shape
     await w.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tenant_wall", [3, 900])
+async def test_the_tenant_wall_clock_is_the_task_s_on_the_direct_path(session, tenant_wall):
+    """A tenant wall_clock_s below or above the default (the Worker's
+    wall_clock_s, HARNESS_WALL_CLOCK_S) is every task's: in the task
+    message (the guest settles `timeout` at it) and the host's wait."""
+    sandbox = FakeSandbox([{"text": "ok"}])
+    w = Worker(session, FakeTenant(wall_clock_s=tenant_wall), FakeRegistry(), sandbox,
+               device_calls=DeviceCalls(), **worker_kwargs())
+    assert w.wall_clock_s == 10 and w.default_wall_clock_s() == tenant_wall
+    result = await w.act({"input_id": "in_w", "text": "hi"})
+    assert result["outcome"] == "done"
+    task = next(c for c in sandbox.guests[0].controls if c["type"] == "task")
+    assert task["body"]["wall_clock_s"] == tenant_wall
+    assert w.last_hello["config"]["limits"]["wall_clock_s"] == tenant_wall
+    # a task input that names its own (the workflow's RunTask) wins
+    assert w.wall_clock_for({"input_id": "x", "wall_clock_s": 42}) == 42
+    await w.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tenant_value,env_default,expected", [
+    (None, False, False), (None, True, True), (True, False, True), (False, True, False)])
+async def test_hello_async_tools_is_the_tenant_s_else_the_env_default(
+        session, monkeypatch, tenant_value, env_default, expected):
+    monkeypatch.setattr("app.host.worker.HARNESS_ASYNC_TOOLS", env_default)
+    w = Worker(session, FakeTenant(async_tools=tenant_value), FakeRegistry(),
+               FakeSandbox([{"text": "ok"}]), device_calls=DeviceCalls(), **worker_kwargs())
+    assert w.build_hello()["config"]["async_tools"] is expected
+    await w.close()
+
+
+def test_tenant_async_tools_key_loads():
+    from app.tenants import Tenant
+    assert Tenant(name="a", api_key="k").async_tools is None
+    assert Tenant(name="a", api_key="k", async_tools=True).async_tools is True

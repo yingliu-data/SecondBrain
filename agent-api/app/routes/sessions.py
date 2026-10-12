@@ -4,13 +4,12 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, HTTPException, Depends
 from temporalio.service import RPCError, RPCStatusCode
 from app.auth.middleware import verify
-from flows.activities import SessionRef
 from flows.client import signal_abort
 from app.host import temporal
 from app.host.state_sync import read_current_run
 from app.session.dir_store import DirStore
 from app.session.eventlog import parse_ts
-from app.session.ids import session_key
+from app.session.ids import SessionRef, session_key, session_ref
 from app.session.session_dir import SessionDir
 from app.tenants import Tenant
 
@@ -95,7 +94,7 @@ def _session_or_404(tenant: Tenant, session_id: str) -> SessionDir:
 
 
 def _ref(tenant: Tenant, session_id: str) -> SessionRef:
-    return SessionRef(user=tenant.user, tenant=tenant.name, session_id=session_id)
+    return session_ref(tenant.user, tenant.name, session_id)
 
 
 def _live_worker(tenant: Tenant, session_id: str):
@@ -113,10 +112,13 @@ async def get_session(session_id: str, tenant: Tenant = Depends(verify)):
 
 @router.post("/{session_id}/abort")
 async def abort_session(session_id: str, tenant: Tenant = Depends(verify)):
-    """The `abort` signal (the workflow aborts the running or parked task).
-    Without Temporal: abort{aborted} to the live worker's guest."""
+    """The `abort` signal (the workflow aborts the running or parked task)
+    on the workflow path (503 while Temporal is not ready); on the direct
+    path abort{aborted} to the live worker's guest."""
     _session_or_404(tenant, session_id)
-    if temporal.enabled():
+    if temporal.configured():
+        from app.routes import chat
+        await chat.require_workflow_ready()
         try:
             await signal_abort(temporal.client, _ref(tenant, session_id), "aborted")
         except RPCError as e:

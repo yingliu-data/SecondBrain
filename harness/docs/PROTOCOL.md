@@ -42,13 +42,13 @@ Types: `hello`, `task`, `follow_up`, `steer`, `ui_response`, `side_result`,
 `park`, `abort`, `heartbeat`.
 
 ```json
-{"session_id":"sess-1","cseq":2,"type":"task","body":{"input_id":"in-7","text":"Summarise my week","attachments":[]}}
+{"session_id":"sess-1","cseq":2,"type":"task","body":{"input_id":"in-7","text":"Summarise my week","attachments":[],"wall_clock_s":600}}
 ```
 
 | type | body |
 |---|---|
 | `hello` | `config` (model alias, limits, tools with sides, ports, hooks, `async_tools`, `question_timeout_s`, `ui_attached`), `session_id`, `principal` (user, tenant), `system_block`, `resume`, `at` |
-| `task` / `follow_up` / `steer` | `input_id`, `text`, `attachments` |
+| `task` / `follow_up` / `steer` | `input_id`, `text`, `attachments`, `wall_clock_s?` (int ≥ 1: the task's wall clock; the guest arms it for the task the input starts, logs it on the `input` event and settles `timeout` at it; absent → hello `limits.wall_clock_s`) |
 | `ui_response` | `input_id`, `question_id`, `answer` |
 | `side_result` | `call_id`, `side` (`host`/`device`/`mcp`), `content`, `ok`; optional `memory` `{scope, op, slug, sha256}`: the memory the call changed (`remember`/`forget`), which the guest records as a `memory` event after the ok `tool_result` (docs/GUEST.md) |
 | `park` | `reason` |

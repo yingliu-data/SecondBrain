@@ -32,7 +32,8 @@ from flows.client import session_handle
 
 from app.auth import middleware
 from app.host import temporal
-from app.host.activities import HostActivities, ticket_id_for
+from app.host.activities import HostActivities
+from app.host.worker import ticket_id_for
 from app.host.sandbox.local import LocalSandbox
 from app.host.sides import DeviceCalls
 from app.host.worker import WORKFLOW, Workers
@@ -79,13 +80,16 @@ class Harness:
     """One test's app: tenant `harn`, DirStore, Workers on
     LocalSandbox, the Temporal worker on its own task queue."""
 
-    def __init__(self, env, tmp_path, upstream, monkeypatch, answer_wait_s=ANSWER_WAIT_S):
+    def __init__(self, env, tmp_path, upstream, monkeypatch, answer_wait_s=ANSWER_WAIT_S,
+                 wall_clock_s=120, max_concurrent=5):
         from app.routes import chat, sessions
         self.env = env
         self.upstream = upstream
         self.session_id = "s-" + uuid.uuid4().hex[:8]
         self.ref = SessionRef(user="harn", tenant="harn", session_id=self.session_id)
-        entry = {"name": "harn", "api_key": "harn-key", "wall_clock_s": 120}
+        entry = {"name": "harn", "api_key": "harn-key"}
+        if wall_clock_s is not None:            # None: the tenant does not set it
+            entry["wall_clock_s"] = wall_clock_s
         if answer_wait_s is not None:           # None: the tenant does not set it
             entry["answer_wait_s"] = answer_wait_s
         doc = {"tenants": [entry]}
@@ -98,6 +102,7 @@ class Harness:
         self.store = DirStore(self.short)
         self.workers = Workers(sandbox_factory=lambda: LocalSandbox(GUEST_ROOT),
                                sessions=self.store, abort_wait_s=20,
+                               max_concurrent=max_concurrent,
                                device_calls=DeviceCalls(), llm_url=upstream.url,
                                hello_timeout_s=20, heartbeat_s=1, wall_clock_s=120,
                                park_grace_s=30)
@@ -123,6 +128,15 @@ class Harness:
                                   default_heartbeat_throttle_interval=timedelta(seconds=0.5))
         assert ok and temporal.enabled()
 
+    async def chat_in(self, session_id: str, **body) -> str:
+        raw, h = self._headers({**body, "session_id": session_id})
+        r = await self.http.post("/api/v1/chat", content=raw, headers=h)
+        assert r.status_code == 200
+        return r.text
+
+    def worker_of(self, session_id: str):
+        return self.workers.get(f"harn/harn/{session_id}")
+
     def restart(self, monkeypatch) -> Workers:
         """A new agent-api process: new Workers (new DeviceCalls) over the
         same session store, used by the routes and the activities from now
@@ -137,7 +151,7 @@ class Harness:
 
     @property
     def worker(self):
-        return self.workers.get(f"harn/harn_{self.session_id}")
+        return self.workers.get(f"harn/harn/{self.session_id}")
 
     def _headers(self, body: dict | None):
         raw = json.dumps(body) if body is not None else ""
@@ -277,9 +291,11 @@ async def test_chat_task_completes_through_the_workflow(h):
     assert st.tasks_run == 1 and st.seen == 1
     [ticket] = h.tickets()
     assert ticket == {"ticket_id": ticket_id_for(h.ref, "in_t1"), "input_id": "in_t1",
-                      "outcome": "done", "answer": "Hello through Temporal",
-                      "question_id": None, "manifest": ticket["manifest"],
-                      "usage": ticket["usage"]}
+                      "driver": "workflow", "outcome": "done",
+                      "answer": "Hello through Temporal", "question_id": None, "error": None,
+                      "manifest": w.sync.settled["in_t1"]["manifest"],
+                      "usage": w.sync.settled["in_t1"]["usage"],
+                      "completed_at": ticket["completed_at"]}
     starts = [b["activity"] for b in h.host_events("activity_start")]
     assert starts == ["prepare_vm", "run_task", "deliver"]
     assert [b["outcome"] for b in h.host_events("delivered")] == ["done"]
@@ -482,11 +498,28 @@ async def test_abort_without_workflow_is_404(h):
     assert r.status_code == 200 and r.json()["workflow"] is None
 
 
-async def test_unreachable_temporal_leaves_the_direct_path(monkeypatch):
+async def test_unreachable_temporal_answers_503_never_the_direct_path(tmp_path, users_root,
+                                                                      upstream, monkeypatch):
+    """TEMPORAL_ADDRESS configured but Temporal unreachable: the workflow
+    path is still the one (configuration, not liveness); POST /chat waits
+    TEMPORAL_READY_WAIT_S, then 503 + Retry-After, and no Worker is made."""
+    from app.routes import chat
     monkeypatch.setattr("app.host.temporal.TEMPORAL_CONNECT_TIMEOUT_S", 2)
-    assert await temporal.start([], None, address="127.0.0.1:1") is False
-    assert not temporal.enabled()
+    monkeypatch.setattr(chat, "TEMPORAL_READY_WAIT_S", 0.3)
+    d = Harness(None, tmp_path, upstream, monkeypatch)
+    try:
+        assert await temporal.start([], None, address="127.0.0.1:1") is False
+        assert temporal.configured() and not temporal.ready()
+        raw, hd = d._headers({"session_id": d.session_id, "message": "hi"})
+        r = await d.http.post("/api/v1/chat", content=raw, headers=hd)
+        assert r.status_code == 503 and r.headers["retry-after"]
+        assert d.worker is None and not upstream.requests
+    finally:
+        await temporal.stop()
+        await d.close()
+    assert not temporal.configured()
     assert await temporal.start([], None, address="") is False
+    assert not temporal.configured()
 
 
 async def test_tenant_workflow_entry_and_doc(tmp_path):
@@ -548,7 +581,7 @@ async def _direct_question_answered(d, monkeypatch, input_id):
     d.upstream.responses = [tool_call("call_q", "question", {"text": "Which colour?",
                                                             "options": ["red", "blue"]}),
                             {"content": "You picked blue"}]
-    assert not temporal.enabled()
+    assert not temporal.configured()
     first = asyncio.ensure_future(d.chat(message="ask me", input_id=input_id))
     w = await wait_until(lambda: d.worker is not None and d.worker.question_park is not None
                          and d.worker, 30, "question park")
@@ -591,20 +624,33 @@ async def test_direct_path_answer_wait_escalates(direct, monkeypatch):
 
 
 async def test_client_disconnect_mid_task_direct_path(direct):
-    assert not temporal.enabled()
+    assert not temporal.configured()
     await _disconnect_mid_task_then_catch_up(direct, "in_dc_direct")
 
 
-async def test_worker_made_under_temporal_keeps_working_on_the_direct_path(direct, monkeypatch):
-    """The Worker is created while Temporal runs, then the Temporal worker
-    exits (_worker_exited: client None): the direct path drives it."""
-    monkeypatch.setattr(temporal, "client", object())
-    assert temporal.enabled()
-    tenant = direct.tenants.get_by_name("harn")
-    w = direct.workers.get_or_create(tenant, direct.session_id, direct.registry)
-    monkeypatch.setattr(temporal, "client", None)
-    await _direct_question_answered(direct, monkeypatch, "in_dq3")
-    assert direct.worker is w
+async def test_temporal_worker_exit_is_503_not_the_direct_path(h, monkeypatch):
+    """The Temporal worker exits on its own: not ready (503 + Retry-After)
+    until the supervisor restarts it; the direct path is never taken."""
+    from app.routes import chat
+    monkeypatch.setattr(chat, "TEMPORAL_READY_WAIT_S", 0.3)
+    await h.start()
+    assert temporal.configured() and temporal.ready()
+    worker, task = temporal._worker, temporal._worker_task
+    temporal._worker_exited(task)                 # as if the worker died
+    try:
+        assert temporal.configured() and not temporal.ready()
+        raw, hd = h._headers({"session_id": h.session_id, "message": "hi"})
+        r = await h.http.post("/api/v1/chat", content=raw, headers=hd)
+        assert r.status_code == 503 and r.headers["retry-after"]
+        assert h.worker is None and not h.upstream.requests
+        r = await h.post("/abort")
+        assert r.status_code == 404                   # no session dir yet
+        h.store.get_or_create("harn", "harn", h.session_id)
+        r = await h.post("/abort")
+        assert r.status_code == 503
+    finally:
+        await worker.shutdown()
+        await task
 
 
 async def test_direct_answer_to_another_question_while_parked_is_refused(direct, monkeypatch):
@@ -647,14 +693,12 @@ async def test_direct_redelivery_while_parked_on_a_question_does_not_wake(direct
 
 async def test_direct_parked_sessions_do_not_hold_the_global_slots(tmp_path, users_root,
                                                                   upstream, monkeypatch):
-    """SessionQueue caps the direct path at 5 running turns; a turn parked on
-    a question (up to answer_wait_s, here an hour) gives its slot back, so
+    """The Workers' admission caps running tasks at 5; a task parked on a
+    question (up to answer_wait_s, here an hour) gives its slot back, so
     six parked sessions never block a seventh session's chat."""
-    from app.routes import chat
-    from app.session.queue import SessionQueue
     monkeypatch.setattr("app.host.worker.HARNESS_QUESTION_TIMEOUT_S", 1)
-    monkeypatch.setattr(chat, "session_queue", SessionQueue(5))
     d = Harness(None, tmp_path, upstream, monkeypatch, answer_wait_s=3600)
+    assert d.workers.admission.max_concurrent == 5
     n = 6
     d.upstream.responses = [tool_call(f"call_q{i}", "question", {"text": f"Q{i}?"})
                             for i in range(n)] + [{"content": "free to answer"}]
@@ -665,7 +709,7 @@ async def test_direct_parked_sessions_do_not_hold_the_global_slots(tmp_path, use
             parked.append(asyncio.ensure_future(d.chat(session_id=sid, message="ask",
                                                        input_id=f"in_p{i}")))
             workers.append(await wait_until(
-                lambda: (w := d.workers.get(f"harn/harn_{sid}")) is not None
+                lambda: (w := d.workers.get(f"harn/harn/{sid}")) is not None
                 and w.parked_on(f"in_p{i}") and w, 30, f"park {i}"))
         body = await asyncio.wait_for(d.chat(session_id=f"{d.session_id}-new",
                                              message="hi", input_id="in_new"), 60)
@@ -677,6 +721,253 @@ async def test_direct_parked_sessions_do_not_hold_the_global_slots(tmp_path, use
     finally:
         for p in parked:
             p.cancel()
+        await d.close()
+
+
+# --------------------------------------------------------------------------- #
+# one task cap (Workers' admission) on both paths; one wall clock on both paths
+
+
+async def _cap_of_one(d, monkeypatch, workflow: bool) -> None:
+    """max_concurrent 1: a task parked on a question holds no slot (another
+    session's task runs), a running task does (the next one waits for it:
+    it asks the model only after the first task settled)."""
+    monkeypatch.setattr("app.host.worker.HARNESS_QUESTION_TIMEOUT_S", 1)
+    assert d.workers.admission.max_concurrent == 1
+    sa, sb, sc, sd = (f"{d.session_id}-{x}" for x in "abcd")
+    d.upstream.responses = [tool_call("call_q", "question", {"text": "Which?"}),
+                            {"content": "B done"}, {"content": "A done"},
+                            tool_call("call_s", "bash", {"command": "sleep 2; echo slept"}),
+                            {"content": "C done"}, {"content": "D done"}]
+    first = asyncio.ensure_future(d.chat_in(sa, message="ask", input_id="in_ca"))
+    wa = await wait_until(lambda: (w := d.worker_of(sa)) is not None and w.parked_on("in_ca")
+                          and w, 60, "A parks")
+    assert d.workers.admission.free == 1                     # the park gave its slot back
+    body = await asyncio.wait_for(d.chat_in(sb, message="hi", input_id="in_cb"), 60)
+    assert token_text(body).strip() == "B done"
+    qid = wa.question_park["question_id"]
+    await d.chat_in(sa, message="x", answer_to=qid, input_id="in_ca_a")
+    assert token_text(await asyncio.wait_for(first, 60)).strip() == "A done"
+    if workflow:
+        await wait_until(lambda: d.workers.admission.free == 1, 30, "A's slot back")
+    c = asyncio.ensure_future(d.chat_in(sc, message="slow", input_id="in_cc"))
+    wc = await wait_until(lambda: (w := d.worker_of(sc)) is not None and any(
+        e["type"] == "tool_call" for e in w.sync.read(0)) and w, 60, "C's tool runs")
+    dd = asyncio.ensure_future(d.chat_in(sd, message="next", input_id="in_cd"))
+    await asyncio.sleep(1.0)
+    wd = d.worker_of(sd)
+    # D waits for C's slot: no task of it runs, nothing went to its guest
+    assert wd is None or (wd.current_input_id is None and not any(
+        e["type"] == "input" for e in wd.sync.read(0)))
+    assert not dd.done() and d.workers.admission.free == 0
+    assert token_text(await asyncio.wait_for(c, 60)).strip() == "C done"
+    assert token_text(await asyncio.wait_for(dd, 60)).strip() == "D done"
+    assert wc.sync.settled["in_cc"]["answer"] == "C done"
+    # D asked the model only after C settled: it got the 6th answer, not C's
+    assert d.worker_of(sd).sync.settled["in_cd"]["answer"] == "D done"
+    await wait_until(lambda: d.workers.admission.free == 1, 30, "every slot back")
+
+
+async def test_task_cap_on_the_direct_path(tmp_path, users_root, upstream, monkeypatch):
+    d = Harness(None, tmp_path, upstream, monkeypatch, answer_wait_s=3600, max_concurrent=1)
+    try:
+        await _cap_of_one(d, monkeypatch, workflow=False)
+    finally:
+        await d.close()
+
+
+async def test_task_cap_on_the_workflow_path(tenv, tmp_path, users_root, upstream, monkeypatch):
+    d = Harness(tenv, tmp_path, upstream, monkeypatch, answer_wait_s=3600, max_concurrent=1)
+    try:
+        await d.start()
+        await _cap_of_one(d, monkeypatch, workflow=True)
+    finally:
+        for sid in (f"{d.session_id}-{x}" for x in "abcd"):
+            try:
+                await session_handle(tenv.client, SessionRef("harn", "harn", sid)).terminate("done")
+            except Exception:  # noqa: BLE001
+                pass
+        await d.close()
+
+
+def _run_task_started(d, sid: str, input_id: str):
+    """The Worker of `sid` once its run_task for `input_id` started (the
+    activity's host event), else None."""
+    w = d.worker_of(sid)
+    if w is None:
+        return None
+    return w if any(h["type"] == "workflow" and h["body"].get("kind") == "activity_start"
+                    and h["body"].get("activity") == "run_task"
+                    and h["body"].get("input_id") == input_id
+                    for h in w.sync.read_host()) else None
+
+
+async def test_workflow_task_waits_past_its_wall_clock_for_a_slot(tenv, tmp_path, users_root,
+                                                                  upstream, monkeypatch):
+    """max_concurrent 1: B's run_task (wall clock 3 s) waits for A's slot
+    longer than its wall clock + grace and is not timed out: its time limit
+    counts from its start, run_task's Temporal timeouts leave room for the
+    queue (wall + grace + max_queue_wait_s). B then runs and completes.
+    (Real time: the test server does not skip time while activities run.)"""
+    from flows.activities import WALL_CLOCK_GRACE_S
+    d = Harness(tenv, tmp_path, upstream, monkeypatch, wall_clock_s=90, max_concurrent=1)
+    sa, sb = f"{d.session_id}-a", f"{d.session_id}-b"
+    b_wall = 3
+    hold = b_wall + WALL_CLOCK_GRACE_S + 4              # A holds the slot this long
+    d.upstream.responses = [tool_call("call_s", "bash", {"command": f"sleep {hold}; echo slept"}),
+                            {"content": "A done"}, {"content": "B done"}]
+    acts, timeouts = d.acts, {}
+
+    @activity.defn(name="run_task")
+    async def run_task(inp: RunTask) -> RunResult:
+        timeouts[inp.input_id] = (inp.wall_clock_s, activity.info().start_to_close_timeout)
+        return await acts.run_task(inp)
+    try:
+        await d.start([acts.prepare_vm, run_task, acts.park_vm, acts.deliver])
+        a = asyncio.ensure_future(d.chat_in(sa, message="slow", input_id="in_qa"))
+        await wait_until(lambda: (w := d.worker_of(sa)) is not None and any(
+            e["type"] == "tool_call" for e in w.sync.read(0)), 60, "A's tool runs")
+        d.tenants.get_by_name("harn").wall_clock_s = b_wall     # B's task signal carries it
+        t0 = time.monotonic()
+        b = asyncio.ensure_future(d.chat_in(sb, message="next", input_id="in_qb"))
+        wb = await wait_until(lambda: _run_task_started(d, sb, "in_qb"), 30, "B's run_task")
+        assert timeouts["in_qb"][0] == b_wall
+        assert timeouts["in_qb"][1].total_seconds() > b_wall + WALL_CLOCK_GRACE_S + 60
+        assert wb.task_for("in_qb") is not None and wb.current_input_id is None  # queued
+        assert token_text(await asyncio.wait_for(a, hold + 60)).strip() == "A done"
+        waited = time.monotonic() - t0
+        assert waited > b_wall + WALL_CLOCK_GRACE_S
+        body = await asyncio.wait_for(b, 60)
+        assert token_text(body).strip() == "B done" and sse_events(body)[-1] == ("done", {})
+        assert wb.sync.settled["in_qb"]["outcome"] == "done"
+        [inp] = [e["body"] for e in wb.sync.read(0) if e["type"] == "input"]
+        assert inp["input_id"] == "in_qb" and inp["wall_clock_s"] == b_wall
+        assert not [h for h in wb.sync.read_host() if h["type"] == "workflow"
+                    and h["body"].get("kind") == "dropped"]
+        [ticket] = [json.loads(p.read_text()) for p in wb.session.tickets.glob("ticket_*.json")]
+        assert ticket["outcome"] == "done"
+        await wait_until(lambda: d.workers.admission.free == 1, 30, "every slot back")
+    finally:
+        for sid in (sa, sb):
+            try:
+                await session_handle(tenv.client, SessionRef("harn", "harn", sid)).terminate("done")
+            except Exception:  # noqa: BLE001
+                pass
+        await d.close()
+
+
+async def test_workflow_cancelled_queued_task_never_starts(tenv, tmp_path, users_root,
+                                                           upstream, monkeypatch):
+    """max_concurrent 1: B's run_task waits for A's slot when B's workflow
+    is aborted. B's queued task is dropped (host event workflow{dropped};
+    deliver(aborted) or the activity's cancel): no abort to a guest, nothing of B ever reaches its
+    guest or the model, also after A gave the slot back; B ends aborted."""
+    from flows.client import signal_abort
+    d = Harness(tenv, tmp_path, upstream, monkeypatch, max_concurrent=1)
+    sa, sb = f"{d.session_id}-a", f"{d.session_id}-b"
+    d.upstream.responses = [tool_call("call_s", "bash", {"command": "sleep 4; echo slept"}),
+                            {"content": "A done"}, {"content": "B must not run"}]
+    try:
+        await d.start()
+        a = asyncio.ensure_future(d.chat_in(sa, message="slow", input_id="in_xa"))
+        await wait_until(lambda: (w := d.worker_of(sa)) is not None and any(
+            e["type"] == "tool_call" for e in w.sync.read(0)), 60, "A's tool runs")
+        b = asyncio.ensure_future(d.chat_in(sb, message="next", input_id="in_xb"))
+        wb = await wait_until(lambda: _run_task_started(d, sb, "in_xb"), 30, "B's run_task")
+        assert wb.current_input_id is None
+        await signal_abort(tenv.client, SessionRef("harn", "harn", sb), "user cancelled")
+        body = await asyncio.wait_for(b, 60)
+        events = sse_events(body)
+        assert events[-1] == ("done", {})
+        assert any(e == "error" and dd["outcome"] == "aborted" for e, dd in events)
+        assert wb.task_for("in_xb") is None
+        hosts = [h["body"] for h in wb.sync.read_host() if h["type"] == "workflow"]
+        # dropped once: by deliver(aborted) or the activity's cancel, first wins
+        [dropped] = [h for h in hosts if h.get("kind") == "dropped"]
+        assert dropped["input_id"] == "in_xb" and dropped["reason"] in ("aborted", "cancelled")
+        assert not any(h.get("kind") in ("abort", "task_signal") for h in hosts)
+        assert token_text(await asyncio.wait_for(a, 60)).strip() == "A done"
+        await wait_until(lambda: d.workers.admission.free == 1, 30, "A's slot back")
+        await asyncio.sleep(1.5)
+        # B never ran: no input on its guest, the model asked twice (A's turns)
+        assert not any(e["type"] == "input" for e in wb.sync.read(0))
+        assert "in_xb" not in wb.sync.settled and len(d.upstream.requests) == 2
+        assert d.workers.admission.free == 1
+        [ticket] = [json.loads(p.read_text()) for p in wb.session.tickets.glob("ticket_*.json")]
+        assert ticket["outcome"] == "aborted"
+    finally:
+        for sid in (sa, sb):
+            try:
+                await session_handle(tenv.client, SessionRef("harn", "harn", sid)).terminate("done")
+            except Exception:  # noqa: BLE001
+                pass
+        await d.close()
+
+
+async def _wall_clock_case(d, tenant_wall: int, input_id: str) -> dict:
+    """A tenant wall_clock_s below (3) or above (900) the default (the
+    Workers' wall_clock_s, 120): the task message carries it (logged on the
+    guest's input event); below, the guest settles `timeout` at it."""
+    if tenant_wall < 120:
+        d.upstream.responses = [tool_call("call_w", "bash", {"command": "sleep 30"}),
+                                {"content": "too late"}]
+    else:
+        d.upstream.responses = [{"content": "in time"}]
+    t0 = time.monotonic()
+    body = await asyncio.wait_for(d.chat(message="go", input_id=input_id), 90)
+    w = d.worker
+    [inp] = [e["body"] for e in w.sync.read(0)
+             if e["type"] == "input" and e["body"]["input_id"] == input_id]
+    assert inp["wall_clock_s"] == tenant_wall
+    settle = w.sync.settled[input_id]
+    if tenant_wall < 120:
+        assert settle["outcome"] == "timeout" and time.monotonic() - t0 < 25
+        assert any(e == "error" and dd["outcome"] == "timeout" for e, dd in sse_events(body))
+    else:
+        assert settle["outcome"] == "done" and token_text(body).strip() == "in time"
+    return settle
+
+
+@pytest.mark.parametrize("tenant_wall", [3, 900])
+async def test_tenant_wall_clock_on_the_direct_path(tmp_path, users_root, upstream, monkeypatch,
+                                                    tenant_wall):
+    d = Harness(None, tmp_path, upstream, monkeypatch, wall_clock_s=tenant_wall)
+    try:
+        await _wall_clock_case(d, tenant_wall, "in_wd")
+        [ticket] = d.tickets()
+        assert ticket["driver"] == "direct" and ticket["outcome"] == d.worker.sync.settled[
+            "in_wd"]["outcome"]
+    finally:
+        await d.close()
+
+
+@pytest.mark.parametrize("tenant_wall", [3, 900])
+async def test_tenant_wall_clock_on_the_workflow_path(tenv, tmp_path, users_root, upstream,
+                                                      monkeypatch, tenant_wall):
+    """The same as the direct path; run_task's Temporal timeouts are a
+    safety net past it: the task's wall clock + WALL_CLOCK_GRACE_S +
+    max_queue_wait_s (HARNESS_MAX_QUEUE_WAIT_S), the same for both."""
+    from flows.activities import WALL_CLOCK_GRACE_S
+    monkeypatch.setattr("app.host.worker.HARNESS_MAX_QUEUE_WAIT_S", 700)
+    d = Harness(tenv, tmp_path, upstream, monkeypatch, wall_clock_s=tenant_wall)
+    acts, seen = d.acts, []
+
+    @activity.defn(name="run_task")
+    async def run_task(inp: RunTask) -> RunResult:
+        info = activity.info()
+        seen.append((inp.wall_clock_s, info.start_to_close_timeout,
+                     info.schedule_to_close_timeout))
+        return await acts.run_task(inp)
+    try:
+        await d.start([acts.prepare_vm, run_task, acts.park_vm, acts.deliver])
+        await _wall_clock_case(d, tenant_wall, "in_ww")
+        net = timedelta(seconds=tenant_wall + WALL_CLOCK_GRACE_S + 700)
+        assert seen == [(tenant_wall, net, net)]
+        await d.wait_state("idle")
+        [ticket] = d.tickets()
+        assert ticket["driver"] == "workflow" and ticket["outcome"] == d.worker.sync.settled[
+            "in_ww"]["outcome"]
+    finally:
         await d.close()
 
 

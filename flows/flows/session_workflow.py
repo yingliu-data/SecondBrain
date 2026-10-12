@@ -47,6 +47,7 @@ with workflow.unsafe.imports_passed_through():
         SessionRef,
         SignalSession,
         TaskSignal,
+        run_task_timeout_s,
     )
 
 __all__ = [
@@ -144,8 +145,8 @@ def _activity_kwargs(opts: ActivityOptions, *, timeout_s: int | None = None) -> 
     if opts.heartbeat_s is not None:
         kwargs["heartbeat_timeout"] = timedelta(seconds=opts.heartbeat_s)
     if timeout_s:
-        # The task's wall clock bounds all attempts together: a retry of a
-        # timed-out attempt would otherwise get a second full wall clock.
+        # One bound for all attempts together: a retry of a timed-out
+        # attempt would otherwise get a second full window.
         kwargs["schedule_to_close_timeout"] = timedelta(seconds=timeout_s)
     return kwargs
 
@@ -332,7 +333,13 @@ class SessionWorkflow:
         )
         handle = workflow.start_activity(
             "run_task", inp, result_type=RunResult,
-            **_activity_kwargs(self._cfg.activities["run_task"], timeout_s=inp.wall_clock_s),
+            # the guest settles `timeout` at the wall clock itself (it is in
+            # the task message), counted from the task's start on the host;
+            # these timeouts are a safety net on top: grace + the longest
+            # wait for a slot of the task cap (the heartbeat covers liveness)
+            **_activity_kwargs(self._cfg.activities["run_task"],
+                               timeout_s=run_task_timeout_s(inp.wall_clock_s,
+                                                            self._cfg.max_queue_wait_s)),
         )
         await workflow.wait_condition(lambda: handle.done() or live.abort is not None)
         if not handle.done():

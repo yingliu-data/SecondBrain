@@ -334,7 +334,7 @@ def test_host_log_recounts_after_its_directory_is_deleted(tmp_path):
 
 def test_ticket_id_is_per_input_not_per_seq():
     from flows.activities import SessionRef
-    from app.host.activities import ticket_id_for
+    from app.host.worker import ticket_id_for
     ref = SessionRef(user="u", tenant="t", session_id="s1")
     a, b = ticket_id_for(ref, "in_a"), ticket_id_for(ref, "in_b")
     assert a != b and a == ticket_id_for(ref, "in_a")

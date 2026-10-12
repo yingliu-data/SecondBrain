@@ -24,6 +24,64 @@ After an agent-api restart, `POST /api/v1/tool-result` for an unknown call id
 loads the tenant's parked sessions first: each Worker rebuilds its open device
 calls from the fold, so the result is accepted and wakes the guest.
 
+### Session identity and directories
+
+A session is `(user, tenant, session_id)` (`SessionRef`), compared exactly
+everywhere: the Worker registry key `{user}/{tenant}/{session_id}` is
+injective (`/` is in no safe id), a device call carries its session's
+`SessionRef` and `POST /tool-result` resolves it only for that exact user and
+tenant, listings and `Workers.load_parked` compare `session.json`'s tenant,
+never a name prefix. Tenant names may contain `_`.
+
+Directory: `{SESSIONS_ROOT}/{user}/{tenant}.{session_id}/` (`.` is in no safe
+id, so the name is injective). The legacy `{tenant}_{session_id}/` is
+ambiguous (tenant `wcc` + session `event_x` = tenant `wcc_event` + session
+`x`): it is still read in place, but only for the session its `session.json`
+names; a new session never goes there. Rename legacy directories with
+`python -m app.session.migrate --layout [--dry-run] [<sessions_root>]`
+(agent-api stopped; section 5).
+
+### Task cap, wall clock, tickets
+
+- **Cap.** `Workers` owns one admission (`HARNESS_MAX_CONCURRENT_TASKS`, 5)
+  that both drivers go through (`Worker._act`): a task takes a slot (after
+  its session's task lock, so a task queued behind its own session holds
+  none) before anything is sent to the guest, gives it back at a question
+  park and at its end; the wake of a task parked on a question (the answer,
+  an abort, `prepare_vm` of the resume) takes it again first. The Temporal
+  worker runs at most `2 * cap + 10` activities at once.
+- **Wall clock.** One value per task: the tenant's `wall_clock_s`
+  (`SessionConfig`, `worker.session_config`), else `HARNESS_WALL_CLOCK_S`
+  (600); on the workflow path the chat route puts it in `TaskSignal`.
+  It travels in the `task` message (`wall_clock_s`); the guest arms it per
+  task and settles `timeout` (hello `limits.wall_clock_s` is only the
+  default for a task message without one). The limit counts from when the
+  task **starts** on both paths, never the wait for a slot: the host waits
+  it + `WALL_CLOCK_GRACE_S` (30, `flows.activities`) as a backstop
+  (`Worker._wait`, armed in `_run` after `_act` took the slot, paused while
+  parked). On the workflow path `run_task`'s Temporal timeouts are only a
+  safety net: start-to-close = schedule-to-close = wall + 30 +
+  `HARNESS_MAX_QUEUE_WAIT_S` (3600, `SessionConfig.max_queue_wait_s`: the
+  longest wait for Temporal's queue plus a slot), liveness is the heartbeat
+  (every `HARNESS_HEARTBEAT_S` from `start_task`, also while the task is
+  queued; timeout 120 s).
+- **Dropped.** A task that has not started yet (waiting for its session's
+  task lock or a slot) whose `run_task` is cancelled or times out, or whose
+  input `deliver` ends first, is dropped (`Worker.drop_queued`, host event
+  `workflow{kind: dropped, input_id, reason}`): it never runs later and no
+  abort goes to a guest. A started one is aborted (`abort_and_wait`).
+- **Ticket.** `Worker.finish_input`, where both paths end an input, writes
+  `{session}/tickets/{ticket_id}.json` once (`ticket_id =
+  derive_key_id("ticket", user, tenant, session_id, input_id)`):
+  `{ticket_id, input_id, driver, outcome, answer, question_id, error,
+  manifest, usage, completed_at}`; `manifest`, `usage` and `answer` are the
+  guest's settle (its manifest is `protocol.bulk.manifest`), else the host's
+  failure result.
+- **Answers.** `Worker.answer(question_id, text, input_id)` sends
+  `ui_response{input_id: "{input_id}:answer:{question_id}"}` for the task of
+  `input_id` on both paths (the client's own `input_id` of an answer POST is
+  not used), so the guest dedupes a re-sent answer.
+
 ### Sandbox (`app/host/sandbox/`)
 
 `start(session_dir)`, `stop()`, `is_alive()`, `restore(session_dir,
@@ -59,9 +117,9 @@ calls the gateway itself over :5011 (docs/PROTOCOL.md section 7).
 
 | Route | Behaviour |
 |---|---|
-| `POST /api/v1/chat {message, session_id, input_id?, answer_to?}` | One input. Temporal up: `signal_with_start` of the session workflow with a `task` signal; else the direct path (`Worker.act`). The SSE response streams the Worker's events for that `input_id` until `done`; it is a projection, and a client disconnect never affects the task. A redelivered `input_id` attaches to the running task or replays the stored answer. |
+| `POST /api/v1/chat {message, session_id, input_id?, answer_to?}` | One input. The path is configuration: `TEMPORAL_ADDRESS` set → always the session workflow (`signal_with_start` with a `task` signal); while Temporal is connecting or down the request waits `TEMPORAL_READY_WAIT_S` (5), then 503 with `Retry-After` (`TEMPORAL_RETRY_AFTER_S`); a supervisor reconnects and restarts the Temporal worker every `TEMPORAL_RECONNECT_S`. Unset → always the direct path (`Worker.act`). A session never switches path. Unsafe `session_id` → 400. The SSE response streams the Worker's events for that `input_id` until `done`; it is a projection, and a client disconnect never affects the task. A redelivered `input_id` attaches to the running task or replays the stored answer. |
 | `POST /api/v1/chat {answer_to: question_id, message}` | Workflow parked on that question → `answer` signal; otherwise `ui_response` to the live or parked guest. Either way the response streams the task's continuation. No task waits on that question → the answer "No question is waiting for this answer." and an error. |
-| `POST /api/v1/sessions/{id}/abort` | Temporal: the `abort` signal (404 when the session has no workflow). Direct: `abort{reason: "aborted"}` to the live worker's guest (409 when no task runs). |
+| `POST /api/v1/sessions/{id}/abort` | Workflow path: the `abort` signal (404 when the session has no workflow; 503 while Temporal is not ready). Direct path: `abort{reason: "aborted"}` to the live worker's guest (409 when no task runs). |
 | `GET /api/v1/sessions/{id}/events?after_seq=N` | The current run's guest events with `seq > N` (JSON list), for a client catching up after a disconnect. |
 | `GET /api/v1/sessions/{id}` | `{session_id, updated_at, workflow}`; `workflow` is the workflow's `status` query, or `null`. |
 | `GET /api/v1/sessions/{id}/traces`, `GET /api/v1/sessions/traces/recent` | Trace rows (section 3). |
@@ -74,8 +132,8 @@ question (`question{question_id, text, options, deadline}`) re-emitted, so the
 phone gets them on reconnect.
 
 **Question park on the direct path.** With `answer_wait_s > 0` the input's
-stream stays open while the guest is parked on a question (the global slot is
-released meanwhile). `POST /chat {answer_to}` sends `ui_response` and the
+stream stays open while the guest is parked on a question (the task's
+admission slot is released meanwhile). `POST /chat {answer_to}` sends `ui_response` and the
 guest wakes and continues; an `answer_to` for another question gets the
 no-question error. When `answer_wait_s` runs out the worker sends
 `abort{reason: "escalated"}` (host event `workflow{kind: answer_timeout}`) so
@@ -112,13 +170,17 @@ Read once at startup; restart to apply.
   key; the browser Origin must be one of its `origins`), synthesized when the
   file has none. `auth: origin` is refused for any other tenant, and a
   `guest` entry must use it. Its origins are part of CORS.
-- Session workflow keys: `wall_clock_s`, `answer_wait_s`,
-  `max_tasks_per_run`, `max_history_events`, `schedules` (docs/FLOWS.md
-  "Per-tenant config").
+- Session keys (`flows.SESSION_CONFIG_KEYS`, read through `SessionConfig`
+  on both paths): `wall_clock_s` (every task's wall clock; unset →
+  `HARNESS_WALL_CLOCK_S`), `answer_wait_s`, `max_tasks_per_run`,
+  `max_history_events`; and `schedules` (docs/FLOWS.md "Per-tenant config").
+- `async_tools` (bool): `hello.config.async_tools` of the tenant's sessions
+  (docs/ASYNC-TOOLS.md); unset → `HARNESS_ASYNC_TOOLS` (default false).
 
 ## 5. Legacy sessions → event logs (`app/session/migrate.py`)
 
 ```
+python -m app.session.migrate --layout [--dry-run] [<sessions_root>]   # {tenant}_{sid} -> {tenant}.{sid}
 python -m app.session.migrate --events [--dry-run] <sessions_root>
 python -m app.session.migrate [--db data/conversations.db] [--root data/sessions]   # sqlite rows
 ```

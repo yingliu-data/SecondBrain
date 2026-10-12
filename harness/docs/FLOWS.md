@@ -19,22 +19,27 @@ saw**. They never hold the same fact twice.
 | the last heartbeat detail of `run_task` (`{"last_seq": N}`) | the events up to and past that `seq` (the truth; the heartbeat is a floor) |
 | the durable timer of a parked question (`answer_wait_s`) | the `question`, `checkpoint`, `parked` events and the VM snapshot |
 | when a schedule fires (Temporal Schedule + `ScheduleTickWorkflow`) | the task the fire produced, like any other task |
-| the outcome handed to `deliver` | the ticket projection `{session}/tickets/{ticket_id}.json`, the `settle` event |
+| the outcome handed to `deliver` | the input's ticket `{session}/tickets/{ticket_id}.json` (written by `Worker.finish_input`, on either path), the `settle` event |
 
 Retention: closed workflows are kept **30 days** on namespace `secondbrain`
 (§6.1); the session dir is kept until it is deleted. A workflow that is gone
 from Temporal loses nothing the model saw.
 
-Temporal drives a session only when `TEMPORAL_ADDRESS` is set and the
-Temporal worker runs; otherwise `POST /chat` takes the direct path
-(`Worker.act`), so tests and a Temporal-less box keep working. agent-api
+The path is configuration, never liveness: `TEMPORAL_ADDRESS` set → every
+input of every session goes through the session workflow; unset → the direct
+path (`Worker.act`) only, so tests and a Temporal-less box keep working. A
+session never switches path. agent-api
 depends on `flows` (editable path dependency `../flows`) and starts the
 Temporal worker on its own loop in the background at startup
 (`app/host/temporal.py`: `flows.worker.build_worker(client,
 activities=[...real bodies...])`, then `flows.schedules.ensure_schedules`
 with the loaded tenants doc); startup never waits for Temporal. A failed
-connect, or a worker that exits on its own later, logs an error and leaves
-the direct path. One replica, task queue `secondbrain-agent`
+connect, or a worker that exits on its own later, logs an error; a
+supervisor tries again every `TEMPORAL_RECONNECT_S` (5). While it is not
+ready `POST /chat` waits `TEMPORAL_READY_WAIT_S` (5), then answers 503 with
+`Retry-After`. The worker runs at most `2 * HARNESS_MAX_CONCURRENT_TASKS +
+10` activities; the task cap itself is the Workers' admission, shared with
+the direct path (docs/HOST.md "Task cap"). One replica, task queue `secondbrain-agent`
 (`flows.TASK_QUEUE`). Both paths run the same Worker task API and handle a
 question park the same way, so every Worker gets the tenant's
 `answer_wait_s`.
@@ -56,8 +61,8 @@ run(state):
                      or (tasks_run > 0 and history >= max_history_events (10 000))
     wait for a queued task                         (task signal; duplicates dropped by input_id)
     prepare_vm(resume_from_park=False)             retry 3x, 60 s
-    run_task(resume=False)                         heartbeat timeout 120 s, start_to_close = wall_clock_s,
-                                                   schedule_to_close = wall_clock_s, 2 attempts
+    run_task(resume=False)                         heartbeat timeout 120 s, start_to_close = wall_clock_s + 30
+                                                   + max_queue_wait_s (3600), schedule_to_close = the same, 2 attempts
     while result == parked(question_id):
       status -> parked(question_id); deadline = now + answer_wait_s (once per question)
       park_vm                                      retry 3x, 60 s (idempotent)
@@ -124,9 +129,27 @@ Client helpers (`flows/client.py`): `signal_task`, `signal_answer`,
 | Key | Default | Meaning |
 |---|---|---|
 | `answer_wait_s` | 86400 | how long a parked question waits before `escalated` (phone 24 h, browser-origin tenants 60; 0 = the guest never parks, it denies unanswered questions) |
-| `wall_clock_s` | 600 | `run_task` start-to-close and schedule-to-close (all attempts together); `TaskSignal.wall_clock_s` overrides per task |
+| `wall_clock_s` | 600 (agent-api: `HARNESS_WALL_CLOCK_S`) | the task's wall clock: `RunTask.wall_clock_s`, in the guest's `task` message (the guest settles `timeout` at it); it counts from the task's start on the host, never its wait for a slot (the host's backstop is it + `WALL_CLOCK_GRACE_S` (30) from there). `TaskSignal.wall_clock_s` overrides per task; agent-api's chat route sets it from the tenant's current config |
 | `max_tasks_per_run` | 50 | continue-as-new after this many tasks |
 | `max_history_events` | 10 000 | continue-as-new once the history is this long |
+
+Not a tenant key: `SessionConfig.max_queue_wait_s` (3600; agent-api sets it
+from `HARNESS_MAX_QUEUE_WAIT_S`), the longest a task may wait to start
+(Temporal's task queue, a slot of agent-api's task cap).
+
+**`run_task` timeouts are a safety net, not the task's time limit.** The
+limit is the wall clock, counted from when the task starts on the host
+(after its slot): the guest settles `timeout` at it, the host's backstop is
+it + 30 s. A task over the cap waits for a slot inside its `run_task`
+activity, so the activity's start-to-close and schedule-to-close (all
+attempts together) are `run_task_timeout_s` = `wall_clock_s +
+WALL_CLOCK_GRACE_S + max_queue_wait_s`; they cannot fire during a normal
+slot wait. Liveness is the heartbeat timeout (120 s): the host heartbeats
+every `HARNESS_HEARTBEAT_S` from `start_task` on, also while the task is
+queued. A `run_task` cancelled (abort) or timed out before its task started
+drops the queued task on the host (`Worker.drop_queued`; `deliver` does the
+same first if the cancel has not reached the activity yet): it never runs
+later and no abort goes to a guest.
 | `schedules` | none | §4 |
 
 The config is fixed when the workflow **starts**: an edit applies to new
@@ -141,7 +164,7 @@ drive the Worker's task API as `act()` does on the direct path.
 | Activity | Payload → result | Timeout / retries | Heartbeat |
 |---|---|---|---|
 | `prepare_vm` | `PrepareVM{session, input_id, resume_from_park}` | 60 s, 3 attempts | no |
-| `run_task` | `RunTask{session, input_id, text, kind, resume, answer, question_id, wall_clock_s}` → `RunResult{outcome, question_id, last_seq}` | `wall_clock_s` (start-to-close and schedule-to-close), 2 attempts | every 60 s, timeout 120 s, details `{"last_seq": N}` |
+| `run_task` | `RunTask{session, input_id, text, kind, resume, answer, question_id, wall_clock_s}` → `RunResult{outcome, question_id, last_seq}` | `wall_clock_s + WALL_CLOCK_GRACE_S + max_queue_wait_s` (start-to-close and schedule-to-close; a safety net, §2), 2 attempts | every 60 s, timeout 120 s, details `{"last_seq": N}` |
 | `park_vm` | `ParkVM{session, input_id, question_id}` | 60 s, 3 attempts | no |
 | `deliver` | `Deliver{session, input_id, outcome, question_id}` | 60 s, 3 attempts | no |
 | `signal_session` | `SignalSession{session, task, task_queue, config}` → `input_id` | 30 s, 5 attempts | no |
@@ -154,25 +177,30 @@ What the host bodies do:
 - `run_task`: heartbeat `{"last_seq": <acked guest seq>}` at start and every
   `HARNESS_HEARTBEAT_S` (60 s). On attempt > 1 the last heartbeat detail is a
   floor only (`floor_seq` on the `activity_start` host event). Resume: send
-  `ui_response{question_id, answer}` (input id
-  `{input_id}:answer:{question_id}`, so a retry dedupes); no guest to resume
+  `ui_response{question_id, answer}` (`Worker.answer`: input id
+  `{input_id}:answer:{question_id}` on both paths, so a retry dedupes); no guest to resume
   a parked, unsettled task → a non-retryable failure. Then `start_task`: a
   running task for the input is re-attached, a settled one returns its stored
   settle, never a second turn. Returns the settle's outcome, or `parked` +
-  `question_id` at the guest's question park. Cancelled (workflow abort) →
-  `abort{reason: "aborted"}` to the guest, wait for its settle, re-raise.
+  `question_id` at the guest's question park. Cancelled (workflow abort,
+  timeout) while its task still waits for a slot → the task is dropped
+  (`Worker.drop_queued`, never runs, nothing to the guest); once started →
+  `abort{reason: "aborted"}` to the guest, wait for its settle; re-raise.
 - `park_vm`: make sure the session is parked and snapshotted (normally it
   already is: the worker adopted the guest's own park). Idempotent.
-- `deliver`: for `escalated` / `aborted` with no guest settle (the answer
+- `deliver`: an unsettled input whose task still waits for a slot: the task
+  is dropped (the workflow's cancel of `run_task` reaches the activity only on
+  its next heartbeat). For `escalated` / `aborted` with no guest settle (the answer
   timer, an abort while parked) first wake the guest and send
-  `abort{reason: <outcome>}` so it writes the `settle` itself. Then write the
-  ticket projection `{session}/tickets/{ticket_id}.json` = `{ticket_id,
-  input_id, outcome, answer, question_id, manifest, usage}` (ticket_id =
-  `derive_key_id("ticket", user, tenant, session_id, input_id)`: per input,
-  not per settle seq, since seqs restart with every guest run), end the
-  input's SSE streams (`error` unless `done`, then `done`) and write the host
-  event `workflow{kind: delivered, input_id, outcome, ticket_id}` once.
-  Idempotent by `input_id`.
+  `abort{reason: <outcome>}` so it writes the `settle` itself. Then
+  `Worker.finish_input` (the one end of an input on both paths): the ticket
+  `{session}/tickets/{ticket_id}.json`, written once = `{ticket_id,
+  input_id, driver, outcome, answer, question_id, error, manifest, usage,
+  completed_at}` (ticket_id = `derive_key_id("ticket", user, tenant,
+  session_id, input_id)`: per input, not per settle seq, since seqs restart
+  with every guest run), then the input's SSE streams end (`error` unless
+  `done`, then `done`); the host event `workflow{kind: delivered, input_id,
+  outcome, ticket_id}` once. Idempotent by `input_id`.
 
 `signal_session` is the schedule glue (`flows.schedules.SessionSignaller`), the
 only activity that talks to Temporal; `build_worker` registers it next to the
@@ -221,7 +249,8 @@ Compose service `temporal` (`docker-compose.yml`): `temporalio/temporal:1.9.1`
 - UI on `127.0.0.1:8233` of the box only. From a laptop:
   `ssh -L 8233:localhost:8233 <box>` then http://localhost:8233/namespaces/secondbrain/workflows.
 - agent-api `depends_on: temporal (service_started)`: it does not wait for
-  healthy; if Temporal is down the host takes the direct path (§1).
+  healthy; while Temporal is down `POST /chat` answers 503 + `Retry-After`
+  (never the direct path, §1).
 - Healthcheck: `temporal operator cluster health` (`docker compose ps` shows it).
 - Back up: stop the service, copy `temporal.db` (SQLite, single file).
 - Moving off the home server: `temporalio/auto-setup` + Postgres + `temporalio/ui`,
