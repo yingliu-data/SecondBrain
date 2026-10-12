@@ -1,0 +1,8 @@
+# Virtual uv workspace root (no [project]): one lock (uv.lock), one .venv.
+#   uv sync --all-packages              # every member + every dev group
+#   cd harness && uv run pytest         # likewise flows/, agent-api/, mcp-gateway/
+# Each suite runs as its own pytest process: agent-api and mcp-gateway both
+# have a top-level `app` package. Images: `uv sync --package agent-api` /
+# `--package mcp-gateway` (see each member's Dockerfile).
+[tool.uv.workspace]
+members = ["harness", "flows", "agent-api", "mcp-gateway"]

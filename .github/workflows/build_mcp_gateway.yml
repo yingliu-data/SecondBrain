@@ -10,8 +10,9 @@ on:
     paths:
       - 'mcp-gateway/**'
       - 'harness/protocol/**'
-      - 'harness/guest/**'                        # packaged into the harness wheel the image installs
       - 'harness/pyproject.toml'
+      - 'pyproject.toml'                          # workspace root + the one lock
+      - 'uv.lock'
       - '.github/workflows/build_mcp_gateway.yml'
   push:
     branches:
@@ -19,8 +20,9 @@ on:
     paths:
       - 'mcp-gateway/**'
       - 'harness/protocol/**'
-      - 'harness/guest/**'
       - 'harness/pyproject.toml'
+      - 'pyproject.toml'                          # workspace root + the one lock
+      - 'uv.lock'
       - '.github/workflows/build_mcp_gateway.yml'
 
 permissions:
@@ -38,13 +40,17 @@ jobs:
         uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
-          cache-dependency-glob: mcp-gateway/uv.lock
+          version: '0.12.3'
+          cache-dependency-glob: uv.lock
+
+      # The workspace lock, synced for this member only (test.yml runs
+      # every suite).
+      - name: Sync workspace (mcp-gateway)
+        run: uv sync --frozen --package mcp-gateway
 
       - name: Run tests
         working-directory: mcp-gateway
-        run: |
-          uv sync --frozen
-          uv run --frozen pytest -q
+        run: uv run --frozen pytest -q
 
   build:
     needs: test
@@ -66,7 +72,7 @@ jobs:
       - name: Build and push image
         uses: docker/build-push-action@v6
         with:
-          # Repo root: harness/ is a path dep (mcp-gateway/Dockerfile).
+          # Repo root: the uv workspace (mcp-gateway/Dockerfile).
           context: .
           file: mcp-gateway/Dockerfile
           platforms: linux/amd64

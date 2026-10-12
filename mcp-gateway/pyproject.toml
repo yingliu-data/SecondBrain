@@ -22,10 +22,10 @@ dev = [
 package = false
 
 [tool.uv.sources]
-# Editable, like agent-api, so harness/protocol changes need no reinstall; the
-# Docker image copies harness/ next to this dir. Uses protocol.canonical and
+# Workspace member (root pyproject.toml), editable like for agent-api, so
+# harness/protocol changes need no reinstall. Uses protocol.canonical and
 # protocol.mcp.
-secondbrain-harness = { path = "../harness", editable = true }
+secondbrain-harness = { workspace = true }
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

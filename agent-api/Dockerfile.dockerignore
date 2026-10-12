@@ -1,15 +1,18 @@
 # BuildKit reads <Dockerfile>.dockerignore for a root-context build: send
-# only what the agent-api image needs.
+# only what the agent-api image needs (the frozen workspace lock needs every
+# member's pyproject.toml).
 *
+!pyproject.toml
+!uv.lock
 !harness/pyproject.toml
 !harness/protocol
 !harness/guest
+!harness/image/versions.env
 !flows/pyproject.toml
 !flows/flows
 !agent-api/pyproject.toml
-!agent-api/uv.lock
 !agent-api/app
-!harness/image/versions.env
+!mcp-gateway/pyproject.toml
 flows/flows/tests
 **/__pycache__
 **/*.pyc

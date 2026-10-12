@@ -25,5 +25,6 @@ dev = [
 package = false
 
 [tool.uv.sources]
-secondbrain-harness = { path = "../harness", editable = true }
-flows = { path = "../flows", editable = true }
+# Workspace members (root pyproject.toml); installed editable.
+secondbrain-harness = { workspace = true }
+flows = { workspace = true }
