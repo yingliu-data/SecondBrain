@@ -59,6 +59,8 @@ QUESTION_PARK_WAKERS = ("ui_response", "abort")
 LINK_DROP_WAIT_S = 2.0
 # guest events folded and stored per group commit (one write + one fsync)
 EVENT_BATCH = 256
+# how long close() (and the shutdown) waits for queued log records to be fsynced
+CLOSE_FLUSH_TIMEOUT_S = 5.0
 
 
 def make_sandbox() -> Sandbox:
@@ -141,6 +143,7 @@ class Worker(VMLifecycle):
         # wait primitives: every change below _pulse()s; _until(predicate) waits
         self._changed = asyncio.Event()             # replaced (and set) on every change
         self._link_up = False                       # a control channel is up
+        self._control_gen = 0                       # the :5000 listener of this guest run
         self._parked_seen = False                   # the asked-for `parked` was acked
         # none | booting | running | parking | parked; the session snapshot
         # itself is the sandbox's business (has_snapshot / restore)
@@ -693,12 +696,22 @@ class Worker(VMLifecycle):
             endpoints = self.endpoints
             if endpoints is None:
                 return
-            conn = endpoints.accept_control(timeout=None)
-            if conn is None:
+            got = endpoints.accept_control_gen(timeout=None)
+            if got is None:
                 continue                # closed: the loop condition ends it
+            conn, gen = got
             n += 1
-            ch = ControlChannel(conn, self._loop, self._inbound, name=f":{n}")
-            self._loop.call_soon_threadsafe(self._inbound.put_nowait, ("link", "up", ch))
+            ch = ControlChannel(conn, self._loop, self._inbound, name=f":{n}", generation=gen,
+                                start=False)
+            # `link up` queued before the reader runs: the guest's hello (sent
+            # at connect) and a quick link down always come after it, never a
+            # down that is ignored and then an up of a dead channel
+            try:
+                self._loop.call_soon_threadsafe(self._inbound.put_nowait, ("link", "up", ch))
+            except RuntimeError:
+                ch.close()              # the loop is gone
+                return
+            ch.start()
 
     # ------------------------------------------------------------ restart
     def _resume_restored_park(self) -> None:
@@ -1072,6 +1085,11 @@ class Worker(VMLifecycle):
 
     async def _on_link(self, what: str, ch: ControlChannel) -> None:
         if what == "up":
+            if ch.generation is not None and ch.generation != self._control_gen:
+                # accepted on an earlier :5000 listener: a guest run that was
+                # stopped meanwhile (_start_guest listens anew), not this one
+                ch.close()
+                return
             if self._channel is not None and self._channel is not ch:
                 self._channel.close()
             self._channel = ch
@@ -1309,6 +1327,11 @@ class Worker(VMLifecycle):
         if self._accept_thread is not None:
             await asyncio.to_thread(self._accept_thread.join, 2)
         self._end_all_streams()
+        # the host records written fire-and-forget (the vm destroy above,
+        # ...) are on disk once close() returns: an evicted or shut down
+        # session's log is complete, not a segment the writer still holds
+        # (bounded: a stuck disk must not hang an eviction or the shutdown)
+        await asyncio.to_thread(self.sync.flush_host, CLOSE_FLUSH_TIMEOUT_S)
 
 
 class Workers:
@@ -1498,4 +1521,4 @@ class Workers:
         for key in list(self._workers):
             await self.close(key)
         # the host-log records still queued (never waited for) reach the disk
-        await asyncio.to_thread(durable_writer().flush, 5)
+        await asyncio.to_thread(durable_writer().flush, CLOSE_FLUSH_TIMEOUT_S)

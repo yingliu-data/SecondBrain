@@ -131,6 +131,7 @@ class HeldCall:
         poller = select.poll()
         poller.register(conn_fd, select.POLLIN)
         poller.register(self._wake_r, select.POLLIN)
+        watching = True
         while not self.done.is_set():
             try:
                 ready = poller.poll()
@@ -140,6 +141,16 @@ class HeldCall:
                 if _peer_gone(conn):
                     return False
                 poller.unregister(conn_fd)   # pipelined bytes: only the answer now
+                watching = False
+        # the answer is in: a guest that closed before it (its EOF already
+        # queued, this thread not yet scheduled) must not have it written to
+        # the dead socket and dropped from the table; it stays for the re-attach
+        if watching:
+            try:
+                if any(fd == conn_fd for fd, _ in poller.poll(0)) and _peer_gone(conn):
+                    return False
+            except OSError:
+                return False
         return True
 
 

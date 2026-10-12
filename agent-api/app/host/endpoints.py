@@ -12,6 +12,10 @@ connects to. One listener code path serves both.
     .accept_control(timeout)       blocking accept on :5000 (call from a thread);
                                    while :5000 is closed it waits for reopen()
                                    (Condition + a wake socket, no polling)
+    .accept_control_gen(timeout)   the same, (conn, generation) | None
+    .generation(port)              which listener of `port` is up: +1 per
+                                   listen, so a connection accepted on an
+                                   earlier listener is told apart
     .listener(port)                the raw listening socket (the LLM proxy takes :5010)
     .close_port(port) .reopen(port)  no listener while the guest is parked
     .close()                       close and unlink everything
@@ -66,6 +70,7 @@ class Endpoints:
         self._wake_r.setblocking(False)
         self._wake_w.setblocking(False)
         self._listeners: dict[int, socket.socket] = {}
+        self._generation: dict[int, int] = {}
         for port in self.ports:
             self._listeners[port] = self._listen(port)
 
@@ -79,7 +84,16 @@ class Endpoints:
         bind_unix(sock, path)
         os.chmod(path, 0o600)
         sock.listen(8)
+        self._generation[port] = self._generation.get(port, 0) + 1
         return sock
+
+    def generation(self, port: int) -> int:
+        """The current listener of `port`: counted up by every listen
+        (reopen after close_port), so a connection accepted on an earlier
+        listener (a guest run that is gone) is told apart from one on the
+        current listener."""
+        with self._cv:
+            return self._generation.get(port, 0)
 
     def _wake(self) -> None:
         """Interrupt a poll() in accept(); the caller holds no lock."""
@@ -111,6 +125,12 @@ class Endpoints:
         the port is closed (close_port) it waits for reopen() without polling;
         a close_port() during the wait ends the poll and the wait goes on
         for the reopened listener."""
+        got = self._accept(port, timeout)
+        return None if got is None else got[0]
+
+    def _accept(self, port: int, timeout: float | None) -> tuple[socket.socket, int] | None:
+        """accept(): the connection and the generation of the listener it
+        was accepted on."""
         deadline = None if timeout is None else time.monotonic() + timeout
 
         def remaining() -> float | None:
@@ -127,6 +147,7 @@ class Endpoints:
                         return None
                     self._cv.wait(left)            # close_port .. reopen / close
                     continue
+                gen = self._generation.get(port, 0)
                 wake = self._wake_r
             left = remaining()
             try:
@@ -155,7 +176,7 @@ class Endpoints:
                     return None
                 if conn is not None:
                     conn.settimeout(None)
-                    return conn
+                    return conn, gen
             if left == 0.0:
                 return None
 
@@ -163,6 +184,12 @@ class Endpoints:
         """accept(CONTROL, timeout): while :5000 is closed (the guest parked)
         it sleeps until reopen(CONTROL), close() or the timeout."""
         return self.accept(CONTROL, timeout)
+
+    def accept_control_gen(self, timeout: float | None = None
+                           ) -> tuple[socket.socket, int] | None:
+        """accept_control(), with the generation of the listener the
+        connection came in on (generation(CONTROL) at that listen)."""
+        return self._accept(CONTROL, timeout)
 
     def close_port(self, port: int) -> None:
         """Stop listening on one port (between the acked `parked` and the
@@ -214,8 +241,10 @@ class ControlChannel:
     """One connected control socket. Thread-safe send; inbound to the loop."""
 
     def __init__(self, sock: socket.socket, loop: asyncio.AbstractEventLoop,
-                 inbound: asyncio.Queue, *, name: str = "") -> None:
+                 inbound: asyncio.Queue, *, name: str = "",
+                 generation: int | None = None, start: bool = True) -> None:
         self.sock = sock
+        self.generation = generation     # the listener it was accepted on (Endpoints)
         self.loop = loop
         self.inbound = inbound
         self.name = name
@@ -225,6 +254,13 @@ class ControlChannel:
                                         name=f"ctl-reader{name}")
         self._writer = threading.Thread(target=self._write_loop, daemon=True,
                                         name=f"ctl-writer{name}")
+        if start:
+            self.start()
+
+    def start(self) -> None:
+        """Start reading and writing (start=False: the caller first posts
+        its own `link up`, so nothing the guest sent, nor the link down,
+        reaches `inbound` ahead of it)."""
         self._reader.start()
         self._writer.start()
 
@@ -273,8 +309,10 @@ class ControlChannel:
         except (OSError, ValueError):
             pass
         finally:
-            self._post(("link", "down", self))
+            # closed before the loop hears of it: a link-down handler (or
+            # _guest_ready) never sees the dead channel as still open
             self.close()
+            self._post(("link", "down", self))
 
     def _write_loop(self) -> None:
         while True:

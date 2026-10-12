@@ -5,8 +5,9 @@ A park (the host's `park`, or a question past its deadline with
 answer_wait_s > 0) waits until no provider call is in flight and no guest
 operation runs (park_grace_s, then clock{grace_park} + ops.abort_all()); then
 every timer pauses, checkpoint + parked{checkpoint_seq, reason, question_id?,
-question_left_ms?, wall_used_ms?}, a bounded wait for the host's ack, and
-transport.park(). The next link-up: clock{resumed}, the timers re-armed with
+question_left_ms?, wall_used_ms?} and a bounded wait for the host's ack;
+the connection that brings it goes idle at once (transport.park_on_ack; on
+a timeout, transport.park()). The next link-up: clock{resumed}, the timers re-armed with
 what they had left, the detached mcp ops re-attached.
 
 The settle: settle{input_id, outcome, answer, usage (this task's), manifest}
@@ -125,6 +126,10 @@ class ParkMixin:
         wall, paused = self._task_wall_s(), self._paused.get("wall")
         if wall and paused is not None:          # the task's wall clock used so far (restore reads it)
             body["wall_used_ms"] = max(0, int(round((float(wall) - paused[1]) * 1000)))
+        # the link that brings the host's ack goes idle at once, in the
+        # transport's own thread: the host snapshots right after its ack, and
+        # a park() from here after a restore would close the restored link
+        self.transport.park_on_ack(self.state.last_seq + 1)
         parked = self.emit("parked", body)
         self.parked = True
         self.log("parked", level="info", reason=reason, seq=parked["seq"], question_id=question)
@@ -132,9 +137,9 @@ class ParkMixin:
         if not self.transport.wait_acked(parked["seq"], PARK_ACK_WAIT_S):
             self.log(f"parked (seq {parked['seq']}) not acked within {PARK_ACK_WAIT_S:g}s; "
                      f"going idle anyway (it is resent on reconnect)", level="warning")
+            self.transport.park()
         self._on_ack(self.transport.acked_seq)
         self.log_writer.sync_acked()             # the ack marker is on disk before going idle
-        self.transport.park()
 
     def _unpark(self) -> None:
         self.parked = False

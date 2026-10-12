@@ -192,10 +192,13 @@ class VMLifecycle:
             self.endpoints.close_port(self.ports["bulk"])
 
     def _open_guest_ports(self) -> None:
-        """Listen again before a restore or boot."""
+        """Listen again before a restore or boot. The :5000 listener's
+        generation is the one this guest run's link must come in on
+        (Worker._on_link)."""
         if self.endpoints is None:
             return
         self.endpoints.reopen(self.ports["control"])
+        self._control_gen = self.endpoints.generation(self.ports["control"])
         if "bulk" in self.ports and self.bulk is None:
             self.bulk = BulkServer(self.endpoints.reopen(self.ports["bulk"]), self.session.root,
                                    self.session_id, self.sync.read,
@@ -227,6 +230,12 @@ class VMLifecycle:
             await asyncio.to_thread(self.sandbox.stop)
         self._guest_run += 1
         self.vm_state = "booting"
+        if self.endpoints is not None:
+            # a fresh :5000 listener for this run: a connection the previous
+            # guest made before it was stopped (its reconnect after the link
+            # dropped), queued or accepted, is on the old listener and never
+            # taken for this run's link
+            self.endpoints.close_port(self.ports["control"])
         self._open_guest_ports()
         op, source = "restore", "base" if snapshot_dir is None else "session"
         try:

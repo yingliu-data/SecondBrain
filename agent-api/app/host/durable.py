@@ -77,6 +77,16 @@ class _Shard:
         self._q.put((path, data, group, fut))
         return fut
 
+    def barrier(self) -> concurrent.futures.Future | None:
+        """A future resolved once everything queued before it was handled
+        (None: the thread never started, nothing was queued). Internal, so
+        never cancelled by a waiter, unlike the records' own futures."""
+        if self._thread is None:
+            return None
+        fut: concurrent.futures.Future = concurrent.futures.Future()
+        self._q.put((None, b"", None, fut))
+        return fut
+
     # ------------------------------------------------------------ the thread
     def _run(self) -> None:
         while True:
@@ -87,17 +97,30 @@ class _Shard:
                 except queue.Empty:
                     break
             by_path: dict[str, list] = {}
+            barriers = []
             for item in items:
-                by_path.setdefault(item[0], []).append(item)
+                if item[0] is None:
+                    barriers.append(item[3])
+                else:
+                    by_path.setdefault(item[0], []).append(item)
             for path, recs in by_path.items():
-                self._commit(path, recs)
+                try:
+                    self._commit(path, recs)
+                except Exception as e:      # never let the shard's thread die
+                    logger.exception("durable commit to %s failed", path)
+                    for rec in recs:
+                        if rec[2] is not None:
+                            self._poison(rec[2], e)     # no later record makes a hole
+                        _resolve(rec[3], error=e)
+            for fut in barriers:
+                _resolve(fut, result=None)
 
     def _commit(self, path: str, recs: list) -> None:
         live = []
         for rec in recs:
             group = rec[2]
             if group is not None and self._is_poisoned(group):
-                rec[3].set_exception(PoisonedError(f"{path}: an earlier write of its log failed"))
+                _resolve(rec[3], error=PoisonedError(f"{path}: an earlier write of its log failed"))
             else:
                 live.append(rec)
         if not live:
@@ -124,11 +147,11 @@ class _Shard:
             for rec in live:
                 if rec[2] is not None:
                     self._poison(rec[2], e)
-                rec[3].set_exception(e)
+                _resolve(rec[3], error=e)
             return
         ino = self._fds[path][1]
         for rec in live:
-            rec[3].set_result(ino)
+            _resolve(rec[3], result=ino)
 
     def _fd(self, path: str) -> int:
         cached = self._fds.get(path)
@@ -158,9 +181,28 @@ class _Shard:
         with self._poison_lock:
             return group in self._poisoned
 
-    def _poison(self, group, error: OSError) -> None:
+    def _poison(self, group, error: Exception) -> None:
         with self._poison_lock:
             self._poisoned[group] = error
+
+
+def _resolve(fut: concurrent.futures.Future, result=None, error: BaseException | None = None
+             ) -> None:
+    """Resolve a record's future. A waiter may have cancelled it meanwhile
+    (asyncio.wrap_future: a cancelled awaiter cancels it, e.g. a worker's
+    pump cancelled at close): its record is written all the same (a log
+    never gets a hole), only nobody hears of it. Never raises: an
+    InvalidStateError here would end the shard's thread, and with it every
+    later append of every session on the shard."""
+    if fut.done():
+        return
+    try:
+        if error is not None:
+            fut.set_exception(error)
+        else:
+            fut.set_result(result)
+    except concurrent.futures.InvalidStateError:
+        pass                                # cancelled between the check and the set
 
 
 def _close_fd(fd: int) -> None:
@@ -177,14 +219,11 @@ class GroupWriter:
         self._poison_lock = threading.Lock()
         self._shards = [_Shard(f"durable-{i}", max_open, self._poisoned, self._poison_lock,
                                fsync) for i in range(max(1, int(shards)))]
-        self._last: dict[int, concurrent.futures.Future] = {}
 
     def append(self, path, data: bytes, group=None) -> concurrent.futures.Future:
         path = os.fspath(path)
         i = hash(os.path.dirname(path)) % len(self._shards)
-        fut = self._shards[i].submit(path, data, group)
-        self._last[i] = fut
-        return fut
+        return self._shards[i].submit(path, data, group)
 
     def reset(self, group) -> None:
         with self._poison_lock:
@@ -195,8 +234,11 @@ class GroupWriter:
             return self._poisoned.get(group)
 
     def flush(self, timeout: float | None = None) -> None:
-        """Wait for every record appended so far (errors are the callers')."""
-        concurrent.futures.wait(list(self._last.values()), timeout=timeout)
+        """Wait for every record appended so far (errors are the callers').
+        A barrier per shard, not the last record's future: that one may have
+        been cancelled by its waiter while its record is still queued."""
+        barriers = [b for b in (s.barrier() for s in self._shards) if b is not None]
+        concurrent.futures.wait(barriers, timeout=timeout)
 
 
 _writer: GroupWriter | None = None

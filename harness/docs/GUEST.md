@@ -305,7 +305,12 @@ The wire side is docs/PROTOCOL.md sections 5, 6 and 8. What the guest does:
   state_hash = fold.state_hash(state), prev_hash}` (first: `hash_value(the
   session_start event)`, then the previous checkpoint's `state_hash`),
   `parked{checkpoint_seq, reason}`, wait (≤ 60 s) for the host's ack of
-  `parked`, `Transport.park()` (close, back to idle-wait). The next
+  `parked`; the connection that carries that ack is closed and the link goes
+  back to idle-wait by the transport's link thread itself
+  (`Transport.park_on_ack`, armed before `parked` is sent; `Transport.park()`
+  after the 60 s): the host snapshots right after its ack, and a guest frozen
+  before a later close would, once restored, close the restored link (an ack
+  that comes only with a reconnect's handshake parks nothing). The next
   `("link", "up")` resumes: `clock{resumed, at}` first (the guest clock at
   the wake; it ends the parked stretch on the log), timers re-armed with what
   they had left, a deferred turn starts. A second

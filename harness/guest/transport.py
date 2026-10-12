@@ -41,7 +41,13 @@ reset a Firecracker snapshot causes, is retried the same way);
 until a connection is usable. `park()` closes the connection and puts
 the link thread back into that idle loop (the guest keeps its state, the
 worker snapshots the VM, and after a restore the first attempt reconnects
-with the normal handshake + resend). `seed_seq(n)` continues the event
+with the normal handshake + resend). `park_on_ack(seq)` does the same from
+the link thread, on the very connection whose host ack covers `seq` (the
+`parked` event): the host may snapshot as soon as it acked, so a guest
+frozen before a later park() call must not, once restored, close the
+connection it made meanwhile (the restored link). An ack that only comes
+with a reconnect's handshake parks nothing: that connection is the
+restored link. `seed_seq(n)` continues the event
 stream after a log return: the host holds 1..n, the next event is n + 1.
 Bulk (:5001) is guest/bulk.py: one connection per transfer, not this class.
 """
@@ -162,6 +168,7 @@ class Transport:
         self._writer_thread: threading.Thread | None = None
         self.connections = 0                           # successful connects so far
         self._up_event = threading.Event()
+        self._park_at: int | None = None               # park_on_ack: park once this seq is acked
         self._awake = threading.Event()                # set while not idle-waiting
         if not idle:
             self._awake.set()
@@ -211,11 +218,28 @@ class Transport:
         state, Outbox and Inbox are kept; the next connection that succeeds
         opens with the handshake and resends whatever is unacked."""
         with self._lock:
+            self._park_at = None
             self._idle = True
             self._awake.clear()
         sock = self._sock
         if sock is not None:
             _shutdown(sock)
+
+    def park_on_ack(self, seq: int) -> None:
+        """park() once the host acks `seq`, done by the link thread on the
+        connection that carries that ack (call it before `seq` is sent).
+        An ack that arrives instead with a reconnect's handshake cancels it:
+        the host acked on a connection that is gone and has snapshotted
+        since, so the new connection is the restored link and stays up.
+        wait_acked(seq) tells the caller when it happened; on its timeout
+        the caller parks with park()."""
+        with self._ack_cv:
+            if self.outbox is not None and self.outbox.highest_acked >= seq:
+                acked = True
+            else:
+                self._park_at, acked = seq, False
+        if acked:
+            self.park()
 
     def seed_seq(self, last_seq: int) -> None:
         """The host already holds events 1..last_seq (a log return on resume):
@@ -344,8 +368,9 @@ class Transport:
                 if handshaking:
                     handshaking = False
                     self._link_up(sock, peer_ack=n)
-                else:
-                    self._apply_ack(n)
+                elif self._apply_ack(n):
+                    _shutdown(sock)     # park_on_ack: nothing more is read here
+                    return
             elif kind == "control":
                 self._on_control(msg)
             else:
@@ -374,22 +399,30 @@ class Transport:
         # new: ack it; duplicate: tell the host again; gap: re-ack the prefix
         self._wq.put(("live", gen, ack))
 
-    def _apply_ack(self, n: int) -> None:
+    def _apply_ack(self, n: int) -> bool:
+        """A host ack on an established connection. True when it parks
+        that connection (park_on_ack): the caller closes it."""
         with self._ack_cv:
             if self.outbox is None:
                 if n != 0:
                     log.error("ack_seq %d before any event was sent", n)
-                return
+                return False
             before = self.outbox.highest_acked
             try:
                 self.outbox.acknowledge(n)
             except ProtocolError as exc:
                 log.error("host ack ignored: %s", exc)
-                return
+                return False
             if self.outbox.highest_acked == before:
-                return      # stale: nothing new for the coordinator
+                return False    # stale: nothing new for the coordinator
+            park = self._park_at is not None and self.outbox.highest_acked >= self._park_at
+            if park:            # idle before anyone hears of the ack
+                self._park_at = None
+                self._idle = True
+                self._awake.clear()
             self._ack_cv.notify_all()
         self.inbound.put(("ack", n))
+        return park
 
     def _link_up(self, sock: socket.socket, peer_ack: int | None) -> None:
         """The connection is usable: hand it to the writer together with the
@@ -408,6 +441,8 @@ class Transport:
                               peer_ack, exc)
                     resend = self.outbox.pending
                 advanced = self.outbox.highest_acked > before
+                if self._park_at is not None and self.outbox.highest_acked >= self._park_at:
+                    self._park_at = None    # acked on a lost connection: this is the restored link
                 self._ack_cv.notify_all()
             ack = self.inbox.ack() if self.inbox is not None else None
             self._up = True

@@ -128,8 +128,8 @@ def test_guest_drops_mid_call_and_reattach_gets_the_stored_answer(fwd):
     assert wait_for(lambda: len(gw.mcp_requests()) == 1)
     assert gw.mcp_requests()[0]["headers"]["x-sb-call"] == "call_1"
     s.close()                                      # the guest goes away (park, link loss)
-    time.sleep(0.3)                                # the handler notices; the call runs on
-    gw.hold.set()                                  # the gateway answers later
+    gw.hold.set()                                  # the gateway answers later; the handler,
+                                                   # however late it looks, sees the EOF first
     assert wait_for(lambda: gw.answered == 1)
     r = client.post("/mcp", json=CALL, headers={"X-SB-Call": "call_1", "X-SB-Reattach": "1"})
     assert r.status_code == 200 and r.json()["result"]["seen"]["id"] == 1
@@ -152,10 +152,9 @@ def test_plain_request_is_not_reattachable(fwd):
     s = raw_post(ep.path(5011), {}, CALL)          # no X-SB-Call
     assert wait_for(lambda: len(gw.mcp_requests()) == 1)
     s.close()
-    time.sleep(0.3)                                # the handler noticed and dropped it
     gw.hold.set()
     assert wait_for(lambda: gw.answered == 1)
-    assert relay._calls == {}
+    assert wait_for(lambda: relay._calls == {})    # the handler noticed and dropped it
 
 
 def test_waiting_handler_wakes_at_once_on_the_answer(fwd):

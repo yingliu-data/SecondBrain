@@ -74,6 +74,44 @@ def test_batches_share_one_fsync(tmp_path):
     assert (tmp_path / "a").read_text().split() == [str(i) for i in range(50)]
 
 
+def test_a_cancelled_waiter_neither_drops_its_record_nor_stops_the_shard(tmp_path):
+    """A record whose future was cancelled while queued (a worker's pump
+    cancelled at close, awaiting asyncio.wrap_future of it) is still
+    written, and the shard's thread lives on for every later append."""
+    fsync = GatedFsync()
+    writer = GroupWriter(shards=1, fsync=fsync)
+    fsync.gate.clear()
+    first = writer.append(tmp_path / "a", b"0\n")
+    assert fsync.entered.wait(5)                         # the writer blocks in its fsync
+    cancelled = writer.append(tmp_path / "a", b"1\n")
+    assert cancelled.cancel()
+    fsync.gate.set()
+    first.result(5)
+    later = writer.append(tmp_path / "b", b"2\n")
+    assert isinstance(later.result(5), int)              # the shard still runs
+    assert (tmp_path / "a").read_text().split() == ["0", "1"]
+
+
+def test_flush_waits_for_a_record_whose_future_was_cancelled(tmp_path):
+    """flush() at shutdown: the last record's future may be cancelled (its
+    awaiter went away) while the record is still queued; flush still waits
+    until it is written."""
+    fsync = GatedFsync()
+    writer = GroupWriter(shards=1, fsync=fsync)
+    fsync.gate.clear()
+    writer.append(tmp_path / "a", b"0\n")
+    assert fsync.entered.wait(5)
+    assert writer.append(tmp_path / "a", b"1\n").cancel()
+    done = threading.Event()
+    t = threading.Thread(target=lambda: (writer.flush(5), done.set()))
+    t.start()
+    assert not done.wait(0.2)                            # the barrier is queued behind it
+    fsync.gate.set()
+    t.join(5)
+    assert done.is_set()
+    assert (tmp_path / "a").read_text().split() == ["0", "1"]
+
+
 def test_ack_only_after_durable(session):
     fsync = GatedFsync()
     sync = StateSync(session, writer=GroupWriter(shards=1, fsync=fsync))

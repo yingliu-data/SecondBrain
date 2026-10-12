@@ -166,6 +166,44 @@ def test_wait_acked_times_out_while_acks_paused(link):
     assert len(transport.outbox) == 0
 
 
+def test_park_on_ack_parks_the_connection_that_brings_the_ack(link):
+    """The link thread itself goes idle on the ack of the armed seq (the
+    host snapshots right after it): nobody has to call park() later."""
+    transport, inbound, host = link
+    transport.park_on_ack(1)
+    host.close_listener()                       # what the worker does on `parked`
+    transport.send_event(ev(1))
+    assert transport.wait_acked(1, timeout=5)
+    host.wait_disconnected()
+    wait_item(inbound, "link", state="down")
+    assert transport.idle and not transport.connected
+    host.listen()                               # the "restore"
+    assert transport.wait_up(5)
+    host.send("heartbeat", {"at": 2})
+    wait_item(inbound, "control", type="heartbeat")
+    assert not transport.idle and host.connections == 2
+
+
+def test_an_ack_that_only_comes_with_a_handshake_parks_nothing(link):
+    """The host acked the armed seq on a connection that died before the
+    guest read it, then snapshotted: the reconnect's handshake brings the
+    ack, and that connection is the restored link, never closed."""
+    transport, inbound, host = link
+    host.pause_acks()
+    transport.park_on_ack(1)
+    transport.send_event(ev(1))
+    host.wait_for_seq(1)
+    host.close_listener()
+    host.drop_link()
+    wait_item(inbound, "link", state="down")
+    host.resume_acks()                          # acked; the ack never reaches the guest
+    host.listen()
+    assert transport.wait_acked(1, timeout=5)   # by the handshake
+    host.send("heartbeat", {"at": 2})
+    wait_item(inbound, "control", type="heartbeat")
+    assert transport.connected and not transport.idle and host.connections == 2
+
+
 def test_controls_delivered_and_acked(link):
     transport, inbound, host = link
     host.send("task", {"input_id": "in-1", "text": "hi", "attachments": []})

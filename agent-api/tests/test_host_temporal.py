@@ -449,7 +449,10 @@ async def _disconnect_mid_task_then_catch_up(d, input_id: str) -> None:
     assert input_id not in w.sync.settled and w.current_input_id == input_id
     await wait_until(lambda: d.device_calls.is_open("call_dc"), 30, "device call open")
     assert d.device_calls.resolve("call_dc", "[]") is True
-    await wait_until(lambda: input_id in w.sync.settled, 60, "settle after the disconnect")
+    # the settle stored and acked, not only folded (sync.settled is the fold,
+    # ahead of the group commit; /events serves only acked events)
+    await wait_until(lambda: any(e["type"] == "settle" and e["body"]["input_id"] == input_id
+                                 for e in w.sync.read(n)), 60, "settle after the disconnect")
     assert w.sync.settled[input_id]["answer"] == "Standup at 9"
     r = await d.get(f"/events?after_seq={n}")
     assert r.status_code == 200
@@ -579,9 +582,23 @@ async def test_example_tenants_load_with_m5_keys():
 # the direct path (no Temporal) handles a question park like the workflow
 
 
+# the answered direct-path tests wait an hour for the answer: a short wait
+# would race the test's own answer under CPU contention (the answer, sent
+# after the park is seen, landing after the wait ran out is an escalation)
+DIRECT_ANSWER_WAIT_S = 3600
+SHORT_ANSWER_WAIT_S = 4                 # only where the wait is meant to run out
+
+
 @pytest_asyncio.fixture(loop_scope="session")
 async def direct(tmp_path, users_root, upstream, monkeypatch):
-    harness = Harness(None, tmp_path, upstream, monkeypatch, answer_wait_s=4)
+    harness = Harness(None, tmp_path, upstream, monkeypatch, answer_wait_s=DIRECT_ANSWER_WAIT_S)
+    yield harness
+    await harness.close()
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def direct_short_wait(tmp_path, users_root, upstream, monkeypatch):
+    harness = Harness(None, tmp_path, upstream, monkeypatch, answer_wait_s=SHORT_ANSWER_WAIT_S)
     yield harness
     await harness.close()
 
@@ -595,7 +612,8 @@ async def _direct_question_answered(d, monkeypatch, input_id):
     first = asyncio.ensure_future(d.chat(message="ask me", input_id=input_id))
     w = await wait_until(lambda: d.worker is not None and d.worker.question_park is not None
                          and d.worker, 30, "question park")
-    assert w.answer_wait_s == 4 and w.last_hello["config"]["limits"]["answer_wait_s"] == 4
+    assert w.answer_wait_s == DIRECT_ANSWER_WAIT_S
+    assert w.last_hello["config"]["limits"]["answer_wait_s"] == DIRECT_ANSWER_WAIT_S
     qid = w.question_park["question_id"]
     assert w.question_park["input_id"] == input_id and w.vm_state == "parked"
     assert not first.done()                      # the stream stays open while parked
@@ -615,13 +633,14 @@ async def test_direct_path_question_parks_then_answer_resumes(direct, monkeypatc
     await _direct_question_answered(direct, monkeypatch, "in_dq1")
 
 
-async def test_direct_path_answer_wait_escalates(direct, monkeypatch):
+async def test_direct_path_answer_wait_escalates(direct_short_wait, monkeypatch):
+    direct = direct_short_wait
     short_questions(monkeypatch, direct)
     direct.upstream.responses = [tool_call("call_q", "question", {"text": "Still there?"}),
                                  {"content": "never"}]
     t0 = time.monotonic()
     body = await asyncio.wait_for(direct.chat(message="ask", input_id="in_dq2"), 90)
-    assert time.monotonic() - t0 >= 4             # waited answer_wait_s
+    assert time.monotonic() - t0 >= SHORT_ANSWER_WAIT_S   # waited answer_wait_s
     events = sse_events(body)
     assert events[-1] == ("done", {})
     assert any(e == "error" and d["outcome"] == "escalated" for e, d in events)

@@ -169,3 +169,24 @@ def test_reopen_is_a_noop_when_open_and_returns_the_listener(tmp_path):
     new = ep.reopen(5001)
     assert new is not lst and ep.listener(5001) is new
     ep.close()
+
+
+def test_a_reopened_listener_has_a_new_generation_and_drops_the_old_backlog(tmp_path):
+    """A guest run that is stopped may have connected (its reconnect after
+    the link dropped) before the next run listens anew: that connection is
+    on the old listener, never accepted as one of the new generation."""
+    ep = Endpoints(tmp_path, [5000])
+    gen1 = ep.generation(5000)
+    stale = _connect(tmp_path)                     # queued, not accepted
+    ep.close_port(5000)
+    ep.reopen(5000)
+    assert ep.generation(5000) == gen1 + 1
+    fresh = _connect(tmp_path)
+    conn, gen = ep.accept_control_gen(timeout=5)
+    assert gen == gen1 + 1
+    fresh.sendall(b"n")
+    assert conn.recv(1) == b"n"                    # the new run's connection, not the stale one
+    assert ep.accept_control(timeout=0.05) is None
+    for s in (stale, fresh, conn):
+        s.close()
+    ep.close()

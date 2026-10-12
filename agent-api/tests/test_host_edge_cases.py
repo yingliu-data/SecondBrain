@@ -145,7 +145,9 @@ async def test_device_result_after_an_agent_api_restart_is_accepted_and_the_task
         r = await client.post("/api/v1/tool-result",
                               json={"tool_call_id": "call_d", "result": DEVICE_RESULT})
         assert r.status_code == 200 and r.json() == {"status": "ok"}
-        await wait_until(lambda: "in_rs" in w2.sync.settled, 60, "settle after the restart")
+        await wait_until(lambda: any(e["type"] == "settle" and e["body"]["input_id"] == "in_rs"
+                                     for e in w2.sync.read(0)), 60,
+                         "settle after the restart (stored, not only folded)")
         # the client re-attaches with the same input_id: the stored settle, no second turn
         result = await w2.act({"input_id": "in_rs", "text": "calendar"})
         assert result["outcome"] == "done" and result["answer"] == "Standup at 9"

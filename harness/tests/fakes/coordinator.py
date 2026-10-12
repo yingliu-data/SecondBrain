@@ -124,6 +124,9 @@ class FakeTransport:
     def park(self):
         self.parks += 1
 
+    def park_on_ack(self, seq):
+        self.parks += 1               # every event counts as acked at once
+
     def live_of(self, type):
         return [b for t, b in self.live if t == type]
 

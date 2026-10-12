@@ -300,7 +300,9 @@ async def test_shutdown_parks_a_running_session_and_a_restart_adopts_its_device_
                               json={"tool_call_id": "call_s", "result": '[{"title": "Standup"}]'})
         assert r.status_code == 200
         w2 = workers2.get("u/t/s1")
-        await wait_until(lambda: "in_sd" in w2.sync.settled, 60, "settle after the restart")
+        await wait_until(lambda: any(e["type"] == "settle" and e["body"]["input_id"] == "in_sd"
+                                     for e in w2.sync.read(0)), 60,
+                         "settle after the restart (stored, not only folded)")
         assert w2.sync.settled["in_sd"]["answer"] == "Standup at 9"
         assert w2.sync.runs() == [1]
         assert not any(b["state"] == "lost" for b in of_type(w2, "op_state"))
