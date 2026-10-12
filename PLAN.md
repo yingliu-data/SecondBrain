@@ -270,6 +270,8 @@ As draft 5 section 7: system block fixed at `session_start` (tenant prompt witho
 
 ## 9. MCP gateway (`mcp-gateway/`, `docs/GATEWAY.md`)
 
+> As built, `docs/GATEWAY.md` is authoritative where it differs from this design: deny wins over allow (not first match), promoted lists live in `gateway.json` (not `tenants.json`), and the per-session pin table is persisted to disk under the gateway's state dir (it is not rebuilt from `session_start`, which holds only the promoted and meta pins).
+
 **Serving the guest** (`tool_server.py`; the diagram's south side) — one MCP streamable-HTTP server. Every request arrives through the forwarder with `X-SB-User`, `X-SB-Tenant`, `X-SB-Session` set by agent-api (the identity assurance behind those headers is OpenShell's). Surface:
 
 | Tool | Behaviour |

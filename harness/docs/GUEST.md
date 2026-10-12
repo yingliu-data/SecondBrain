@@ -3,7 +3,7 @@
 The guest is one Python 3.12 process (`guest.main`), standard library only.
 It never listens: it connects out to CID 2 (or, in tests, to Unix sockets
 named `{dir}/v.sock_{port}`, the same names Firecracker gives the host side of
-guest-initiated vsock connections). Ports: 5000 control, 5001 bulk, 5010 LLM, 5011 gateway (M4).
+guest-initiated vsock connections). Ports: 5000 control, 5001 bulk, 5010 LLM, 5011 gateway.
 
 ## Threads and the one queue
 
@@ -38,7 +38,7 @@ timers           ─┘                                               ▼
 
 ## Lifecycle
 
-`main`: parse args → (idle-wait: in M3 the snapshot point) → `Transport.start()`
+`main`: parse args → (idle-wait: the snapshot point) → `Transport.start()`
 on :5000 → wait for `hello` → `GuestConfig.from_hello` → `Coordinator.run()`
 → on `settle` flush the log, wait for the final ack (bounded), exit 0.
 Fatal protocol errors (`second hello`, unsupported schema): emit
@@ -79,7 +79,7 @@ Fatal protocol errors (`second hello`, unsupported schema): emit
 
 ## Sides
 
-A `tool_call` whose side is `host` or `device` (M4: not `mcp`, see "M4") is emitted and then
+A `tool_call` whose side is `host` or `device` (not `mcp`: see "MCP over :5011") is emitted and then
 **waits for `side_result`** from the host (control message
 `{call_id, side, content, ok}`); the coordinator turns it into `op_state` +
 `tool_result`. Timeouts from `cfg.op_timeout_for(name, side)` (the hello
@@ -188,10 +188,19 @@ on the host sets it false), `limits.context_window_tokens` (32768),
   and `LLM_STREAM` in hello; `HARNESS_TOKEN_BUDGET` configures only the proxy,
   which answers 402 once a session's `total_tokens` reach the budget.
 
-## M3 as built (park, resume, bulk, manifest)
+## Park, resume, bulk, manifest
 
-Contracts: docs/M3-CONTRACTS.md. What the guest does, and the refinements:
+The wire side is docs/PROTOCOL.md sections 5, 6 and 8. What the guest does:
 
+- **Snapshot point.** The base snapshot is taken with the guest running in
+  idle-wait, before it has connected: at build time no host listener exists,
+  so every attempt fails; after a restore the session's listener exists and
+  the first attempt succeeds. `/workspace` is not mounted in the snapshot
+  (`harness-init` leaves `/dev/vdb` alone, docs/IMAGE.md); the guest mounts it
+  after idle-wait ends. A cold rootfs boot takes the same path. Nothing
+  random is drawn before the snapshot point: every id is derived
+  (`canonical.derive_id`) from what hello brings (session_id), so two VMs
+  restored from one snapshot write distinct ids and logs.
 - **Flags** (`guest.main`): `--idle-wait vsock` (the snapshot point: the
   transport tries :5000 every 50 ms, silently, no backoff; idle-wait ends with
   the first line the host sends, so any connect error *or* a reset right after
@@ -260,16 +269,16 @@ Contracts: docs/M3-CONTRACTS.md. What the guest does, and the refinements:
   then the manifest as `manifest` `manifest.json` (canonical JSON: sorted keys,
   no spaces). Upload failures are logged; the settle still carries the manifest.
 
-## M4 as built (MCP over :5011)
+## MCP over :5011
 
-Contracts: docs/M4-CONTRACTS.md (sections 3.1-3.3 and 4). What the guest does:
+The wire side is docs/PROTOCOL.md section 7 (hello entries: section 2); the
+gateway is docs/GATEWAY.md. What the guest does:
 
 - **Config**: `ports.gateway` (default 5011). Each `hello.config.tools` entry
   keeps its `schema` (OpenAI function def; a bare `description` stands in when
   there is none) as `GuestConfig.tool_schemas` and its `timeout_s` as
-  `GuestConfig.tool_timeouts` (in `config_hash`). This also fixes M1-M3, where
-  `effective_tools` dropped host/device schemas and the model saw
-  empty-parameters tools. `session_start.tools` stays `{name, side, pin}`.
+  `GuestConfig.tool_timeouts` (in `config_hash`), for every side.
+  `session_start.tools` stays `{name, side, pin}`.
   `cfg.op_timeout_for(name, side)` = the entry's `timeout_s`, else
   `limits.op_timeout_s[side]`.
 - **Client** (`guest/mcp.py`, stdlib): `McpClient(connector, port)` posts one
@@ -292,7 +301,7 @@ Contracts: docs/M4-CONTRACTS.md (sections 3.1-3.3 and 4). What the guest does:
   `op_timeout_for(name, "mcp")`, armed as an `mcp_timeout` timer (not paused
   on a park); when it fires `ops.cancel` closes the connection and the call
   is `op_state{timeout}`.
-- **Input required** (3.2): ops posts `("op_input", call_id, request)` and
+- **Input required** (docs/GATEWAY.md "Input-required relay"): ops posts `("op_input", call_id, request)` and
   forgets the job (no thread, no connection: the op is suspended, its op timer
   cancelled and its remaining time kept). The coordinator emits
   `op_state{input_required, attempt, input_request: {request_state, schema}}`
@@ -311,7 +320,7 @@ Contracts: docs/M4-CONTRACTS.md (sections 3.1-3.3 and 4). What the guest does:
   state.
   Escalation, abort and wall clock send a best-effort cancel for suspended
   calls (`ops.send_mcp`).
-- **Park** (3.3): neither a suspended nor an in-flight mcp op holds a park.
+- **Park** (docs/PROTOCOL.md "Forwarder-held calls"): neither a suspended nor an in-flight mcp op holds a park.
   Parking (and a park grace, before it kills guest ops) detaches in-flight mcp
   ops (`ops.detach_mcp`: connection closed, nothing reported). Their op timer
   keeps its absolute due time across the park. On the resume (`link up`) an
@@ -324,18 +333,18 @@ Contracts: docs/M4-CONTRACTS.md (sections 3.1-3.3 and 4). What the guest does:
 - **Not done**: an mcp connection broken by a link loss without a park is an
   error result (no automatic re-attach).
 
-## M5 as built (questions park the task, escalation via abort)
+## Questions park the task; escalation via abort
 
 - **Limit**: `answer_wait_s` (int ≥ 0, default 0) joins `hello.config.limits`
   (part of `config_hash`). The worker sends the tenant's value on both
   paths (the direct driver handles a question park like the workflow); 0
-  keeps the M1–M4 behaviour (deny, three → escalated; an
-  input-required op is cancelled).
+  denies an unanswered question (three → escalated; an input-required op
+  is cancelled).
 - **Deadline with `answer_wait_s > 0`** (`Coordinator._question_expired`):
   `clock{question_deadline}`, the deadline timer is dropped, the question is
   kept open (`_waiting`), and a park with reason `question` is requested; it
-  happens at the loop's next `_maybe_park` (never mid-round), through the M3
-  path (guest ops get `park_grace_s`, mcp in-flight ops detach, timers pause,
+  happens at the loop's next `_maybe_park` (never mid-round), through the
+  usual park path (guest ops get `park_grace_s`, mcp in-flight ops detach, timers pause,
   `checkpoint` + `parked{..., question_id}`, ack wait, idle). The intent is
   one flag (`_question_park_pending`); `_park` parks on the oldest question in
   `_waiting`. A host `park` still pending (`_park_reason`) is folded into it,

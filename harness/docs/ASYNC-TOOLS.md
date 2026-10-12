@@ -3,7 +3,7 @@
 D6: the coordinator is built for async tool calls (a turn may start on
 `[pending]` placeholders while operations run), but `async_tools = False` is
 the default until Qwen3-14B is shown to cope with placeholders. M6 measures it
-on a fixed task set (docs/M6-CONTRACTS.md section 5). The default stays
+on a fixed task set (`harness/bench/`, "The bench" below). The default stays
 `False` unless the finding below says otherwise.
 
 ## What async mode does

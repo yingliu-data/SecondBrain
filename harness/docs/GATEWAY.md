@@ -4,9 +4,45 @@ The gateway is the one MCP server the guest talks to, and the one MCP client
 for every upstream server. It applies per-tenant policy, pins each session's
 tool definitions, quarantines a tool whose upstream definition changes under a
 pinned session, and relays upstream elicitations to the guest as questions.
-PLAN.md section 9 has the design. `M4-CONTRACTS.md` fixes the wire details;
-this file describes the service as built and lists where it goes further than
-the contract.
+PLAN.md section 9 has the design; this file is the contract and the service
+as built. The guest's side of the wire (:5011, the forwarder, held calls) is
+docs/PROTOCOL.md section 7.
+
+```text
+guest (VM) ──HTTP over vsock :5011──▶ host forwarder ──HTTP──▶ mcp-gateway ──MCP──▶ upstreams
+                                      (agent-api, per session;   (own container)
+                                       stamps identity headers)
+worker (agent-api) ──HTTP──▶ mcp-gateway GET /internal/tools   (session-start tool list)
+mcp-gateway ──HTTP──▶ agent-api POST /internal/gateway-events   (host log)
+```
+
+## HTTP surface
+
+| Route | Caller | Behaviour |
+|---|---|---|
+| `POST /mcp` | guest via the forwarder | MCP streamable HTTP, stateless, JSON responses: no `initialize`; each POST is one JSON-RPC request answered by one JSON body. Methods `tools/list`, `tools/call`. |
+| `GET /internal/tools` | worker at session start | The tenant's policy-filtered surface as `{"tools": [entry...]}` in hello shape (docs/PROTOCOL.md section 2); pins it for the session (the first call pins, later calls return the same pins). |
+| `GET /healthz` | compose | `{ok: true}`, no auth |
+
+Every other route is a 404 (the legacy engine's `/internal/upstreams/{name}/tools`
+and `/internal/call` are gone).
+
+### The MCP surface
+
+`tools/list` = the tenant's promoted tools + three meta tools:
+
+| Tool | Arguments | Result text |
+|---|---|---|
+| `search_tools` | `query` str, `limit` int (default 10) | JSON list `[{name, description}]` |
+| `describe_tool` | `name` str | JSON `{name, description, inputSchema, pin}` (the pinned definition) |
+| `call_tool` | `name` str (`upstream__tool`), `arguments` object | the upstream result |
+
+Tool names everywhere are `{upstream}__{tool}` (`protocol.mcp`). Promoted
+tools are also callable directly by that name. A `tools/call` result is an MCP
+`CallToolResult` (`content` text items, `isError`). Gateway-side failures
+(policy deny, quarantine, unknown tool, upstream timeout or unreachable,
+concurrency limit) are results with `isError: true` and a plain message,
+never JSON-RPC errors (those are for malformed requests only).
 
 ## Layout
 
@@ -14,7 +50,7 @@ the contract.
 |---|---|
 | `app/main.py` | Starlette app: `POST /mcp`, `/internal/*`, `GET /healthz`, `AuthMiddleware` (bearer + identity) |
 | `app/tool_server.py` | Low-level MCP `Server` behind a stateless, JSON-response `StreamableHTTPSessionManager` |
-| `app/internal.py` | `/internal/tools` (M6: the legacy engine's `/internal/upstreams/{name}/tools` and `/internal/call` are deleted) |
+| `app/internal.py` | `/internal/tools` |
 | `app/gateway.py` | Core: session surface, pins, policy checks, calls, input-required relay, events |
 | `app/upstreams.py` | One client per upstream (pooled httpx clients), tool-def cache `{tool: (defn, pin)}` with stale-while-revalidate for calls (pin time waits for an expired cache to refresh, so a new session never pins a replaced definition) and a failure backoff, `UpstreamCall` (one call in its own task) |
 | `app/policy.py` | Allow/deny globs, default deny, `max_concurrent` limiter |
@@ -52,6 +88,26 @@ Environment variables: `GATEWAY_CONFIG` (`/data/gateway.json`),
 (`http://agent-api:8000`), `INTERNAL_TOKEN`, `MCP_ALLOWED_PRIVATE_HOSTS`
 (`host.docker.internal`) and `LOG_LEVEL`. If the config file is missing, the
 gateway starts with no upstreams, so every tenant sees only the meta tools.
+agent-api's side: `MCP_GATEWAY_URL` (`http://mcp-gateway:8090`) and the same
+`INTERNAL_TOKEN`, the shared bearer for every gateway route but `/healthz`
+and for agent-api's `/internal/gateway-events` (empty = no check, dev only).
+
+### Policy (`gateway.json`)
+
+```json
+{"upstreams": {"wcc-events": {"url": "...", "auth_token": "...", "timeout_s": 300,
+                              "tool_defs_ttl_s": 300, "allow_private": false}},
+ "tenants": {"wcc-event": {"upstreams": ["wcc-events"], "allow": ["*"], "deny": [],
+                           "promoted": ["wcc-events__draft_event"], "max_concurrent": 2}},
+ "input_expires_s": 3600}
+```
+
+Globs (fnmatch, case-sensitive) match the namespaced name; deny wins over
+allow. A tenant absent from `tenants`, or an upstream not in its `upstreams`
+(or not configured), gives no tools (default deny). `max_concurrent` is per
+session (default 2). `timeout_s` is an upstream call's total budget,
+`tool_defs_ttl_s` how long its tools/list is cached. `input_expires_s`
+(optional, default 3600) caps how long an input-required call is held.
 
 ### Migrating the WCC config
 
@@ -146,9 +202,20 @@ When the guest re-sends with `_meta["sb/input_response"]`:
 - The answer goes to the upstream as an `ElicitResult`. The call re-takes its slot without a limit check, so an answered question is never refused, and the gateway waits for the next outcome: the final result or another `sb/input_required`.
 - A `request_state` is single-use.
 
+The guest turns `sb/input_required` into a `question` whose deadline is
+`min(question_timeout_s, expires_in_s)`; at the deadline it re-sends with
+`action: "cancel"` (docs/GUEST.md "MCP over :5011"). While the question is
+open the guest holds no connection to the gateway: the operation is
+suspended, not running (its op timer is paused and it does not hold a
+park). The held upstream call lives in gateway memory: a gateway restart
+loses it, and the re-send gets "input request expired". It is all one
+operation with one `call_id`.
+
 ### Events
 
-The gateway posts `list` (tools/list, /internal/tools), `call` (upstream answered; `ok` = not `isError`, `ms`), `quarantine` and `error` (policy deny, not available, unreachable, timeout, concurrency limit, SSRF refusal, tools/list failure while pinning) to `{AGENT_API_URL}/internal/gateway-events` with the bearer. Posts run as background tasks with a 5 s timeout; a failure is logged.
+The gateway posts `list` (tools/list, /internal/tools), `call` (upstream answered; `ok` = not `isError`, `ms`), `quarantine` and `error` (policy deny, not available, unreachable, timeout, concurrency limit, SSRF refusal, tools/list failure while pinning) to `{AGENT_API_URL}/internal/gateway-events` with the bearer, as `{user, tenant, session_id, op, tool?, upstream?, ok?, ms?, error?}`. Posts are fire-and-forget background tasks with a 5 s timeout; a failure is logged and never fails the call.
+
+agent-api (`app/gateway/events.py`) appends the payload minus the identity as a `gateway` host event to that session's host log (docs/EVENTS.md "Host log"), through the same writer a live worker uses, and answers 202. No session directory → 404, dropped with a log line; a malformed body or unsafe id → 400; a bad bearer → 401.
 
 ## SDK notes (`mcp` 1.28.1, the same as agent-api's lock)
 
@@ -158,11 +225,11 @@ The gateway posts `list` (tools/list, /internal/tools), `call` (upstream answere
 - **Client elicitation.** `ClientSession(elicitation_callback=...)` receives `(RequestContext, ElicitRequestFormParams | ElicitRequestURLParams)` and returns `ElicitResult`. The callback is awaited inside the client's receive loop, so it can wait on a future for as long as needed. The upstream's SSE stream stays open, and the httpx read timeout is set to `timeout_s + input_expires_s`. Without a callback the SDK answers an elicitation with an error.
 - `streamablehttp_client` is deprecated in 1.28. The gateway uses `streamable_http_client(url, http_client=httpx.AsyncClient(...))`.
 
-## Beyond the contract (deviations)
+## Further rules
 
-- **Unlisted upstreams.** If an allowed upstream cannot be listed when a session pins, its name goes in the pin file's `unlisted` list. Each later call for that session tries to list it again (all such upstreams concurrently; inside the failure backoff this costs nothing) and pins its tools when it answers. The `error` event is posted only for the first failure. No existing pin changes. Under the strict contract, those tools would stay "not available" for the rest of the session.
+- **Unlisted upstreams.** If an allowed upstream cannot be listed when a session pins, its name goes in the pin file's `unlisted` list. Each later call for that session tries to list it again (all such upstreams concurrently; inside the failure backoff this costs nothing) and pins its tools when it answers. The `error` event is posted only for the first failure. No existing pin changes.
+- **Tools added later.** A tool absent from the pin table (added upstream after the session pinned) is not callable in that session ("tool not available in this session"); new sessions pick it up. A quarantined tool answers "tool definition changed since this session started (quarantined)"; new sessions pin the new definition.
 - **`describe_tool` extras.** It adds `quarantined: true` for a quarantined tool. Its `inputSchema` is the stored one, and `$schema` is kept.
 - **Direct calls.** A direct `tools/call` for a non-promoted `upstream__tool` is refused, and the error says to use `call_tool`.
-- **`input_expires_s`.** An optional top-level `gateway.json` key (default 3600) that caps `expires_in_s` further.
-- **Hello descriptions.** Hello entries for promoted tools carry the upstream description without MCPProxySkill's `[via X MCP]` prefix.
-- **Legacy routes removed (M6).** `GET /internal/upstreams/{name}/tools` and `POST /internal/call` served agent-api's legacy engine (`GatewayUpstreamSkill`) and were deleted with it (M6-CONTRACTS §3); a request to either is a 404. agent-api accepts tenants.json's `mcp_servers` (and `promoted`) and drops them at load with a warning (a tenant with `mcp_servers` and no `local_skills` gets `local_skills: []`); `migrate_config` still reads them to build `gateway.json`.
+- **Hello descriptions.** Hello entries for promoted tools carry the upstream description verbatim (no `[via X MCP]` prefix).
+- **tenants.json MCP keys.** agent-api accepts tenants.json's `mcp_servers` (and `promoted`) and drops them at load with a warning (a tenant with `mcp_servers` and no `local_skills` gets `local_skills: []`; docs/HOST.md "Tenants"); `migrate_config` still reads them to build `gateway.json`.

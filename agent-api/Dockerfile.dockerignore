@@ -9,6 +9,7 @@
 !agent-api/pyproject.toml
 !agent-api/uv.lock
 !agent-api/app
+!harness/image/versions.env
 flows/flows/tests
 **/__pycache__
 **/*.pyc

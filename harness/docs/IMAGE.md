@@ -13,9 +13,9 @@ The server runbooks are `docs/RUNBOOK-M1.md` (first boot) and
 | `guest.pyz` | `harness/guest` + `harness/protocol` as one stdlib zipapp; `python3 guest.pyz` runs `guest.main.main()` | `build.sh pyz` |
 | `rootfs.ext4` | the read-only root filesystem (Debian bookworm-slim, Python 3.12, bash, git, coreutils, `/sbin/harness-init`, `/opt/harness/guest.pyz`); ~350 MiB | `build.sh rootfs` |
 | `vmlinux` | the pinned Firecracker CI kernel, uncompressed ELF, sha256-verified | `build.sh kernel` |
-| `workspace-template.img` | a 1 GiB sparse, empty ext4; `HARNESS_WORKSPACE_TEMPLATE` for hosts whose agent-api container has no `mkfs.ext4` | `build.sh workspace` |
+| `workspace-template.img` | a 1 GiB sparse, empty ext4; `HARNESS_WORKSPACE_TEMPLATE`, the fallback when there is no `mkfs.ext4` (the agent-api image has it) | `build.sh workspace` |
 | `IMAGE_VERSION` | 16 hex chars: `sha256("<vmlinux sha256>\n<rootfs sha256>\n")[:16]`; the identity every snapshot records and is checked against | `build.sh version` (part of `all`) |
-| `firecracker`, `jailer` | the pinned release binaries (host side, optional convenience) | `build.sh firecracker` |
+| `firecracker`, `jailer` | the pinned release binaries for host-side runs (`make snapshot`); the agent-api image installs its own copy from the same pin | `build.sh firecracker` |
 | `vm/base/{vmstate,mem,MANIFEST.json}` | the BASE snapshot, when built with the default `HARNESS_VM_CACHE=out/vm` (normally built straight into the deployed cache) | `make snapshot` (needs `/dev/kvm`) |
 
 Pins live in `harness/image/versions.env` (Firecracker `v1.17.0`, CI kernel
@@ -57,7 +57,7 @@ Firecracker appends `root=/dev/vda ro` for the drive marked `is_root_device`.
    filesystem stays read-only.
 2. Sets the hostname and `kernel/ctrl-alt-del = 0` (soft: the host's
    `SendCtrlAltDel` becomes SIGINT to PID 1 instead of an instant reboot).
-3. Does **not** mount `/dev/vdb` (M3-CONTRACTS §1): the guest mounts it on
+3. Does **not** mount `/dev/vdb` (GUEST.md "Snapshot point"): the guest mounts it on
    `/workspace` itself once idle-wait ends (`--mount-workspace /dev/vdb`), so
    the base snapshot never holds a mounted workspace. Without a `/dev/vdb`
    (a hand-run boot) init puts a tmpfs on `/workspace` and drops the flag.
@@ -69,7 +69,7 @@ Firecracker appends `root=/dev/vda ro` for the drive marked `is_root_device`.
    and waits. The guest sits in idle-wait (a silent connect to CID 2:5000
    every 50 ms) until a host listener answers; that is the base-snapshot
    point. A cold boot takes exactly the same path. After `parked` the guest
-   returns to idle-wait without exiting (M3-CONTRACTS §3), so init does not
+   returns to idle-wait without exiting (PROTOCOL.md section 5), so init does not
    notice a park.
 6. On guest exit, or on SIGINT/SIGTERM (the host's `stop()`): TERM then KILL the
    guest, `sync`, unmount `/workspace`, and `reboot(LINUX_REBOOT_CMD_RESTART)`
@@ -123,7 +123,7 @@ because Firecracker's vsock is emulated per VMM over Unix sockets, not
 vhost-vsock. Firecracker treats resuming one snapshot many times as a
 randomness hazard (VMGenID reseeds the kernel PRNG on 6.1); the guest draws
 nothing random before the snapshot point and derives every id from hello
-(M3-CONTRACTS §1).
+(GUEST.md "Snapshot point").
 
 ## How the guest finds the host
 
@@ -199,8 +199,15 @@ date-named ones (`firecracker-ci/YYYYMMDD-<sha>-0/`) roll and are not pinned.
 ### Changing Firecracker
 
 `FIRECRACKER_VERSION`, `FIRECRACKER_URL`, `FIRECRACKER_SHA256` in
-`versions.env` (sha256 from the release's `.sha256.txt`); the runbook's
-install step reads the same file.
+`versions.env` (sha256 from the release's `.sha256.txt`). `build.sh
+firecracker` and the agent-api image (`agent-api/Dockerfile`, a download
+stage that sources `versions.env` and checks the sha256) both read it:
+rebuild the image, then the base snapshot.
+
+At runtime docker-compose mounts `out/` read-only at `/opt/harness-image`
+in agent-api (`HARNESS_KERNEL`, `HARNESS_ROOTFS`,
+`HARNESS_WORKSPACE_TEMPLATE` point there) and the VM cache at
+`/var/lib/secondbrain/vm`; see `RUNBOOK-M3.md` §0.
 
 ## Limits and follow-ups
 

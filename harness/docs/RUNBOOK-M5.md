@@ -2,7 +2,7 @@
 
 Follows `RUNBOOK-M3.md` (base snapshot, park and resume work on the box) and
 the M4 gateway setup (`GATEWAY.md`). Verifies the M5 exit criteria of PLAN.md
-section 13. Contracts: `docs/M5-CONTRACTS.md`; how the workflow works and the
+section 13. Host API and the direct path: `docs/HOST.md`; how the workflow works and the
 full CLI: `docs/FLOWS.md`. The `flows/` workflow logic is tested on the
 time-skipping test server (`cd flows && uv run pytest -q`); the steps below
 are the live run with the real activities, guest and VM.
@@ -363,7 +363,7 @@ at 07:05 → no brief that day (`ActionCounts.MissedCatchupWindow` +1).
   `answer_wait_s`); `tq workflow terminate -w "$W" --reason config`
   makes the next POST start a fresh one with the new config.
 - If `temporal` is down, harness chat falls back to the direct path
-  (M5-CONTRACTS §1; `[host.temporal] ERROR: ... unreachable, direct path
+  (`docs/FLOWS.md` section 1; `[host.temporal] ERROR: ... unreachable, direct path
   stays` at startup, or `Temporal worker exited (...), direct path from now
   on`); questions still park there (`answer_wait_s` on both paths), but no
   schedule fires and nothing survives an agent-api restart mid-task. Check

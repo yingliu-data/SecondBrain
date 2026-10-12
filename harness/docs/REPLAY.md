@@ -79,7 +79,7 @@ For each: what `fold.py` checks now (M0) and what is deferred. M2 notes are mark
 |---|---|---|---|
 | 1 | **What turn T saw is `events[seq <= T.includes_through_seq]`.** The request the model received is a function of the log alone. | `turn_inputs(events, turn_id)` returns the committed prefix as of the turn's `turn_start`; `turn_start` commits only items with `seq <= includes_through_seq`; `includes_through_seq` must be `< seq` and never go backwards. | M1: rebuild the full request (system block + prefix + preamble) with the guest context builder and compare its hash with `turn_start.request_hash`; `preamble_hash` likewise. |
 | 2 | **The committed prefix is never rewritten.** Corrections are appended; the system block is fixed per session. | A `tool_result` for a call whose placeholder was committed appends a NEW item (`counters.placeholder_fills`); the prefix list is only appended to by `turn_start` and rebuilt only by `compaction`; `prefix_origins` makes the provenance of each item explicit; tests compare the canonical JSON of the prefix before and after late results. | M1: assert in the guest that the serialized request bytes for the prefix part are byte-identical between consecutive turns (prefix-cache check). |
-| 3 | **`state = fold(events)`; replay never calls out.** | `fold` is pure (purity test patches `time`, `os.urandom`, `random`, `os.environ`); no I/O in `protocol/` (`test_purity.py`). | Done (M6): `tests/conftest.py` runs `protocol.replay` over every log a test wrote (see "CI logs" below). |
+| 3 | **`state = fold(events)`; replay never calls out.** | `fold` is pure (purity test patches `time`, `os.urandom`, `random`, `os.environ`); no I/O in `protocol/` (`test_purity.py`). | Done: the `logverify` pytest plugin runs `protocol.replay` over every log a test wrote (see "CI logs" below). |
 | 4 | **Inputs are idempotent by `input_id`.** | `input{dedupe: duplicate\|late}` changes only `seen_input_ids` and a counter; a `dedupe: new` input whose `input_id` was seen is a `FoldError`. | M5: the Temporal session workflow dedupes task signals; continue-as-new carries the seen ids. |
 | 5 | **Result arrival order does not change the prefix.** Two results in swapped order fold to the same committed prefix. | Tool items are ordered by the seq of their `tool_call`; `test_invariant5_swapped_result_order_folds_to_same_prefix`. | None for sync mode. Async mode (`async_tools`): built in the guest (docs/GUEST.md "Async mode"), placeholders and late fills tested in `harness/tests/test_guest_async.py`; measured with Qwen3 per docs/ASYNC-TOOLS.md. |
 | 6 | **`ts` is data, never a fold input.** | The fold never reads `ts`; `test_fold_never_reads_ts` sets every `ts` to `"x"` and gets the same `state_hash`. `clock{at}` is the only time. | M1: the guest's idle/grace/question timers must be recorded as `clock` events before they act. |
@@ -144,8 +144,8 @@ produces the state, the hashes at every checkpoint's `through_seq`, and the firs
 | `seq N: <FoldError text>` | a structural impossibility (result for an unknown call, turn before session_start, second response for a turn, ...) | the event at seq N; `state.last_seq == N - 1` |
 
 To localise a mismatch inside a window, fold with `upto_seq` and compare `state_hash` (or
-`to_canonical()`) against a known-good run, bisecting on the seq. A checkpoint per settle is
-the M0 granularity; M6 may add intermediate checkpoints.
+`to_canonical()`) against a known-good run, bisecting on the seq. The guest writes a
+checkpoint at every park (a migrated run ends with one); there are no intermediate ones.
 
 ## Goldens
 
@@ -162,7 +162,7 @@ renders each golden in memory and requires byte equality with the frozen file, s
 rule change that moves a hash must be accompanied by re-running the generator
 (`python3 tests/golden/make_goldens.py`) and reviewing the diff.
 
-## Replay / verify CLI (M6, `protocol/replay.py`)
+## Replay / verify CLI (`protocol/replay.py`)
 
 ```
 cd harness
@@ -192,37 +192,44 @@ from 1, `type` str, `body` dict. `replay` prints the fold summary
 (`summarize(state)`) per run and the same problems; it exits 1 on any.
 
 Public functions (agent-api reuses them): `load_session(path) -> list[list[event]]`
-(the runs; `ReplayError` when a file is unreadable), `verify_session(path) ->
-list[str]` (`"<run>: seq N: reason"`, `[]` == clean), `find_sessions(root)`,
-`summarize(state)`.
+(the runs; `ReplayError` when a file is unreadable), `iter_runs(path, *,
+newest_first=False, modified_since=None)` (the runs read one at a time,
+without the host log; `modified_since` skips a run whose newest segment is
+older: the trace endpoints use it), `verify_session(path) -> list[str]`
+(`"<run>: seq N: reason"`, `[]` == clean), `find_sessions(root, *,
+include_before_resume=False)`, `summarize(state)`. The layout names
+`run_name`, `segment_name`, `segments`, `host_segments` and `run_numbers`
+are the ones agent-api's `StateSync` and the migration write with.
 
-## CI logs (M6)
+## CI logs
 
-`tests/conftest.py` has an autouse fixture that runs after every test, after
-the test's own fixtures have stopped the guests:
-
-- the events each `FakeHost` received are split into runs at each
-  `session_start` and replayed with `fold.replay`;
-- every log directory under the test's `tmp_path` (`find_sessions`: guest log
-  dirs, session dirs) and every `events.before-resume-N` buffer a log return
-  moved aside goes through `verify_session`.
+`harness/logverify.py` is a pytest plugin both suites load
+(`pytest_plugins = ["logverify"]` in `harness/tests/conftest.py` and
+`agent-api/tests/conftest.py`). Its autouse fixture runs after every test,
+after the test's own fixtures have stopped the guests: every log directory
+under the test's `tmp_path` (`find_sessions(tmp_path,
+include_before_resume=True)`: guest log dirs, session dirs, and every
+`events.before-resume-N` buffer a log return moved aside) goes through
+`verify_session`. The harness suite adds its own fixture on top: the events
+each `FakeHost` received are split into runs at each `session_start` and
+replayed with `fold.replay`.
 
 Any problem fails the test (a teardown error that names the log and the seq).
 Tests that write synthetic logs on purpose (the event buffer and transport
 unit tests, the tampering tests) opt out with `@pytest.mark.no_log_verify`.
-When it was added it checked about 34 fake-host logs and 39 log directories per
-run of the suite (the e2e, M3, M4 and M5 guest subprocess tests); none failed.
 
 ## PLAN.md section 14 → tests
 
-Paths are relative to the repo root. The owner is the suite whose behaviour the
-bullet is. **missing** means no test covers the bullet (or that part of it) yet.
+Every bullet of PLAN.md section 14 maps to at least one named test, in the
+suite that owns the behaviour. Paths are relative to the repo root. The owner
+is the suite whose behaviour the bullet is. **missing** means no test covers
+the bullet (or that part of it) yet.
 
 | # | Edge case (PLAN 14) | Test(s) | Owner / status |
 |---|---|---|---|
 | 1 | Same `input_id` twice → one task, one turn; second POST attaches | `harness/tests/test_guest_coordinator.py::test_redelivered_task_is_recorded_duplicate_and_runs_once`, `harness/tests/test_guest_e2e.py::test_redelivered_task_runs_once`, `harness/tests/test_fold.py::test_duplicate_input_folds_once`, `harness/tests/test_guest_inbox.py::test_duplicate_by_input_id`; `agent-api/tests/test_host_worker.py::test_redelivered_while_running_attaches_and_guest_dedupes`, `agent-api/tests/test_host_e2e.py::test_e2e_redelivered_input_runs_once`, `agent-api/tests/test_host_m3.py::test_redelivered_input_after_park_resume_runs_once`; `flows/flows/tests/test_session_workflow.py::test_a_duplicate_task_signal_runs_once` | guest + agent-api + flows; covered |
 | 2 | `finish_reason = length` → no tool runs | `harness/tests/test_guest_coordinator.py::test_finish_reason_length_runs_no_tools` | guest; covered |
-| 3 | Malformed `arguments` → one repair turn, then an error result | `harness/tests/test_guest_coordinator.py::test_malformed_arguments_get_an_error_result_without_running`, `::test_malformed_arguments_error_result_then_the_next_turn_repairs_the_call` (M6) | guest; covered as the guest behaves today: the error result comes first and the next turn is the repair turn (coordinator docstring, "M1 deviations"). A repair turn *before* any error result is not implemented |
+| 3 | Malformed `arguments` → one repair turn, then an error result | `harness/tests/test_guest_coordinator.py::test_malformed_arguments_get_an_error_result_without_running`, `::test_malformed_arguments_error_result_then_the_next_turn_repairs_the_call` | guest; covered as the guest behaves today: the error result comes first and the next turn is the repair turn (coordinator docstring, "M1 deviations"). A repair turn *before* any error result is not implemented |
 | 4 | Tool not offered or side mismatch → `guard_decision{deny, allowlist}`; in a log a schema error | `harness/tests/test_guest_coordinator.py::test_allowlist_denial_records_a_decision_only_and_fills_the_gap`, `::test_side_mismatch_is_an_allowlist_denial`, `harness/tests/test_fold.py::test_tool_call_not_offered_is_rejected`, `harness/tests/test_allowlist.py::test_is_allowed_matches_name_and_side` | guest + protocol; covered |
 | 5 | Device result for unknown/terminal `call_id` → 409, `input{dedupe: late}` | `agent-api/tests/test_host_routes.py::test_harness_chat_streams_and_device_result_resolves`, `agent-api/tests/test_host_sides.py::test_device_call_resolves_through_registry_and_409_semantics`, `agent-api/tests/test_host_m3.py::test_death_mid_call_resumes_from_base_with_log_return_and_lost_call`; guest side `harness/tests/test_guest_coordinator.py::test_side_result_for_unknown_or_terminal_call_is_logged_and_ignored`, `harness/tests/test_fold.py::test_late_result_for_terminal_call_is_recorded_and_ignored` | owned by agent-api; covered |
 | 6 | Device result after an agent-api restart → accepted, task completes | `agent-api/tests/test_host_edge_cases.py::test_device_result_after_an_agent_api_restart_is_accepted_and_the_task_completes` (`[kept]`: the frozen guest outlives the old process, session-snapshot restore; `[killed]`: base restore + log return ending with `parked`), `::test_a_restart_after_a_guest_death_does_not_adopt_device_calls`, `agent-api/tests/test_host_sides.py::test_adopted_device_call_delivers_once_and_keeps_the_409_semantics` | owned by agent-api; covered for a **parked** session: a new Worker rebuilds the open device calls from the fold (`Worker._adopt_open_device_calls`, `DeviceCalls.adopt`); POST /tool-result for an id the process does not know loads the tenant's parked sessions first (`Workers.load_parked`), so the result is accepted and wakes the guest. A guest that was running (not parked) when agent-api went away is gone with it; its resume marks the call `lost`, so that result stays a 409 (agent-api's shutdown does not park running sessions) |
@@ -242,5 +249,5 @@ bullet is. **missing** means no test covers the bullet (or that part of it) yet.
 | 20 | Idle past `session_idle_s` → snapshot + destroy; next task restores | `agent-api/tests/test_host_m3.py::test_idle_timer_parks_snapshots_destroys_and_the_next_task_restores`; guest side `harness/tests/test_guest_coordinator.py::test_park_between_tasks_parks_at_once_and_the_link_resumes_it` | owned by agent-api; covered |
 | 21 | Heartbeat stops → `run_task` retried once from the last heartbeat `seq`; a second failure fails the task, the workflow stays signalable | `flows/flows/tests/test_session_workflow.py::test_d_run_task_retry_receives_heartbeat_details`, `::test_d2_run_task_failing_twice_fails_the_task_and_the_workflow_stays_signalable`, `agent-api/tests/test_host_temporal.py::test_run_task_retry_reattaches_without_a_second_turn` | owned by flows; covered |
 | 22 | History past 10 000 events or 50 tasks → continue-as-new carries seen `input_id`s and parked state | `flows/flows/tests/test_session_workflow.py::test_e_continue_as_new_after_n_tasks`, `::test_e2_continue_as_new_on_history_length`, `::test_b3_carried_parked_task_resumes_in_new_run`, `::test_b6_history_hop_while_parked_then_answer` | owned by flows; covered (with small thresholds) |
-| 23 | Replay mismatch or broken checkpoint chain → hard error naming the seq | `harness/tests/test_fold.py::test_corrupted_event_reports_first_diverging_seq`, `::test_broken_prev_hash_is_an_error`; `harness/tests/test_replay.py::test_altered_event_fails_at_the_checkpoint_naming_its_seq`, `::test_bad_checkpoint_hash_names_the_checkpoint_seq`, `::test_gap_names_the_seq_after_it`, `::test_broken_prev_hash_chain_names_the_seq`, `::test_cli_verify_all_reports_failing_sessions_with_seq` (M6) | protocol; covered |
+| 23 | Replay mismatch or broken checkpoint chain → hard error naming the seq | `harness/tests/test_fold.py::test_corrupted_event_reports_first_diverging_seq`, `::test_broken_prev_hash_is_an_error`; `harness/tests/test_replay.py::test_altered_event_fails_at_the_checkpoint_naming_its_seq`, `::test_bad_checkpoint_hash_names_the_checkpoint_seq`, `::test_gap_names_the_seq_after_it`, `::test_broken_prev_hash_chain_names_the_seq`, `::test_cli_verify_all_reports_failing_sessions_with_seq` | protocol; covered |
 | 24 | A hook reading `time()` → purity test fails | `harness/tests/test_guest_hooks.py::test_impure_before_hook_fails_the_purity_check`, `::test_impure_after_hook_fails_the_purity_check`; `harness/tests/test_fold.py::test_fold_is_pure` | guest + protocol; covered |

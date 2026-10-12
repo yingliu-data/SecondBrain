@@ -3,8 +3,8 @@
 Follows `RUNBOOK-M5.md` (Temporal, questions and schedules work on the box).
 Verifies the M6 exit criteria of PLAN.md section 13 on the server:
 every log replays, the legacy sessions are event logs, every tenant runs on
-`harness`, and the async tool-call finding is recorded. Contracts:
-`docs/M6-CONTRACTS.md`; the replay CLI and the invariants: `docs/REPLAY.md`;
+`harness`, and the async tool-call finding is recorded. Tenants, traces and
+the migration: `docs/HOST.md`; the replay CLI and the invariants: `docs/REPLAY.md`;
 the async mode and the bench: `docs/ASYNC-TOOLS.md`, `docs/GUEST.md`
 "Async mode".
 
@@ -207,7 +207,7 @@ the private `vm/workspace/`).
 
 ## 3. Every tenant on `harness`
 
-What changed for the server (M6-CONTRACTS §3):
+What changed for the server (`docs/HOST.md` section 4):
 
 - `AGENT_ENGINE`, the legacy loop and `app/agent/` are gone. A tenant's
   `engine` key is accepted and dropped with a warning; so are `mcp_servers`

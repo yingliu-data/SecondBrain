@@ -1,8 +1,8 @@
 # Temporal control plane (`flows/`)
 
-PLAN.md D11, D12, D22 and section 10 are the design; `docs/M5-CONTRACTS.md` is
-the contract the host activities and the guest are built against;
-`docs/spikes/temporal.md` has the M0 findings (versions, heartbeat caveat,
+PLAN.md D11, D12, D22 and section 10 are the design; docs/HOST.md has the
+HTTP API both paths serve and the direct path; docs/GUEST.md "Questions park
+the task" is the guest side; `docs/spikes/temporal.md` has the M0 findings (versions, heartbeat caveat,
 sandbox and test-server quirks). This page is how the pieces fit and how to
 operate them on the box. Server walkthrough of the M5 exit criteria:
 `RUNBOOK-M5.md`.
@@ -25,10 +25,19 @@ Retention: closed workflows are kept **30 days** on namespace `secondbrain`
 (§6.1); the session dir is kept until it is deleted. A workflow that is gone
 from Temporal loses nothing the model saw.
 
-Temporal drives a session only when `TEMPORAL_ADDRESS` is set **and** the
-tenant is on `engine: harness`; otherwise `POST /chat` takes the M1–M4 direct
-path (`Worker.act`) unchanged. The worker runs inside agent-api (one replica,
-task queue `secondbrain-agent`, `flows.TASK_QUEUE`).
+Temporal drives a session only when `TEMPORAL_ADDRESS` is set and the
+Temporal worker runs; otherwise `POST /chat` takes the direct path
+(`Worker.act`), so tests and a Temporal-less box keep working. agent-api
+depends on `flows` (editable path dependency `../flows`) and starts the
+Temporal worker on its own loop in the background at startup
+(`app/host/temporal.py`: `flows.worker.build_worker(client,
+activities=[...real bodies...])`, then `flows.schedules.ensure_schedules`
+with the loaded tenants doc); startup never waits for Temporal. A failed
+connect, or a worker that exits on its own later, logs an error and leaves
+the direct path. One replica, task queue `secondbrain-agent`
+(`flows.TASK_QUEUE`). Both paths run the same Worker task API and handle a
+question park the same way, so every Worker gets the tenant's
+`answer_wait_s`.
 
 ## 2. The session workflow
 
@@ -64,8 +73,9 @@ Outcomes (`flows.activities.Outcome`): `done`, `failed`, `timeout`,
 `escalated` from the guest's `settle`; `parked` (never delivered: the loop
 waits); `timeout` also when `run_task` hits its wall clock; `failed` when
 `run_task`, `prepare_vm` or `park_vm` run out of attempts; `aborted` from an
-`abort` signal (the guest settles it as `failed`, `answer: "aborted: <reason>"`,
-M5-CONTRACTS §4); `escalated` also from the workflow's own timer. Every task
+`abort` signal (the guest settles it `aborted`, `answer: ""`, `detail` = the
+reason); `escalated` also from the workflow's own timer (the guest settles it
+`escalated` on `abort{reason: "escalated"}`). Every task
 ends in exactly one `deliver`.
 
 Details that matter:
@@ -124,8 +134,9 @@ sessions (or to a session after `terminate`, §6.3), not to a running one.
 
 ## 3. Activities
 
-Names and payloads are `flows/activities.py` (stubs there; the real bodies
-are agent-api's `app/host/activities.py`, M5-CONTRACTS §2).
+Names and payloads are `flows/activities.py` (stubs there; change them only
+additively). The real bodies are agent-api's `app/host/activities.py`; they
+drive the Worker's task API as `act()` does on the direct path.
 
 | Activity | Payload → result | Timeout / retries | Heartbeat |
 |---|---|---|---|
@@ -134,6 +145,34 @@ are agent-api's `app/host/activities.py`, M5-CONTRACTS §2).
 | `park_vm` | `ParkVM{session, input_id, question_id}` | 60 s, 3 attempts | no |
 | `deliver` | `Deliver{session, input_id, outcome, question_id}` | 60 s, 3 attempts | no |
 | `signal_session` | `SignalSession{session, task, task_queue, config}` → `input_id` | 30 s, 5 attempts | no |
+
+What the host bodies do:
+
+- `prepare_vm`: the session's Worker (tenant looked up by name); boot or wake
+  the guest (`ensure_ready`: base restore or rootfs for a fresh session, the
+  session snapshot for a parked one). Idempotent.
+- `run_task`: heartbeat `{"last_seq": <acked guest seq>}` at start and every
+  `HARNESS_HEARTBEAT_S` (60 s). On attempt > 1 the last heartbeat detail is a
+  floor only (`floor_seq` on the `activity_start` host event). Resume: send
+  `ui_response{question_id, answer}` (input id
+  `{input_id}:answer:{question_id}`, so a retry dedupes); no guest to resume
+  a parked, unsettled task → a non-retryable failure. Then `start_task`: a
+  running task for the input is re-attached, a settled one returns its stored
+  settle, never a second turn. Returns the settle's outcome, or `parked` +
+  `question_id` at the guest's question park. Cancelled (workflow abort) →
+  `abort{reason: "aborted"}` to the guest, wait for its settle, re-raise.
+- `park_vm`: make sure the session is parked and snapshotted (normally it
+  already is: the worker adopted the guest's own park). Idempotent.
+- `deliver`: for `escalated` / `aborted` with no guest settle (the answer
+  timer, an abort while parked) first wake the guest and send
+  `abort{reason: <outcome>}` so it writes the `settle` itself. Then write the
+  ticket projection `{session}/tickets/{ticket_id}.json` = `{ticket_id,
+  input_id, outcome, answer, question_id, manifest, usage}` (ticket_id =
+  `derive_key_id("ticket", user, tenant, session_id, input_id)`: per input,
+  not per settle seq, since seqs restart with every guest run), end the
+  input's SSE streams (`error` unless `done`, then `done`) and write the host
+  event `workflow{kind: delivered, input_id, outcome, ticket_id}` once.
+  Idempotent by `input_id`.
 
 `signal_session` is the schedule glue (`flows.schedules.SessionSignaller`), the
 only activity that talks to Temporal; `build_worker` registers it next to the
@@ -156,8 +195,7 @@ tenant's `SessionConfig`, the policy); a schedule whose stored fingerprint
 equals the new one is not rewritten, and one without a fingerprint is
 rewritten once;
 schedules of a listed tenant that are no longer in the file are deleted. A
-malformed entry, a tenant with a bad config, or a tenant on `engine: legacy`
-is logged and skipped. Returns
+malformed entry or a tenant with a bad config is logged and skipped. Returns
 `{schedule_id: created|updated|unchanged|deleted}`.
 
 A fire starts `ScheduleTickWorkflow` (id `{schedule_id}-{fire time}`, e.g.
@@ -183,7 +221,7 @@ Compose service `temporal` (`docker-compose.yml`): `temporalio/temporal:1.9.1`
 - UI on `127.0.0.1:8233` of the box only. From a laptop:
   `ssh -L 8233:localhost:8233 <box>` then http://localhost:8233/namespaces/secondbrain/workflows.
 - agent-api `depends_on: temporal (service_started)`: it does not wait for
-  healthy; if Temporal is down the host falls back as M5-CONTRACTS §1 says.
+  healthy; if Temporal is down the host takes the direct path (§1).
 - Healthcheck: `temporal operator cluster health` (`docker compose ps` shows it).
 - Back up: stop the service, copy `temporal.db` (SQLite, single file).
 - Moving off the home server: `temporalio/auto-setup` + Postgres + `temporalio/ui`,

@@ -4,7 +4,8 @@ Follows `RUNBOOK-M1.md` (a VM boots by hand and through agent-api) and
 `RUNBOOK-M2.md`. Verifies the M3 exit criteria of PLAN.md section 13 on the
 owner's box (`/dev/kvm`). The build machine has no KVM: everything below was
 unit-tested against a fake Firecracker API socket and runs live here for the
-first time. Contracts: `docs/M3-CONTRACTS.md`; image and base snapshot:
+first time. Wire and behaviour: `docs/PROTOCOL.md` sections 5, 6 and 8, `docs/GUEST.md`
+"Park, resume, bulk, manifest", `docs/HOST.md`; image and base snapshot:
 `docs/IMAGE.md`.
 
 Exit criteria:
@@ -16,11 +17,11 @@ Exit criteria:
 5. Engine flips to `harness` for the default tenant (since M6: every tenant
    runs on `harness`, §7).
 
-Who provides what (three workstreams, M3-CONTRACTS):
+Who provides what (three workstreams):
 
 | Piece | Owner | State |
 |---|---|---|
-| `sandbox/firecracker.py` `restore/snapshot/has_snapshot`, base build, `harness-init`, compose devices + `vm/` volume | sandbox + image | done, unit-tested (`tests/test_sandbox_firecracker.py`, `test_sandbox_snapshot.py`, `test_sandbox_local.py`) |
+| `sandbox/firecracker.py` `restore/snapshot/has_snapshot`, base build, `harness-init`, agent-api image (firecracker + mkfs.ext4), compose env + devices + `vm/` and `image/out` volumes | sandbox + image | done, unit-tested (`tests/test_sandbox_firecracker.py`, `test_sandbox_snapshot.py`, `test_sandbox_local.py`) |
 | guest `--idle-wait vsock`, `--mount-workspace DEV`, park/`parked`, log return | guest | done. Flags (`guest/main.py`): `--connect vsock --idle-wait vsock --mount-workspace /dev/vdb --log-dir /var/harness --workspace /workspace` (from `harness-init`; `--hello-timeout` 30, `--control-port` 5000, `--image-version`). Idle-wait is silent (no log line per poll); its end logs `idle-wait over: the host answered on :5000`. Then `hello for session <sid> (<user>/<tenant>)[ resume]`, on a resume `log return: N events through seq M`. Park: `checkpoint` + `parked{checkpoint_seq, reason, question_id?, wall_used_ms?, question_left_ms?}`; the wake writes `clock{kind: resumed}` first |
 | worker park/resume, `vm{op,source,ms}` host events, fallback chain | worker | done. Park triggers: the idle timer (`HARNESS_SESSION_IDLE_S`, 1800 s after a settle) and a question deadline when `answer_wait_s > 0` (the guest parks itself). Host log events: `vm{op: boot\|restore\|snapshot\|destroy, source: rootfs\|base\|session, ms, ready_ms, run, sandbox, ok?, error?, resume?, reason?}`, `workflow{kind: task_signal\|idle\|parked\|park_timeout\|resume\|heartbeat\|completed ...}`. No park endpoint or CLI |
 
@@ -35,31 +36,43 @@ RUNBOOK-M1 steps 1–3 (Firecracker v1.17.0 installed, `/dev/kvm` usable,
 `make image` green). Then:
 
 ```sh
-sudo modprobe vhost_vsock                 # compose passes /dev/vhost-vsock; it must exist
-mkdir -p ~/data/SecondBrain/vm
-cd harness/image && make image && make check     # now also writes out/IMAGE_VERSION
-cp out/vmlinux out/rootfs.ext4 out/workspace-template.img out/IMAGE_VERSION ~/data/SecondBrain/vm/
+mkdir -p ~/data/SecondBrain/vm                   # HARNESS_VM_CACHE: base/ is built here
+cd harness/image && make image && make check     # out/: vmlinux rootfs.ext4 workspace-template.img IMAGE_VERSION
+cd ../.. && docker compose build agent-api       # or pull the CI image
+docker compose up -d agent-api
+docker compose exec agent-api firecracker --version   # Firecracker v1.17.0 (versions.env pin)
+docker compose exec agent-api mkfs.ext4 -V
 ```
 
 `IMAGE_VERSION` must sit **next to the rootfs** the agent-api uses: that is
 how `restore()` knows which image it runs without hashing 350 MiB
 (`HARNESS_IMAGE_VERSION` overrides it).
 
-`docker-compose.yml` gives agent-api `/dev/kvm`, `/dev/vhost-vsock` and
-mounts `~/data/SecondBrain/vm` read-write at `/var/lib/secondbrain/vm`
-(= the default `HARNESS_VM_CACHE`). The sandbox selection is not in compose
-yet: add these to the agent-api service's `environment:` list (and make sure
-the image carries the binary, RUNBOOK-M1 §7;
-`docker compose exec agent-api firecracker --version` must print it):
+The agent-api image carries `/usr/local/bin/firecracker` (+ `jailer`), both
+from the `versions.env` pin and sha256-verified at build time, and
+`mkfs.ext4`. `docker-compose.yml` sets the sandbox up already: it passes
+`/dev/kvm` (no `/dev/vhost-vsock`: Firecracker's vsock is userspace over
+Unix sockets), mounts `harness/image/out` read-only at `/opt/harness-image`
+and `~/data/SecondBrain/vm` read-write at `/var/lib/secondbrain/vm`, and sets
 
 ```sh
-HARNESS_SANDBOX=firecracker                      # default: local (guest as a subprocess)
-HARNESS_FIRECRACKER_BIN=/usr/local/bin/firecracker
-HARNESS_KERNEL=/var/lib/secondbrain/vm/vmlinux
-HARNESS_ROOTFS=/var/lib/secondbrain/vm/rootfs.ext4
-HARNESS_WORKSPACE_TEMPLATE=/var/lib/secondbrain/vm/workspace-template.img
-HARNESS_VM_CACHE=/var/lib/secondbrain/vm        # default; base/ lives here
-HARNESS_STOP_AT_SETTLE=false                     # the default: a VM spans the session; park instead
+HARNESS_SANDBOX=firecracker                      # ${HARNESS_SANDBOX:-firecracker}; `local` = guest as a subprocess
+HARNESS_KERNEL=/opt/harness-image/vmlinux
+HARNESS_ROOTFS=/opt/harness-image/rootfs.ext4
+HARNESS_WORKSPACE_TEMPLATE=/opt/harness-image/workspace-template.img   # only used without mkfs.ext4
+HARNESS_VM_CACHE=/var/lib/secondbrain/vm         # base/ lives here
+# unset, defaults: HARNESS_FIRECRACKER_BIN=firecracker (on PATH),
+# HARNESS_STOP_AT_SETTLE=false (a VM spans the session; park instead)
+```
+
+A box without KVM (dev laptop, CI): `HARNESS_SANDBOX=local` in `.env` plus a
+`docker-compose.override.yml` (auto-loaded; do not commit it) that drops the
+device, since compose refuses to start with a missing one:
+
+```yaml
+services:
+  agent-api:
+    devices: !reset []
 ```
 
 `HARNESS_WORKSPACE_MIB` must equal the template's size (1024) when the
@@ -110,8 +123,7 @@ docker compose exec agent-api python -m app.host.sandbox.firecracker build-base
 # or on the host with the out/ artifacts (then copy out/vm/base/ to the cache):
 cd harness/image && make snapshot
 # with explicit deployed paths:
-HARNESS_VM_CACHE=~/data/SecondBrain/vm HARNESS_ROOTFS=~/data/SecondBrain/vm/rootfs.ext4 \
-HARNESS_KERNEL=~/data/SecondBrain/vm/vmlinux make snapshot
+HARNESS_VM_CACHE=~/data/SecondBrain/vm make snapshot   # kernel/rootfs default to out/, as in compose
 ```
 
 `build-base` flags: `--cache DIR` (default `HARNESS_VM_CACHE`),
@@ -300,7 +312,7 @@ pkill -KILL -f "firecracker.*default-m3kill"
 wait
 ```
 
-Pass (M3-CONTRACTS §4):
+Pass (`docs/PROTOCOL.md` section 6):
 
 - host events: `workflow{kind: resume, reason: guest_died, resumes: 1,
   acked_seq: N}`, then `vm{op: restore, source: base, resume: true}`
@@ -347,7 +359,7 @@ docker compose exec agent-api python -m protocol.replay replay \
 
 Pass: both restored from `base` (same `vmstate` path in each
 `vm/firecracker.log`), zero shared ids (call ids, turn ids, question ids —
-every id is derived from session_id, M3-CONTRACTS §1; the client-chosen
+every id is derived from session_id, `docs/GUEST.md` "Snapshot point"; the client-chosen
 `input_id` is excluded), different `state_hash` in the replay summaries
 (checkpoints are only written at a park, so compare the fold). Both VMs
 report the same guest CID (3) in `vm/firecracker.log`; that is expected

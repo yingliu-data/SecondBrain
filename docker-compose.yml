@@ -69,6 +69,18 @@ services:
       # worker runs in this process); unset TEMPORAL_ADDRESS -> direct path.
       - TEMPORAL_ADDRESS=temporal:7233
       - TEMPORAL_NAMESPACE=secondbrain
+      # Engine `harness` sandbox: one Firecracker microVM per session (the
+      # image carries firecracker + mkfs.ext4). Needs /dev/kvm. On a box
+      # without KVM set HARNESS_SANDBOX=local in .env AND drop the device
+      # with a docker-compose.override.yml (auto-loaded, not committed):
+      #   services:
+      #     agent-api:
+      #       devices: !reset []
+      - HARNESS_SANDBOX=${HARNESS_SANDBOX:-firecracker}
+      - HARNESS_KERNEL=/opt/harness-image/vmlinux
+      - HARNESS_ROOTFS=/opt/harness-image/rootfs.ext4      # IMAGE_VERSION sits next to it
+      - HARNESS_WORKSPACE_TEMPLATE=/opt/harness-image/workspace-template.img  # fallback only (mkfs.ext4 is in the image)
+      - HARNESS_VM_CACHE=/var/lib/secondbrain/vm            # base/ snapshot lives here
     depends_on:
       temporal:
         condition: service_started               # not healthy: the direct path works without it
@@ -80,12 +92,16 @@ services:
       # Read-write so `python -m app.host.sandbox.firecracker build-base` can
       # (re)build base/ in place (harness/docs/RUNBOOK-M3.md).
       - ~/data/SecondBrain/vm:/var/lib/secondbrain/vm
-    # Firecracker microVMs for engine `harness`. KVM is
-    # required; vhost-vsock is not used by Firecracker's (userspace) vsock but is
-    # kept -- `modprobe vhost_vsock` on the host first (harness/docs/RUNBOOK-M1.md).
+      # Guest image outputs of `cd harness/image && make image`: vmlinux,
+      # rootfs.ext4, workspace-template.img, IMAGE_VERSION. build.sh replaces
+      # files by rename, so running VMs keep the old inode; rebuild the base
+      # snapshot after a rebuild (harness/docs/RUNBOOK-M3.md).
+      - ./harness/image/out:/opt/harness-image:ro
+    # Firecracker microVMs for engine `harness`: KVM is required. No
+    # /dev/vhost-vsock: Firecracker's vsock is emulated in the VMM over Unix
+    # sockets (and compose refuses to start when a listed device is missing).
     devices:
       - /dev/kvm:/dev/kvm
-      - /dev/vhost-vsock:/dev/vhost-vsock
     networks:
       - llm_internal
       - tunnel_network
