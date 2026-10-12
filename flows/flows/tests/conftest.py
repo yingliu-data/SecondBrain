@@ -24,9 +24,10 @@ from temporalio.client import Client, WorkflowHandle
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
-from flows import activities as acts
-from flows.activities import Script, SessionConfig, SessionRef, TaskSignal
+from flows.activities import SessionConfig, SessionRef, TaskSignal
 from flows.client import query_status, session_handle, signal_task
+from flows.tests import stubs as acts
+from flows.tests.stubs import STUB_ACTIVITIES, Script
 from flows.worker import build_worker
 
 
@@ -188,6 +189,7 @@ async def make_session(tenv: Env):
         uid = uuid.uuid4().hex[:8]
         ref = ref or SessionRef(user="u-" + uid, tenant="default", session_id="s-" + uid)
         tq = task_queue or f"test-{uid}"
+        worker_kwargs.setdefault("activities", STUB_ACTIVITIES)
         worker = build_worker(client, task_queue=tq, **worker_kwargs)
         await worker.__aenter__()
         s = Session(client=client, ref=ref, task_queue=tq, worker=worker,

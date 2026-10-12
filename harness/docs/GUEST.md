@@ -3,7 +3,7 @@
 The guest is one Python 3.12 process (`guest.main`), standard library only.
 It never listens: it connects out to CID 2 (or, in tests, to Unix sockets
 named `{dir}/v.sock_{port}`, the same names Firecracker gives the host side of
-guest-initiated vsock connections). Ports: 5000 control, 5001 bulk, 5010 LLM, 5011 gateway.
+guest-initiated vsock connections). Ports (`protocol.ports.PORTS`): 5000 control, 5001 bulk, 5010 LLM, 5011 gateway.
 
 ## Threads and the one queue
 
@@ -47,7 +47,9 @@ Fatal protocol errors (`second hello`, unsupported schema): emit
 ## Module contracts (public names other modules import)
 
 - `guest.config`: `GuestConfig` (dataclass from `hello.config`), `from_hello(body) -> GuestConfig`,
-  `Principal(user, tenant)`.
+  `Principal(user, tenant)`, `Limits` (every default is `protocol.limits.DEFAULT_LIMITS`,
+  the dict the host's `Worker.limits()` starts from too). A `hooks` key in an
+  older host's hello is ignored (the hooks are code: `guest.hooks`).
 - `guest.transport`: `Connector` protocol with `connect(port) -> socket.socket`;
   `UnixConnector(dir)`, `VsockConnector(cid=2)`; `Transport(connector, inbound,
   session_id=None)`: `start()`, `stop()`, `send_event(event)`, `send_live(type, body)`,
@@ -56,12 +58,16 @@ Fatal protocol errors (`second hello`, unsupported schema): emit
   (`protocol.messages.Outbox/Inbox/resend_plan`).
 - `guest.eventlog`: `EventLog(dir)`: `append(event)`, `mark_acked(seq)`,
   `last_seq`, `acked_seq`, `read(after_seq=0)`, `rotate()`; `LogWriter(eventlog,
-  transport)`: `start()`, `put(event)`, `flush(timeout)`.
-- `guest.inbox`: `Inbox(state)`: `classify(control_msg) -> ("new"|"duplicate"|"late", input_body)`.
+  transport)`: `start()`, `put(event)`, `flush(timeout)`. Segment names, the
+  segment reader and `protocol.limits.SEGMENT_EVENTS` are protocol.replay's /
+  protocol.limits' (the host store uses the same); the `acked` marker is written
+  with `protocol.fsio.atomic_write`.
 - `guest.context`: `Request` dataclass (`messages`, `tools`, `params`, `system_hash`,
   `request_hash`, `preamble_hash`, `chars`); `build_request(state, cfg, clock_at_ms) -> Request`;
   `system_block(cfg) -> str`.
-- `guest.provider`: `Provider(connector, port=5010, model, timeout_s)`:
+- `guest.provider`: `Provider(connector, port=protocol.ports.LLM, model, timeout_s, *, backoff_s)`
+  (guest.main passes `HARNESS_LLM_BACKOFF_S`, comma-separated seconds, when set: the tests
+  set it small; usage sums go through `protocol.usage.normalise_usage`):
   `chat_completion(request: Request) -> dict` (OpenAI chat-completions response,
   `stream: false` in M1) via `http.client` over the connector's socket; raises
   `ProviderError(transient: bool, status, message)`.
@@ -92,9 +98,11 @@ Guest-side tools go to `OperationManager.submit`.
   "function": {...}}`); `ToolSpec.schema` holds the bare parameters object.
 - The transport acks every delivered control message itself; the coordinator
   only tracks `last_cseq` and never acks.
-- The coordinator dedupes inputs directly on `State.seen_input_ids`;
-  `guest.inbox.Inbox.classify` implements the same rule and is the one to use
-  when the two are unified.
+- The coordinator classifies inputs itself (`new` / `duplicate` on
+  `State.seen_input_ids`; a `ui_response` for an unknown or answered question
+  is `late`). The separate `guest.inbox` module is gone; its extra rule (a
+  `ui_response` past the question's deadline by the fold's clock is `late`)
+  was never used by the coordinator and is dropped with it.
 - Host/device/mcp tool entries may carry a `schema` key (the OpenAI
   definition) in `hello.config.tools`; `config.from_hello` keeps name/side/pin
   for the allowlist and `context.tool_schemas` reads the schemas.

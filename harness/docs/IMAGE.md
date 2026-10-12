@@ -11,12 +11,32 @@ The server runbooks are `docs/RUNBOOK-M1.md` (first boot) and
 | File | What | Built by |
 |---|---|---|
 | `guest.pyz` | `harness/guest` + `harness/protocol` as one stdlib zipapp with precompiled bytecode (see "guest.pyz bytecode"); `python3 guest.pyz` runs `guest.main.main()` | `build.sh pyz` (`pyz_pack.py`) |
-| `rootfs.ext4` | the read-only root filesystem (Debian bookworm-slim, Python 3.12, bash, git, coreutils, `/sbin/harness-init`, `/opt/harness/guest.pyz`); ~350 MiB | `build.sh rootfs` |
+| `rootfs.ext4` | the read-only root filesystem (Debian bookworm-slim, Python 3.12, bash, git, coreutils, `/sbin/harness-init`, `/opt/harness/guest.pyz`, `/opt/harness/IMAGE_VERSION`); ~350 MiB | `build.sh rootfs` |
+| `GUEST_IMAGE_VERSION` | 16 hex chars: sha256 over the sha256 of `guest.pyz`, `Dockerfile.rootfs`, `harness-init`, `pyz_pack.py` and `versions.env`, `[:16]`; baked into the rootfs as `/opt/harness/IMAGE_VERSION` (see "Image identities") | `build.sh rootfs` |
 | `vmlinux` | the pinned Firecracker CI kernel, uncompressed ELF, sha256-verified | `build.sh kernel` |
 | `workspace-template.img` | a 1 GiB sparse, empty ext4; `HARNESS_WORKSPACE_TEMPLATE`, the fallback when there is no `mkfs.ext4` (the agent-api image has it) | `build.sh workspace` |
-| `IMAGE_VERSION` | 16 hex chars: `sha256("<vmlinux sha256>\n<rootfs sha256>\n")[:16]`; the identity every snapshot records and is checked against | `build.sh version` (part of `all`) |
+| `IMAGE_VERSION` | 16 hex chars: `sha256("<vmlinux sha256>\n<rootfs sha256>\n")[:16]`; the identity every snapshot records and is checked against (see "Image identities") | `build.sh version` (part of `all`) |
 | `firecracker`, `jailer` | the pinned release binaries for host-side runs (`make snapshot`); the agent-api image installs its own copy from the same pin | `build.sh firecracker` |
 | `vm/base/{vmstate,mem,MANIFEST.json}` | the BASE snapshot, when built with the default `HARNESS_VM_CACHE=out/vm` (normally built straight into the deployed cache) | `make snapshot` (needs `/dev/kvm`) |
+
+### Image identities
+
+Two, because one cannot hash a file that contains its own hash:
+
+- `out/IMAGE_VERSION` (kernel + rootfs bytes) is the **snapshot identity**:
+  `MANIFEST.json`/`META.json` record it, `restore()` refuses a snapshot taken
+  from other bytes. It sits next to the rootfs (`HARNESS_IMAGE_VERSION`
+  overrides it).
+- `/opt/harness/IMAGE_VERSION` inside the rootfs (`out/GUEST_IMAGE_VERSION`,
+  the rootfs's inputs) is the **guest's own identity**: `harness-init` passes
+  it as `--image-version`, so `session_start.image_version` names the image a
+  run used (`unknown` when the file is missing, `dev` for a guest started
+  without the flag: tests, LocalSandbox).
+
+The harness release itself is `protocol.version.HARNESS_VERSION`: the host
+sends it in `hello.config.harness_version`, the guest records its own in
+`session_start.harness_version`, and the host logs a `harness_skew` host event
+(a warning, never fatal) when they differ.
 
 Pins live in `harness/image/versions.env` (Firecracker `v1.17.0`, CI kernel
 `firecracker-ci/v1.15/x86_64/vmlinux-6.1.155`, base image
@@ -35,7 +55,7 @@ Pins live in `harness/image/versions.env` (Firecracker `v1.17.0`, CI kernel
   step; "updating Python packages" means bumping `ROOTFS_BASE_IMAGE` in
   `versions.env` for a newer 3.12.x and rebuilding.
 - `/opt/harness/guest.pyz` (mode 0755, its `.pyc` recompiled by the image's
-  own python3) and `/sbin/harness-init` (mode 0755).
+  own python3), `/opt/harness/IMAGE_VERSION` and `/sbin/harness-init` (mode 0755).
 - Bytecode for the standard library (`compileall --invalidation-mode
   unchecked-hash`, without test/idlelib/tkinter/ensurepip/lib2to3/pydoc_data;
   about +17 MiB): the official python image ships no `.pyc`, and on the
@@ -71,7 +91,7 @@ Firecracker appends `root=/dev/vda ro` for the drive marked `is_root_device`.
    guest takes the time from `hello.at` and every later `heartbeat`
    (PLAN.md section 4.3) and the protocol never folds wall-clock time.
 5. Runs the guest as a child:
-   `python3 /opt/harness/guest.pyz --connect vsock --idle-wait vsock --mount-workspace /dev/vdb --log-dir /var/harness --workspace /workspace`
+   `python3 /opt/harness/guest.pyz --connect vsock --idle-wait vsock --mount-workspace /dev/vdb --log-dir /var/harness --workspace /workspace --image-version "$(cat /opt/harness/IMAGE_VERSION)"`
    and waits. The guest sits in idle-wait (a silent connect to CID 2:5000
    every 5 ms) until a host listener answers; that is the base-snapshot
    point. Before it starts polling, the guest has imported every module a
@@ -90,8 +110,10 @@ sandbox manager captures at `{session_dir}/vm/console.log`.
 ## The base snapshot (`make snapshot`, M3)
 
 `build_snapshot.py build-base` (the logic is `build_base_snapshot()` in
-`agent-api/app/host/sandbox/firecracker.py`; the script loads that file
-directly, the container runs `python -m app.host.sandbox.firecracker build-base`):
+`agent-api/app/host/sandbox/base_snapshot.py`; the script puts `agent-api/`
+and `harness/` on `sys.path` and runs its `main()` with a bare `python3`, the
+container runs `python -m app.host.sandbox.base_snapshot build-base`;
+`python -m app.host.sandbox.firecracker build-base` still works):
 
 1. Makes a scratch session dir `{cache}/.build-base/{vm,ipc}` and cold-boots the
    rootfs exactly as `FirecrackerSandbox.start()` does, with guest CID 3

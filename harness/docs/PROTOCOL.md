@@ -47,7 +47,7 @@ Types: `hello`, `task`, `follow_up`, `steer`, `ui_response`, `side_result`,
 
 | type | body |
 |---|---|
-| `hello` | `config` (model alias, limits, tools with sides, ports, hooks, `async_tools`, `question_timeout_s`, `ui_attached`), `session_id`, `principal` (user, tenant), `system_block`, `resume`, `at` |
+| `hello` | `config` (model alias, limits, tools with sides, ports, `async_tools`, `question_timeout_s`, `ui_attached`, `harness_version`), `session_id`, `principal` (user, tenant), `system_block`, `resume`, `at` |
 | `task` / `follow_up` / `steer` | `input_id`, `text`, `attachments`, `wall_clock_s?` (int ≥ 1: the task's wall clock; the guest arms it for the task the input starts, logs it on the `input` event and settles `timeout` at it; absent → hello `limits.wall_clock_s`) |
 | `ui_response` | `input_id`, `question_id`, `answer` |
 | `side_result` | `call_id`, `side` (`host`/`device`/`mcp`), `content`, `ok`; optional `memory` `{scope, op, slug, sha256}`: the memory the call changed (`remember`/`forget`), which the guest records as a `memory` event after the ok `tool_result` (docs/GUEST.md) |
@@ -55,11 +55,15 @@ Types: `hello`, `task`, `follow_up`, `steer`, `ui_response`, `side_result`,
 | `abort` | `reason`: `escalated` → `settle{escalated}`; any other → `settle{aborted, answer: ""}`; `detail` carries the reason |
 | `heartbeat` | `at` — every 60 s → `clock{host_heartbeat}` |
 
-`hello.config.limits` (unknown keys are rejected) also carries
-`park_grace_s` (default 30) and `answer_wait_s` (int ≥ 0, default 0;
-section 5). `hello.config.ports` names the guest's ports (`control`, `bulk`,
-`llm`, `gateway`; defaults 5000, 5001, 5010, 5011); an unknown port name is
-logged and ignored.
+`hello.config.limits` (unknown keys are rejected; every default is
+`protocol.limits.DEFAULT_LIMITS`) also carries `park_grace_s` (default 30)
+and `answer_wait_s` (int ≥ 0, default 0; section 5). `hello.config.ports`
+names the guest's ports (`control`, `bulk`, `llm`, `gateway`; defaults
+`protocol.ports.PORTS`: 5000, 5001, 5010, 5011); an unknown port name is
+logged and ignored. `hello.config.harness_version` is the host's
+`protocol.version.HARNESS_VERSION`; the guest records its own in
+`session_start.harness_version` and the host logs a `harness_skew` host
+event when they differ.
 
 Each `hello.config.tools` entry is
 `{name, side, pin, schema?, description?, timeout_s?}`. Host and device
@@ -130,7 +134,7 @@ Types: `ready`, `delta`, `log`, `bulk_ref`. No `seq`, no `session_id`.
    `park_grace_s` are killed (`op_state{killed}`).
 3. The guest writes `checkpoint{through_seq, state_hash, prev_hash}` and
    `parked{checkpoint_seq, reason}`, waits until both are acked, closes :5000
-   and returns to idle-wait (it polls :5000 every 50 ms). It keeps its
+   and returns to idle-wait (it polls :5000 every 5 ms, guest.transport.IDLE_POLL_S). It keeps its
    in-memory state and does not exit. **The worker must stop accepting :5000
    connections when it receives `parked` (before acking it)**, or the guest
    reconnects at once.
@@ -254,8 +258,10 @@ Who uses it: a spill file is put when the tool result is produced (before its
 `bulk` event); at settle every changed workspace file under 8 MiB, then the
 manifest (`{"version":1,"files":[{path,bytes,sha256,mode}],"total_bytes"}`,
 sorted by path, canonical JSON); on a death resume one `get` with
-`after_seq: 0`. The guest checks a `get` payload's byte count, sha256 and that
-its seqs run gapless from `after_seq + 1` to `last_seq` (an empty log must
-answer `last_seq` = `after_seq`). A host that refuses a `put` header may reply
+`after_seq: 0`. The payload is `protocol.bulk.encode_log(events)` (canonical
+JSON, one event per line). The guest checks a `get` payload's byte count and
+`protocol.bulk.decode_log` its sha256 and that its seqs run gapless from
+`after_seq + 1` to `last_seq` (an empty log must answer `last_seq` =
+`after_seq`). A host that refuses a `put` header may reply
 and close without reading the payload; the guest reads the reply even when
 its payload write fails.

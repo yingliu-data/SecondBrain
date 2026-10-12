@@ -6,6 +6,7 @@ import asyncio
 import logging
 
 import httpx
+from protocol.mcp import GATEWAY_EVENTS_PATH, bearer_header
 
 logger = logging.getLogger("gateway.events")
 
@@ -14,8 +15,8 @@ POST_TIMEOUT_S = 5
 
 class EventPoster:
     def __init__(self, agent_api_url: str, token: str, client: httpx.AsyncClient | None = None):
-        self._url = agent_api_url.rstrip("/") + "/internal/gateway-events"
-        self._headers = {"Authorization": f"Bearer {token}"} if token else {}
+        self._url = agent_api_url.rstrip("/") + GATEWAY_EVENTS_PATH
+        self._headers = bearer_header(token)
         self._client = client or httpx.AsyncClient(timeout=POST_TIMEOUT_S)
         self._tasks: set[asyncio.Task] = set()
 

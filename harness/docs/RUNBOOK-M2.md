@@ -20,7 +20,7 @@ The guest side (streamed provider, token estimate, compaction turn) is in
 Every command below assumes the compose stack is up with the local LLM
 profile (`docker compose --profile local-llm up -d`) and runs from the repo
 root. `$SESSION` names a session dir
-`agent-api/data/sessions/{user}/{tenant}_{session_id}` (inside the container:
+`agent-api/data/sessions/{user}/{tenant}.{session_id}` (inside the container:
 `/root/agent-api/data/sessions/...`).
 
 Helpers. Neither agent-api nor vLLM publishes a host port, the agent-api
@@ -150,8 +150,8 @@ from the summary. The host projects the summary to
 event's sha256 differs from the summary text.
 
 Since M3 one long-lived guest serves the whole session
-(`HARNESS_STOP_AT_SETTLE` defaults to `false`: one run `events/r0001/` per
-session, parked and resumed across idle periods), so the prefix spans tasks.
+(one run `events/r0001/` per session, parked and resumed across idle
+periods), so the prefix spans tasks.
 The M2 recipe below still makes the 40 turns inside one task, the quickest
 way to force a compaction: raise `HARNESS_MAX_TURNS` (per task, default 12),
 lower the window so the compaction fires on a real but short session, and

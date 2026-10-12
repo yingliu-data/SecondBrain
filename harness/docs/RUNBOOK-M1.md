@@ -97,9 +97,9 @@ api /actions          '{"action_type": "InstanceStart"}'
 ```
 
 Expected on the terminal (ttyS0): the kernel log, then
-`harness-init: starting guest harness (idle-wait, then vsock -> CID 2)`.
+`harness-init: starting guest harness <image version> (idle-wait, then vsock -> CID 2)`.
 The guest starts in `--idle-wait vsock` (since M3: the base-snapshot point):
-it polls :5000 every 50 ms, silently, and once connected sends nothing until
+it polls :5000 every 5 ms, silently, and once connected sends nothing until
 the host sends its first line. So `$S/control.log` shows socat's
 `accepting connection` line and no data; without `/dev/vdb` mounted yet
 (the guest mounts it with `--mount-workspace /dev/vdb` only after
@@ -280,7 +280,7 @@ sandbox manager already switches to paths relative to Firecracker's cwd
 - [ ] The owner's phone runs a **calendar query** (device side) and a **web search** (host side) through a Firecracker VM for the default tenant (every tenant runs the harness engine since M6).
 - [ ] A redelivered `POST /api/v1/chat` with the same `input_id` runs once (one turn in `events/r0001/`, the second request attaches).
 - [ ] The three goldens are reproduced live by the fake-host end-to-end test (`harness/tests`).
-- [ ] agent-api tests green (`cd agent-api && uv sync && uv run pytest`; one engine since M6).
+- [ ] agent-api tests green (`uv sync --all-packages` at the repo root, then `cd agent-api && uv run pytest`; one engine since M6).
 - [ ] `stop()` timing: VM gone within `stop_grace_s` (5 s) on the CtrlAltDel path; note the measured boot-to-`ready` time as the M3 baseline (< 200 ms is the snapshot target, not the rootfs-boot target).
 
 ## 9. Open questions for the server run
@@ -296,7 +296,7 @@ sandbox manager already switches to paths relative to Firecracker's cwd
    whether to keep the hash or move to a host-wide counter in the worker.
 3. **Stop semantics vs M3** (resolved in M3): the guest outlives a settle
    and takes the next task; after a park it returns to idle-wait
-   (`guest/main.py`). `HARNESS_STOP_AT_SETTLE` defaults to `false`; the idle
+   (`guest/main.py`); the idle
    timer (`HARNESS_SESSION_IDLE_S`) parks, snapshots and destroys the VM.
    Init still reboots the VM when the guest process exits.
 4. **Console log growth**: `vm/console.log` is appended for the session's

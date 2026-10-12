@@ -1,10 +1,10 @@
-"""Identity headers and the internal bearer."""
+"""Identity headers and the internal bearer (protocol.mcp.bearer_ok, the
+rule agent-api checks its side with)."""
 from __future__ import annotations
 
-import hmac
 from collections.abc import Mapping
 
-from protocol.mcp import IDENTITY_HEADERS, is_safe_id
+from protocol.mcp import IDENTITY_HEADERS, bearer_ok, is_safe_id
 from starlette.requests import Request
 
 from app.pins import Identity
@@ -30,9 +30,4 @@ def request_identity(request: Request) -> Identity:
     return request.state.identity
 
 
-def bearer_ok(authorization: str | None, token: str) -> bool:
-    if not token:
-        return True  # dev only
-    if not authorization or not authorization.startswith("Bearer "):
-        return False
-    return hmac.compare_digest(authorization[len("Bearer "):].encode(), token.encode())
+__all__ = ["bearer_ok", "identity_from_headers", "request_identity"]

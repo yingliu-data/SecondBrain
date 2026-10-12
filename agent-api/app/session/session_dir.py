@@ -19,30 +19,18 @@ session's files are converted to an event log run by
 from __future__ import annotations
 
 import json
-import os
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from protocol.clock import now_iso
+from protocol.fsio import atomic_write
 
 from app.session.eventlog import read_trace
 from app.session.state import transition
 
 SCHEMA_VERSION = 1
 _SUBDIRS = ("workspace", "memory", "ipc", "tickets", "logs")
-
-
-def utcnow_iso() -> str:
-    return (
-        datetime.now(timezone.utc)
-        .isoformat(timespec="milliseconds")
-        .replace("+00:00", "Z")
-    )
-
-
-def _atomic_write_text(path: Path, text: str) -> None:
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(text)
-    os.replace(tmp, path)
 
 
 class SessionDir:
@@ -87,7 +75,7 @@ class SessionDir:
         root.mkdir(parents=True, exist_ok=True)
         for sub in _SUBDIRS:
             (root / sub).mkdir(exist_ok=True)
-        now = utcnow_iso()
+        now = now_iso()
         meta = {
             "session_id": session_id,
             "user_id": user_id,
@@ -116,12 +104,15 @@ class SessionDir:
     def update_meta(self, **changes: Any) -> dict[str, Any]:
         meta = self.read_meta()
         meta.update(changes)
-        meta["updated_at"] = utcnow_iso()
+        meta["updated_at"] = now_iso()
         self._write_meta(meta)
         return meta
 
     def _write_meta(self, meta: dict[str, Any]) -> None:
-        _atomic_write_text(self.session_json, json.dumps(meta, indent=2))
+        # durable=False: as before, session.json is renamed into place without
+        # fsyncs (metadata the event log does not depend on); 0644 as before
+        atomic_write(self.session_json, json.dumps(meta, indent=2).encode(),
+                     durable=False, mode=0o644)
 
     def set_state(self, new_state: str) -> None:
         meta = self.read_meta()

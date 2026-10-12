@@ -255,11 +255,13 @@ def test_abort_all_kills_running_and_queued(mgr, inbound, ws, monkeypatch):
     mgr.submit("w2", "write", {"path": "s.txt", "content": "2"})   # queued behind w1
     assert wait_until(lambda: all(j.proc is not None for j in list(mgr._jobs.values()) if j.name == "bash"))
     assert mgr.running() == {"b1", "b2", "w1", "w2"}
+    # bash runs in its own process group (its pid); read it before the kill:
+    # b1's `echo $$` may not have reached the output yet under load
+    pgid = mgr._jobs["b1"].proc.pid
     aborted = mgr.abort_all()
     assert aborted == {"b1", "b2", "w1", "w2"}
     r = take(inbound, 4)
     assert all(v["state"] == "killed" and not v["ok"] for v in r.values()), r
-    pgid = int(r["b1"]["content"].split("\n")[0])
     assert wait_until(lambda: not pgid_alive(pgid))
     assert "aborted before it ran" in r["w2"]["content"]
     assert mgr.running() == set()
@@ -379,8 +381,8 @@ def test_workspace_tree_id_rehashes_only_changed_files(ws, inbound, mgr, monkeyp
     (ws / "sub").mkdir()
     (ws / "sub" / "deep.txt").write_text("deep")
     hashed = []
-    real = ops_mod._file_digest
-    monkeypatch.setattr(ops_mod, "_file_digest", lambda p: hashed.append(os.path.basename(p)) or real(p))
+    real = ops_mod.file_sha256
+    monkeypatch.setattr(ops_mod, "file_sha256", lambda p: hashed.append(os.path.basename(p)) or real(p))
     first = mgr.workspace_tree_id()
     assert sorted(hashed) == sorted(["a.txt", "deep.txt"] + [f"f{i}.txt" for i in range(5)])
     hashed.clear()

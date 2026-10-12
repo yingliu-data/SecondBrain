@@ -181,3 +181,12 @@ def test_main_runs_a_text_answer_to_settle(tmp_path):
     assert local.last_seq == len(host.events)
     assert local.acked_seq == local.last_seq
     assert [e["seq"] for e in local.read()] == [e["seq"] for e in host.events]
+
+
+def test_llm_backoff_from_the_environment():
+    from guest.main import llm_backoff
+    assert llm_backoff({}) is None
+    assert llm_backoff({"HARNESS_LLM_BACKOFF_S": "0.01"}) == (0.01,)
+    assert llm_backoff({"HARNESS_LLM_BACKOFF_S": "1, 2,4"}) == (1.0, 2.0, 4.0)
+    assert llm_backoff({"HARNESS_LLM_BACKOFF_S": "soon"}) is None
+    assert llm_backoff({"HARNESS_LLM_BACKOFF_S": "-1"}) is None

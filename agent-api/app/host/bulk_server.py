@@ -8,7 +8,8 @@ One transfer per connection; the guest always connects. The framing is
         manifest   -> {session}/manifest.json  (path "manifest.json"; outside
                       workspace/, so it never collides with a user's file)
         The payload streams into a temp file next to the target in 1 MiB
-        chunks while it is hashed; `bytes` and `sha256` are verified before
+        chunks while it is hashed (protocol.fsio.atomic_writer, durable:
+        file and directory fsynced); `bytes` and `sha256` are verified before
         the rename (so a reader never sees half a file, a mismatch leaves
         nothing) and before the reply says ok. A spill path must be under
         ".spill/". A path that leaves the workspace (".." or
@@ -16,7 +17,8 @@ One transfer per connection; the guest always connects. The framing is
         inside the workspace pointing out, rejected after resolving) is an
         error reply, nothing written.
   get   log        -> the host's ACKED guest events with seq > after_seq of
-                      the current run, canonical JSONL in seq order, plus
+                      the current run, protocol.bulk.encode_log (canonical
+                      JSONL in seq order), plus
                       `last_seq` = the last returned event's seq, or after_seq
                       when none (the log return on resume)
 
@@ -33,18 +35,16 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import os
 import socket
-import tempfile
 import threading
 from pathlib import Path
 from typing import Callable
 
 from protocol.bulk import (
-    MANIFEST_PATH, SPILL_DIR, BulkError, check_header, decode_line, encode_line, error_reply,
-    ok_reply, read_line, sha256_hex,
+    MANIFEST_PATH, SPILL_DIR, BulkError, check_header, decode_line, encode_line, encode_log,
+    error_reply, ok_reply, read_line, sha256_hex,
 )
-from protocol.canonical import canonical_json
+from protocol.fsio import atomic_writer
 
 from app.config import HARNESS_BULK_MAX_BYTES
 
@@ -155,31 +155,22 @@ class BulkServer:
         target = self._target(h["kind"], h["path"])   # before reading: reject early
         target.parent.mkdir(parents=True, exist_ok=True)
         target = self._target(h["kind"], h["path"])   # the mkdir may not create a way out
-        fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=".bulk-", suffix=".tmp")
-        try:
+        # a raise inside the block leaves nothing behind; the rename replaces
+        # a symlink itself, never its target
+        with atomic_writer(target) as f:
             hasher = hashlib.sha256()
-            with os.fdopen(fd, "wb") as f:
-                left = n
-                while left:
-                    chunk = rfile.read(min(left, CHUNK))
-                    if not chunk:
-                        raise BulkError(f"short payload: {n - left} of {n} bytes")
-                    hasher.update(chunk)
-                    f.write(chunk)
-                    left -= len(chunk)
-                digest = hasher.hexdigest()
-                if digest != h["sha256"]:
-                    raise BulkError(f"sha256 mismatch: header {h['sha256'][:12]}..., "
-                                    f"payload {digest[:12]}...")
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, target)       # replaces a symlink itself, never its target
-        except BaseException:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-            raise
+            left = n
+            while left:
+                chunk = rfile.read(min(left, CHUNK))
+                if not chunk:
+                    raise BulkError(f"short payload: {n - left} of {n} bytes")
+                hasher.update(chunk)
+                f.write(chunk)
+                left -= len(chunk)
+            digest = hasher.hexdigest()
+            if digest != h["sha256"]:
+                raise BulkError(f"sha256 mismatch: header {h['sha256'][:12]}..., "
+                                f"payload {digest[:12]}...")
         self.served.append(h)
         try:
             self.on_put(h["kind"], h["path"], n, digest)
@@ -191,6 +182,6 @@ class BulkServer:
         events = self.read_log(h["after_seq"])
         # exact: the last returned event's seq, or after_seq when there is none
         last_seq = events[-1]["seq"] if events else h["after_seq"]
-        payload = b"".join(canonical_json(ev).encode("utf-8") + b"\n" for ev in events)
+        payload = encode_log(events)
         self.served.append(h)
         return ok_reply(bytes=len(payload), sha256=sha256_hex(payload), last_seq=last_seq), payload

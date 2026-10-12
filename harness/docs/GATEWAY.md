@@ -67,19 +67,21 @@ forwarder and agent-api import too.
 ## Running
 
 ```bash
-cd mcp-gateway && uv sync && uv run pytest -q          # tests
+uv sync --all-packages                                  # once, at the repo root (the one workspace)
+cd mcp-gateway && uv run pytest -q -n auto              # tests
 uv run uvicorn --factory app.main:create_app --port 8090
 docker build -f mcp-gateway/Dockerfile -t mcp-gateway .  # build context = repo root
 docker compose up -d --build mcp-gateway
 ```
 
-The image needs the `secondbrain-harness` package for `protocol.canonical` and
-`protocol.mcp`. Like agent-api, the gateway installs it as an editable path
-dependency (`../harness`), so changes to `harness/protocol` are picked up without
-a reinstall.
-The build context is the repo root. The Dockerfile copies `harness/pyproject.toml`,
-`harness/protocol` and `harness/guest` to `/srv/harness`, next to
-`/srv/mcp-gateway`, so the lock's `../harness` path dependency resolves.
+The image needs the `secondbrain-harness` package for `protocol` (canonical,
+mcp, fsio, clock). Like agent-api, the gateway gets it as a member of the one
+uv workspace (installed editable), so changes to `harness/protocol` are picked
+up without a reinstall.
+The build context is the repo root (the workspace). The Dockerfile copies the
+root `pyproject.toml` + `uv.lock`, every member's `pyproject.toml` (the frozen
+lock needs them), then `harness/protocol` and `mcp-gateway/app`, and runs
+`uv sync --frozen --no-dev --package mcp-gateway`.
 `mcp-gateway/Dockerfile.dockerignore` keeps the rest of the repo out of the
 context.
 
@@ -91,6 +93,10 @@ gateway starts with no upstreams, so every tenant sees only the meta tools.
 agent-api's side: `MCP_GATEWAY_URL` (`http://mcp-gateway:8090`) and the same
 `INTERNAL_TOKEN`, the shared bearer for every gateway route but `/healthz`
 and for agent-api's `/internal/gateway-events` (empty = no check, dev only).
+Both sides check and send it with `protocol.mcp.bearer_ok` / `bearer_header`;
+the route paths are `protocol.mcp.INTERNAL_TOOLS_PATH` and
+`GATEWAY_EVENTS_PATH`, a gateway event's identity keys
+`protocol.mcp.GATEWAY_EVENT_IDENTITY`.
 
 ### Policy (`gateway.json`)
 

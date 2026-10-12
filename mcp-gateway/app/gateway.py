@@ -7,10 +7,10 @@ import asyncio
 import json
 import logging
 import secrets
-import time
 from dataclasses import dataclass
 
 from mcp import types
+from protocol.clock import elapsed_ms
 from protocol.mcp import (
     ACTIONS,
     INPUT_REQUIRED,
@@ -301,7 +301,7 @@ class Gateway:
             call.abandon()
             raise
         self.limiter.release(ident.key)
-        ms = int((time.monotonic() - call.started) * 1000)
+        ms = elapsed_ms(call.started)
         if kind == "result":
             result: types.CallToolResult = value  # type: ignore[assignment]
             self.events.post(ident.event_fields(), "call", tool=name, upstream=upstream,

@@ -49,9 +49,10 @@ import threading
 from protocol import bulk as bulkproto
 from protocol import messages
 from protocol.messages import Inbox, Outbox, ProtocolError, encode
+from protocol.ports import BULK, CONTROL, socket_name
 
-CONTROL_PORT = 5000
-BULK_PORT = 5001
+CONTROL_PORT = CONTROL
+BULK_PORT = BULK
 HOLD = object()          # a side result the test will send itself
 
 
@@ -61,7 +62,7 @@ class FakeHost:
                  close_on_parked: bool = True, gateway=None):
         self.dir = str(dir)
         self.port = port
-        self.path = os.path.join(self.dir, f"v.sock_{port}")
+        self.path = os.path.join(self.dir, socket_name(port))
         self.hello_body = hello_body
         self.session_id = hello_body["session_id"]
         self.side_results = side_results if side_results is not None else {}
@@ -89,7 +90,7 @@ class FakeHost:
 
         # bulk channel, park
         self.bulk = bulk
-        self.bulk_path = os.path.join(self.dir, f"v.sock_{BULK_PORT}")
+        self.bulk_path = os.path.join(self.dir, socket_name(BULK_PORT))
         self.bulk_files: dict = {}          # (kind, path) -> bytes (latest put)
         self.bulk_puts: list[dict] = []     # put headers, in order
         self.bulk_gets: list[dict] = []     # get headers, in order
@@ -480,7 +481,7 @@ class FakeHost:
                     events = [e for e in self.events if e["seq"] <= self.acked_seq]
             after = header["after_seq"]
             events = [e for e in events if e["seq"] > after]
-            payload = "".join(encode(e) for e in events).encode("utf-8")
+            payload = bulkproto.encode_log(events)          # the host's bytes
             last = events[-1]["seq"] if events else after
             conn.sendall(bulkproto.encode_line(bulkproto.ok_reply(
                 bytes=len(payload), sha256=bulkproto.sha256_hex(payload), last_seq=last)))

@@ -5,6 +5,11 @@
                         --workspace DIR [--idle-wait vsock]
                         [--mount-workspace DEV] [--hello-timeout S]
 
+`--image-version` is recorded in session_start (harness-init passes the
+IMAGE_VERSION file build.sh bakes into the rootfs). HARNESS_LLM_BACKOFF_S
+(comma-separated seconds, e.g. "0.01" or "1,2,4") overrides the provider's
+retry backoff; the tests set it small.
+
 Exit codes: 0 the host stopped the guest or an abort settled the task, 2
 fatal protocol error (first control is not a hello, unusable hello, the
 coordinator's FatalProtocolError on a second hello, a resume whose log could
@@ -46,13 +51,17 @@ import time
 from guest.config import GuestConfig, from_hello
 from guest.eventlog import EventLog, LogWriter
 from guest.transport import CONTROL_PORT, Transport, UnixConnector, VsockConnector
+from protocol import limits as proto_limits
+from protocol.ports import PORTS
+from protocol.replay import before_resume_name
 
 log = logging.getLogger("guest.main")
 
 EXIT_OK = 0
 EXIT_PROTOCOL = 2
 EXIT_HELLO_TIMEOUT = 3
-HELLO_TIMEOUT_S = 30.0
+HELLO_TIMEOUT_S = float(proto_limits.HELLO_TIMEOUT_S)
+BACKOFF_ENV = "HARNESS_LLM_BACKOFF_S"
 FINAL_ACK_WAIT_S = 10.0
 LOG_RETURN_ATTEMPTS = 3
 LOG_RETURN_RETRY_S = 0.5
@@ -206,9 +215,9 @@ def rebuild_eventlog(log_dir: str, events: list) -> EventLog:
     events_dir = os.path.join(log_dir, "events")
     if os.path.isdir(events_dir) and os.listdir(events_dir):
         n = 1
-        while os.path.exists(f"{events_dir}.before-resume-{n}"):
+        while os.path.exists(os.path.join(log_dir, before_resume_name(n))):
             n += 1
-        os.rename(events_dir, f"{events_dir}.before-resume-{n}")
+        os.rename(events_dir, os.path.join(log_dir, before_resume_name(n)))
     eventlog = EventLog(log_dir)
     eventlog.extend(events)
     if events:
@@ -238,6 +247,20 @@ def preload() -> None:
         pass
 
 
+def llm_backoff(env=None) -> tuple | None:
+    """HARNESS_LLM_BACKOFF_S as a tuple of seconds, None when unset or
+    unusable (the provider keeps its default)."""
+    raw = (os.environ if env is None else env).get(BACKOFF_ENV, "").strip()
+    if not raw:
+        return None
+    try:
+        values = tuple(float(v) for v in raw.split(",") if v.strip())
+    except ValueError:
+        log.warning("%s=%r ignored (want comma-separated seconds)", BACKOFF_ENV, raw)
+        return None
+    return values if values and all(v >= 0 for v in values) else None
+
+
 def run_session(cfg: GuestConfig, inbound: queue.Queue, transport: Transport,
                 log_dir: str, workspace: str, image_version: str = "dev") -> int:
     """Build the session's parts around the coordinator and run its tasks,
@@ -250,7 +273,7 @@ def run_session(cfg: GuestConfig, inbound: queue.Queue, transport: Transport,
     from guest.ops import OperationManager
     from guest.provider import Provider
 
-    bulk = BulkClient(transport.connector, cfg.session_id, port=cfg.ports.get("bulk", 5001))
+    bulk = BulkClient(transport.connector, cfg.session_id, port=cfg.ports.get("bulk", PORTS["bulk"]))
     returned: list = []
     if cfg.resume:
         try:
@@ -265,7 +288,9 @@ def run_session(cfg: GuestConfig, inbound: queue.Queue, transport: Transport,
         eventlog = EventLog(log_dir)
     log_writer = LogWriter(eventlog, transport)
     log_writer.start()
-    provider = Provider(transport.connector, port=cfg.ports["llm"], model=cfg.model)
+    backoff = llm_backoff()
+    provider = Provider(transport.connector, port=cfg.ports["llm"], model=cfg.model,
+                        **({"backoff_s": backoff} if backoff else {}))
     mcp = McpClient(transport.connector, port=cfg.ports["gateway"])
     ops = OperationManager(workspace, cfg.limits, inbound, bulk=bulk, mcp=mcp)
     coordinator = coordinator_mod.Coordinator(

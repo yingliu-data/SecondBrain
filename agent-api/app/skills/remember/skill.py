@@ -6,10 +6,11 @@ singleton's state.
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 from pathlib import Path
+
+from protocol.canonical import sha256_hex
 
 from app.config import USERS_ROOT
 from app.skills.base import BaseSkill, get_current_session, get_current_user_id
@@ -146,7 +147,7 @@ class RememberSkill(BaseSkill):
         # sha256 of the stripped body text (docs/GUEST.md: one memory
         # hash definition everywhere, sha256_hex(body.strip())); the harness
         # records it in the `memory` event
-        digest = hashlib.sha256(rec.body.strip().encode("utf-8")).hexdigest()
+        digest = sha256_hex(rec.body.strip())
         logger.info(f"remember scope={scope} slug={rec.slug} type={rec.type}")
         return json.dumps(
             {"status": "ok", "scope": scope, "slug": rec.slug, "type": rec.type,

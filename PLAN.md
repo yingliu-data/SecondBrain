@@ -113,9 +113,10 @@ harness/
     canonical.py            canonical JSON, sha256, derived ids
     fold.py                 fold(events) → State; checkpoint verify; replay verifier
     allowlist.py            effective tool list and sides from hello
+    ports.py limits.py fsio.py usage.py clock.py uds.py version.py   shared definitions, one home each
   guest/
     main.py                 idle-wait (snapshot point) → connect out → hello → run → settle
-    transport/  inbox.py  eventlog.py  context/  provider/  tools/  ops/
+    transport/  eventlog.py  context/  provider/  tools/  ops/
     coordinator.py  hooks.py  session/
   image/                    Makefile: PEX → rootfs (RO) → Firecracker snapshot
   docs/                     PROTOCOL.md  EVENTS.md  REPLAY.md  GATEWAY.md  FLOWS.md
@@ -149,7 +150,7 @@ flows/                      Temporal (python package, imported by agent-api)
 Session directory (existing layout kept, extended):
 
 ```text
-{root}/{user}/{tenant}_{session_id}/
+{root}/{user}/{tenant}.{session_id}/
     session.json             metadata + forward-only state
     events/000001.jsonl      event segments (canonical) · checkpoints.jsonl
     history.jsonl            projection (kept one release) · logs/trace.jsonl projection
@@ -187,7 +188,7 @@ Guest → host: the events themselves, `{"session_id", "seq", "ts", "schema", "t
 
 | type | body |
 |---|---|
-| `hello` | `config` (model alias, limits, tools with sides, hooks, `async_tools`, `question_timeout_s`, `ui_attached`), `session_id`, `principal` (user, tenant), `system_block` (base prompt, profile, memory index), `resume`, `at` |
+| `hello` | `config` (model alias, limits, tools with sides, ports, `async_tools`, `question_timeout_s`, `ui_attached`, `harness_version`), `session_id`, `principal` (user, tenant), `system_block` (base prompt, profile, memory index), `resume`, `at` |
 | `task` / `follow_up` / `steer` | `input_id`, `text`, `attachments` (recalled memories for the preamble, computed on the host) |
 | `ui_response` | `input_id`, `question_id`, `answer` |
 | `side_result` | `call_id`, `side` (`host`/`device`/`mcp`), `content`, `ok` — the answer to a host-originated operation |

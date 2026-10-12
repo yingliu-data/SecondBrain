@@ -53,7 +53,7 @@ app.include_router(skills.router)
 app.include_router(health.router)
 app.include_router(sessions.router)
 app.include_router(guest.router)
-app.include_router(gateway_events.router)   # POST /internal/gateway-events (bearer INTERNAL_TOKEN)
+app.include_router(gateway_events.router)   # POST GATEWAY_EVENTS_PATH (bearer INTERNAL_TOKEN)
 
 # Start guest session cleanup task on startup
 from app.auth.guest import guest_manager

@@ -50,6 +50,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from protocol.ports import LLM, PORTS, socket_name
+
 ROOT = Path(__file__).resolve().parents[1]          # harness/
 DEFAULT_TASKS = ROOT / "bench" / "tasks.json"
 SID = "sess-bench"
@@ -138,7 +140,7 @@ class ForwardingLLM:
 
     def __init__(self, directory: str, url: str, api_key: str | None = None,
                  timeout_s: float = 300.0):
-        self.path = os.path.join(directory, "v.sock_5010")
+        self.path = os.path.join(directory, socket_name(LLM))
         self.url = url.rstrip("/")
         self.api_key = api_key
         self.timeout_s = timeout_s
@@ -201,11 +203,10 @@ def hello_body(model: str, async_tools: bool, limits: dict) -> dict:
             "params": {"temperature": 0, "stream": False},
             "tools": [],
             "limits": limits,
-            "hooks": {},
             "async_tools": async_tools,
             "question_timeout_s": 30,
             "ui_attached": True,
-            "ports": {"control": 5000, "bulk": 5001, "llm": 5010},
+            "ports": dict(PORTS),
         },
         "session_id": SID,
         "principal": {"user": USER, "tenant": TENANT},

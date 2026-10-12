@@ -20,25 +20,28 @@ class Slot:
     """One holder's share of an Admission. acquire() is idempotent (a held
     slot is not taken twice, also by concurrent callers), release() too."""
 
-    def __init__(self, sem: asyncio.Semaphore | None) -> None:
-        self._sem = sem
+    def __init__(self, admission: "Admission") -> None:
+        self._admission = admission
         self._lock = asyncio.Lock()
         self.held = False
 
     async def acquire(self) -> None:
-        if self.held or self._sem is None:
+        sem = self._admission._sem
+        if self.held or sem is None:
             self.held = True
             return
         async with self._lock:
             if not self.held:
-                await self._sem.acquire()
+                await sem.acquire()
                 self.held = True
+                self._admission.in_use += 1
 
     def release(self) -> None:
         if self.held:
             self.held = False
-            if self._sem is not None:
-                self._sem.release()
+            if self._admission._sem is not None:
+                self._admission.in_use -= 1
+                self._admission._sem.release()
 
 
 class Admission:
@@ -46,11 +49,12 @@ class Admission:
         self.max_concurrent = max_concurrent
         self._sem = (asyncio.Semaphore(max_concurrent)
                      if max_concurrent is not None and max_concurrent > 0 else None)
+        self.in_use = 0             # slots held (counted by Slot; capped only)
 
     def slot(self) -> Slot:
-        return Slot(self._sem)
+        return Slot(self)
 
     @property
     def free(self) -> int | None:
         """Slots not held (None: no cap)."""
-        return None if self._sem is None else self._sem._value
+        return None if self._sem is None else self.max_concurrent - self.in_use

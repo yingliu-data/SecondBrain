@@ -1,5 +1,6 @@
 """guest.transport over Unix sockets against tests/fakes/fake_host.FakeHost
 (docs/PROTOCOL.md)."""
+import os
 import queue
 import socket
 import time
@@ -78,6 +79,24 @@ def test_unix_connector_connects(tmp_path, host):
     sock = UnixConnector(tmp_path).connect(5000)
     assert isinstance(sock, socket.socket)
     sock.close()
+
+
+def test_unix_connector_connects_past_the_sun_path_limit(tmp_path):
+    from protocol.uds import UNIX_PATH_MAX
+    deep = tmp_path / ("d" * 60) / ("e" * 60)
+    deep.mkdir(parents=True)
+    c = UnixConnector(deep)
+    assert len(c.path(5000)) > UNIX_PATH_MAX
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    dirfd = os.open(deep, os.O_PATH | os.O_DIRECTORY)
+    try:
+        srv.bind(f"/proc/self/fd/{dirfd}/v.sock_5000")
+    finally:
+        os.close(dirfd)
+    srv.listen(1)
+    sock = c.connect(5000)
+    sock.close()
+    srv.close()
 
 
 def test_vsock_connector_defaults_to_host_cid():

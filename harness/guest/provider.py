@@ -1,11 +1,12 @@
 """guest.provider — the LLM call over :5010 (docs/GUEST.md).
 
-    Provider(connector, port=5010, model=..., timeout_s=..., retries=3, *,
+    Provider(connector, port=protocol.ports.LLM, model=..., timeout_s=..., retries=3, *,
              backoff_s=(1, 2, 4), sleep=time.sleep, enable_thinking=False)
         .chat_completion(request, *, stream=False, on_delta=None) -> dict
                                                the assembled OpenAI chat-completions
                                                response, non-streamed shape either way
         .usage                                 summed prompt/completion/total tokens
+                                               (protocol.usage.normalise_usage per response)
         .last_usage                            the last response's usage dict
         .attempts                              total HTTP attempts (tests, logs)
     ProviderError(transient, status, message, *, overflow=False, budget=False)
@@ -37,7 +38,8 @@ caller sees each piece of text once (DeltaRelay doc).
 Errors: 502/503/504 and connection errors are transient; a stream that ends
 (EOF, [DONE] or a broken connection) before a `finish_reason` arrived is a
 transient cut. Transient errors are retried with backoff 1 s, 2 s, 4 s
-(`backoff_s`); after `retries` failed attempts the last error is raised. Any
+(`backoff_s`; guest.main passes HARNESS_LLM_BACKOFF_S when set); after
+`retries` failed attempts the last error is raised. Any
 other status is a non-transient ProviderError: 402 sets `budget=True` (the
 proxy's token budget, GUEST.md); a 400 whose body mentions "context length",
 "maximum context" or "too many tokens" sets `overflow=True`. The caller (the
@@ -51,9 +53,11 @@ import time
 from typing import Callable, Iterable, Iterator
 
 from protocol.canonical import is_int
+from protocol.ports import LLM
 from protocol.sse import iter_sse_data
+from protocol.usage import USAGE_KEYS, normalise_usage
 
-DEFAULT_PORT = 5010
+DEFAULT_PORT = LLM
 PATH = "/v1/chat/completions"
 TRANSIENT_STATUSES = frozenset({502, 503, 504})
 DEFAULT_BACKOFF_S = (1.0, 2.0, 4.0)
@@ -264,8 +268,7 @@ def assemble_chunks(chunks: Iterable[dict], on_delta: Callable[[dict], object] |
         "created": created,
         "model": model,
         "choices": [{"index": choice_index, "message": message, "finish_reason": finish_reason}],
-        "usage": usage if usage is not None
-        else {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        "usage": usage if usage is not None else normalise_usage(None),
     }
 
 
@@ -282,7 +285,7 @@ class Provider:
         self.backoff_s = tuple(backoff_s)
         self._sleep = sleep
         self.enable_thinking = enable_thinking
-        self.usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        self.usage = normalise_usage(None)
         self.last_usage: dict | None = None
         self.attempts = 0          # total HTTP attempts, for tests and the log
 
@@ -413,10 +416,9 @@ class Provider:
             self.last_usage = None
             return
         self.last_usage = usage
-        for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
-            v = usage.get(k)
-            if is_int(v):
-                self.usage[k] += v
+        counts = normalise_usage(usage)
+        for k in USAGE_KEYS:
+            self.usage[k] += counts[k]
 
 
 def read_lines(resp) -> Iterator[str]:

@@ -13,12 +13,13 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from protocol.canonical import canonical_json, sha256_hex
+from protocol.fsio import atomic_write
+from protocol.mcp import gateway_event_identity
 
 
 def pin_of(defn: dict) -> str:
@@ -36,7 +37,7 @@ class Identity:
         return (self.user, self.tenant, self.session)
 
     def event_fields(self) -> dict:
-        return {"user": self.user, "tenant": self.tenant, "session_id": self.session}
+        return gateway_event_identity(self.user, self.tenant, self.session)
 
 
 @dataclass
@@ -103,21 +104,4 @@ class PinStore:
         """Atomic write of a `SessionPins.to_json()` snapshot (blocking I/O)."""
         p = self.path(ident)
         p.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=p.parent, prefix=f".{p.name}.", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w") as f:
-                json.dump(data, f, sort_keys=True)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, p)
-        except BaseException:
-            try:
-                os.unlink(tmp)
-            except FileNotFoundError:
-                pass
-            raise
-        dfd = os.open(p.parent, os.O_RDONLY)
-        try:
-            os.fsync(dfd)
-        finally:
-            os.close(dfd)
+        atomic_write(p, json.dumps(data, sort_keys=True).encode())     # durable

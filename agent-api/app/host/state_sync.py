@@ -23,8 +23,10 @@
                                   no settle yet (None: the run is between tasks)
     .last_seq                     highest stored seq
 
-Segments hold HARNESS_SEGMENT_EVENTS events each (seq 1..N in 000001.jsonl,
+Segments hold protocol.limits.SEGMENT_EVENTS events each (seq 1..N in 000001.jsonl,
 N+1..2N in 000002.jsonl), so the segment of a seq is a function of the seq.
+Segment files are read with protocol.replay.iter_segment: a line that is not
+JSON raises (ReplayError, a ValueError) - the store never skips an event.
 
 Runs. A fresh guest (hello{resume: false}) begins with its own
 `session_start` at seq 1, so it opens a new run; a resumed guest (a parked
@@ -69,7 +71,6 @@ logged the host event.
 """
 from __future__ import annotations
 
-import json
 import logging
 import os
 import shutil
@@ -77,13 +78,15 @@ import threading
 from pathlib import Path
 
 from protocol.canonical import sha256_hex
+from protocol.clock import now_iso
 from protocol.events import validate_event
 from protocol.fold import FoldError, State, apply, checkpoint_body, replay
+from protocol.limits import SEGMENT_EVENTS
 from protocol.messages import encode
-from protocol.replay import host_segments, run_name, run_numbers, segment_name, segments
+from protocol.replay import (host_segments, iter_segment, run_name, run_numbers, segment_name,
+                             segments)
 
-from app.config import HARNESS_SEGMENT_EVENTS
-from app.session.session_dir import SessionDir, utcnow_iso
+from app.session.session_dir import SessionDir
 from app.user.memory import MemoryStore
 
 logger = logging.getLogger("host.state_sync")
@@ -109,7 +112,7 @@ def _append_line(path: Path, obj: dict) -> int:
 
 
 def write_segments(run_dir: Path, events: list[dict],
-                   segment_events: int = HARNESS_SEGMENT_EVENTS) -> None:
+                   segment_events: int = SEGMENT_EVENTS) -> None:
     """A run's events as segment files (seq 1..N in 000001.jsonl, ...) in a
     new directory `run_dir`."""
     segment_events = max(1, int(segment_events))
@@ -122,7 +125,7 @@ def write_segments(run_dir: Path, events: list[dict],
 
 
 def replace_run_dir(run_dir: Path, events: list[dict],
-                    segment_events: int = HARNESS_SEGMENT_EVENTS) -> None:
+                    segment_events: int = SEGMENT_EVENTS) -> None:
     """`run_dir` (absent or not) holding exactly `events`: written to a
     temporary sibling, swapped in by rename, the old directory removed; a
     reader sees the old run or the new one, never a part."""
@@ -171,7 +174,7 @@ def retool(events: list[dict], tools: list[dict]) -> list[dict]:
     return [*body, {**events[-1], "body": checkpoint_body(body, state=state)}]
 
 
-def count_host_events(events_dir: Path, segment_events: int = HARNESS_SEGMENT_EVENTS) -> int:
+def count_host_events(events_dir: Path, segment_events: int = SEGMENT_EVENTS) -> int:
     """The highest hseq in the session's host log (0 when there is none):
     full segments before the last one, plus the last one's lines."""
     host = host_segments(events_dir)
@@ -182,13 +185,13 @@ def count_host_events(events_dir: Path, segment_events: int = HARNESS_SEGMENT_EV
 
 
 def append_host_event(events_dir: Path, hseq: int, session_id: str | None, type: str,
-                      body: dict, segment_events: int = HARNESS_SEGMENT_EVENTS
+                      body: dict, segment_events: int = SEGMENT_EVENTS
                       ) -> tuple[Path, int, dict]:
     """Write host event `hseq` to its segment (events_dir exists): (the
     segment, its inode, the record). The caller is the session's one
     host-log writer (it owns the hseq counter)."""
     n = (hseq - 1) // segment_events + 1
-    rec = {"ts": utcnow_iso(), "hseq": hseq, "session_id": session_id, "type": type, "body": body}
+    rec = {"ts": now_iso(), "hseq": hseq, "session_id": session_id, "type": type, "body": body}
     path = Path(events_dir) / segment_name(n, host=True)
     return path, _append_line(path, rec), rec
 
@@ -201,7 +204,7 @@ class HostLog:
     gone or replaced (the session directory was deleted, maybe re-created
     under the same id)."""
 
-    def __init__(self, events_dir: Path, segment_events: int = HARNESS_SEGMENT_EVENTS) -> None:
+    def __init__(self, events_dir: Path, segment_events: int = SEGMENT_EVENTS) -> None:
         self.events_dir = Path(events_dir)
         self.segment_events = max(1, int(segment_events))
         self._lock = threading.Lock()
@@ -233,7 +236,7 @@ _host_logs: dict[Path, HostLog] = {}
 _host_logs_guard = threading.Lock()
 
 
-def host_log(events_dir: Path, segment_events: int = HARNESS_SEGMENT_EVENTS) -> HostLog:
+def host_log(events_dir: Path, segment_events: int = SEGMENT_EVENTS) -> HostLog:
     """The process-wide HostLog of `events_dir`."""
     key = Path(events_dir).resolve()
     with _host_logs_guard:
@@ -252,17 +255,12 @@ def _read_run(run_dir: Path, after_seq: int, segment_events: int,
     for path in segments(run_dir):
         if int(path.stem) < start_segment:
             continue
-        with path.open("r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                ev = json.loads(line)
-                seq = ev.get("seq", 0)
-                if seq > after_seq:
-                    out.append(ev)
-                if through is not None and seq >= through:
-                    break
+        for ev in iter_segment(path):
+            seq = ev.get("seq", 0)
+            if seq > after_seq:
+                out.append(ev)
+            if through is not None and seq >= through:
+                break
         if through is not None and out and out[-1].get("seq", 0) >= through:
             break
     out.sort(key=lambda e: e["seq"])
@@ -270,7 +268,7 @@ def _read_run(run_dir: Path, after_seq: int, segment_events: int,
 
 
 def read_current_run(events_dir: Path, after_seq: int = 0,
-                     segment_events: int = HARNESS_SEGMENT_EVENTS) -> list[dict]:
+                     segment_events: int = SEGMENT_EVENTS) -> list[dict]:
     """The latest run's events with seq > after_seq, without loading the
     session (no StateSync, no fold): GET /sessions/{id}/events."""
     runs = run_numbers(events_dir)
@@ -290,7 +288,7 @@ def _truncate(path: Path, size: int) -> None:
 
 class StateSync:
     def __init__(self, session_dir: SessionDir | Path, *,
-                 segment_events: int = HARNESS_SEGMENT_EVENTS) -> None:
+                 segment_events: int = SEGMENT_EVENTS) -> None:
         self.session = (session_dir if isinstance(session_dir, SessionDir)
                         else SessionDir(Path(session_dir)))
         self.events_dir = self.session.events
@@ -418,9 +416,7 @@ class StateSync:
         checkpoint), else None. Reads the first line, the run only then."""
         if self.state.last_seq == 0:
             return None
-        first = segments(self.run_dir)[0]
-        with first.open("r", encoding="utf-8") as f:
-            head = json.loads(f.readline())
+        head = next(iter_segment(segments(self.run_dir)[0]))
         if head["body"].get("migrated") is not True:
             return None
         events = self.read(0)
@@ -464,8 +460,7 @@ class StateSync:
     def read_host(self) -> list[dict]:
         out: list[dict] = []
         for path in host_segments(self.events_dir):
-            with path.open("r", encoding="utf-8") as f:
-                out.extend(json.loads(l) for l in f if l.strip())
+            out.extend(iter_segment(path))
         return out
 
     # ------------------------------------------------------------ projections

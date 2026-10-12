@@ -126,7 +126,7 @@ class Harness:
                                   connected=self.env.client, queue=self.queue,
                                   max_heartbeat_throttle_interval=timedelta(seconds=0.5),
                                   default_heartbeat_throttle_interval=timedelta(seconds=0.5))
-        assert ok and temporal.enabled()
+        assert ok and temporal.ready()
 
     async def chat_in(self, session_id: str, **body) -> str:
         raw, h = self._headers({**body, "session_id": session_id})
@@ -808,8 +808,14 @@ async def test_workflow_task_waits_past_its_wall_clock_for_a_slot(tenv, tmp_path
     longer than its wall clock + grace and is not timed out: its time limit
     counts from its start, run_task's Temporal timeouts leave room for the
     queue (wall + grace + max_queue_wait_s). B then runs and completes.
-    (Real time: the test server does not skip time while activities run.)"""
-    from flows.activities import WALL_CLOCK_GRACE_S
+    (Real time: the test server does not skip time while activities run, so
+    the grace is patched down from its 30 s on both sides: the host's
+    backstop and run_task's Temporal timeouts.)"""
+    import flows.activities
+    import app.host.worker as worker_mod
+    WALL_CLOCK_GRACE_S = 2
+    monkeypatch.setattr(flows.activities, "WALL_CLOCK_GRACE_S", WALL_CLOCK_GRACE_S)
+    monkeypatch.setattr(worker_mod, "WALL_CLOCK_GRACE_S", WALL_CLOCK_GRACE_S)
     d = Harness(tenv, tmp_path, upstream, monkeypatch, wall_clock_s=90, max_concurrent=1)
     sa, sb = f"{d.session_id}-a", f"{d.session_id}-b"
     b_wall = 3
@@ -1115,3 +1121,15 @@ async def test_direct_new_input_waits_for_a_restored_question_park(
                                         if e["type"] == "settle")] == ["in_rq3", "in_rq3_next"]
     finally:
         await d.close()
+
+
+def test_flows_outcomes_match_protocol_settle_outcomes():
+    """flows.activities.Outcome is the settle outcomes (protocol.events) plus
+    the workflow-only "parked": the two lists cannot drift apart."""
+    from typing import get_args
+
+    from flows.activities import Outcome
+    from protocol.events import ENUMS
+
+    assert set(get_args(Outcome)) - {"parked"} == set(ENUMS["settle"]["outcome"])
+    assert "parked" in get_args(Outcome)

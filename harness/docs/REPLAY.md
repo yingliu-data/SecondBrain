@@ -198,8 +198,12 @@ without the host log; `modified_since` skips a run whose newest segment is
 older: the trace endpoints use it), `verify_session(path) -> list[str]`
 (`"<run>: seq N: reason"`, `[]` == clean), `find_sessions(root, *,
 include_before_resume=False)`, `summarize(state)`. The layout names
-`run_name`, `segment_name`, `segments`, `host_segments` and `run_numbers`
-are the ones agent-api's `StateSync` and the migration write with.
+`run_name`, `segment_name`, `segments`, `host_segments`, `run_numbers` and
+`before_resume_name` are the ones agent-api's `StateSync`, the migration and
+the guest's `EventLog` write with; `iter_segment(path, on_bad=None)` reads one
+segment file (a bad line raises `ReplayError` for the host store, the guest
+passes `on_bad` to log and skip it). Segments hold
+`protocol.limits.SEGMENT_EVENTS` (1000) events, a constant on both sides.
 
 ## CI logs
 
@@ -227,7 +231,7 @@ the bullet (or that part of it) yet.
 
 | # | Edge case (PLAN 14) | Test(s) | Owner / status |
 |---|---|---|---|
-| 1 | Same `input_id` twice → one task, one turn; second POST attaches | `harness/tests/test_guest_coordinator.py::test_redelivered_task_is_recorded_duplicate_and_runs_once`, `harness/tests/test_guest_e2e.py::test_redelivered_task_runs_once`, `harness/tests/test_fold.py::test_duplicate_input_folds_once`, `harness/tests/test_guest_inbox.py::test_duplicate_by_input_id`; `agent-api/tests/test_host_worker.py::test_redelivered_while_running_attaches_and_guest_dedupes`, `agent-api/tests/test_host_e2e.py::test_e2e_redelivered_input_runs_once`, `agent-api/tests/test_host_m3.py::test_redelivered_input_after_park_resume_runs_once`; `flows/flows/tests/test_session_workflow.py::test_a_duplicate_task_signal_runs_once` | guest + agent-api + flows; covered |
+| 1 | Same `input_id` twice → one task, one turn; second POST attaches | `harness/tests/test_guest_coordinator.py::test_redelivered_task_is_recorded_duplicate_and_runs_once`, `harness/tests/test_guest_e2e.py::test_redelivered_task_runs_once`, `harness/tests/test_fold.py::test_duplicate_input_folds_once`; `agent-api/tests/test_host_worker.py::test_redelivered_while_running_attaches_and_guest_dedupes`, `agent-api/tests/test_host_e2e.py::test_e2e_redelivered_input_runs_once`, `agent-api/tests/test_host_m3.py::test_redelivered_input_after_park_resume_runs_once`; `flows/flows/tests/test_session_workflow.py::test_a_duplicate_task_signal_runs_once` | guest + agent-api + flows; covered |
 | 2 | `finish_reason = length` → no tool runs | `harness/tests/test_guest_coordinator.py::test_finish_reason_length_runs_no_tools` | guest; covered |
 | 3 | Malformed `arguments` → one repair turn, then an error result | `harness/tests/test_guest_coordinator.py::test_malformed_arguments_get_an_error_result_without_running`, `::test_malformed_arguments_error_result_then_the_next_turn_repairs_the_call` | guest; covered as the guest behaves today: the error result comes first and the next turn is the repair turn (coordinator docstring, "M1 deviations"). A repair turn *before* any error result is not implemented |
 | 4 | Tool not offered or side mismatch → `guard_decision{deny, allowlist}`; in a log a schema error | `harness/tests/test_guest_coordinator.py::test_allowlist_denial_records_a_decision_only_and_fills_the_gap`, `::test_side_mismatch_is_an_allowlist_denial`, `harness/tests/test_fold.py::test_tool_call_not_offered_is_rejected`, `harness/tests/test_allowlist.py::test_is_allowed_matches_name_and_side` | guest + protocol; covered |

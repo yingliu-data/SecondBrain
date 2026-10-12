@@ -29,8 +29,7 @@ def test_checker_matches_whole_tokens_case_insensitively():
     assert bench.check(spec, "17 rows, Priya Raman, 2.4.1") == (False, ["7"])
 
 
-def test_fake_bench_runs_every_task_off_and_on():
-    spec = bench.load_tasks()
+def _fake_bench(spec):
     result = bench.run_bench(spec, fake=True, model="fake-model")
     rows = result["rows"]
     assert len(rows) == 2 * len(spec["tasks"])
@@ -54,6 +53,17 @@ def test_fake_bench_runs_every_task_off_and_on():
     assert totals["on"]["placeholders"] >= len(spec["tasks"]) and totals["off"]["placeholders"] == 0
     assert totals["on"]["turns"] > totals["off"]["turns"]
     assert "total async=on" in bench.format_table(result)
+
+
+def test_fake_bench_runs_two_tasks_off_and_on():
+    """The smoke: two tasks of the set (the full sweep is the `slow` test)."""
+    spec = bench.load_tasks()
+    _fake_bench({**spec, "tasks": spec["tasks"][:2]})
+
+
+@pytest.mark.slow
+def test_fake_bench_runs_every_task_off_and_on():
+    _fake_bench(bench.load_tasks())
 
 
 def test_still_pending_reads_placeholders_and_late_messages():

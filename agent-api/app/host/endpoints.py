@@ -1,6 +1,8 @@
 """endpoints — the host side of the vsock ports, one set per session.
 
-The host listens on Unix sockets `{session_dir}/ipc/v.sock_{port}`. That is
+The host listens on Unix sockets `{session_dir}/ipc/v.sock_{port}`
+(protocol.ports.socket_name; bound with app.host.uds.bind_unix, so a session
+directory too deep for sun_path still works). That is
 exactly where Firecracker delivers guest-initiated vsock connections when the
 VM's vsock `uds_path` is `{session_dir}/ipc/v.sock`, and exactly what the
 test double (the guest as a subprocess with `--connect unix:{session_dir}/ipc`)
@@ -34,14 +36,15 @@ import time
 from pathlib import Path
 
 from protocol.messages import ProtocolError, encode, parse
+from protocol.ports import CONTROL, SOCKET_PREFIX, socket_name
+
+from app.host.uds import bind_unix
 
 logger = logging.getLogger("host.endpoints")
 
-SOCKET_PREFIX = "v.sock"
-
 
 def socket_path(session_dir: Path, port: int) -> Path:
-    return Path(session_dir) / "ipc" / f"{SOCKET_PREFIX}_{port}"
+    return Path(session_dir) / "ipc" / socket_name(port)
 
 
 class Endpoints:
@@ -73,7 +76,7 @@ class Endpoints:
         except FileNotFoundError:
             pass
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.bind(str(path))
+        bind_unix(sock, path)
         os.chmod(path, 0o600)
         sock.listen(8)
         return sock
@@ -157,9 +160,9 @@ class Endpoints:
                 return None
 
     def accept_control(self, timeout: float | None = None) -> socket.socket | None:
-        """accept(5000, timeout): while :5000 is closed (the guest parked)
-        it sleeps until reopen(5000), close() or the timeout."""
-        return self.accept(5000, timeout)
+        """accept(CONTROL, timeout): while :5000 is closed (the guest parked)
+        it sleeps until reopen(CONTROL), close() or the timeout."""
+        return self.accept(CONTROL, timeout)
 
     def close_port(self, port: int) -> None:
         """Stop listening on one port (between the acked `parked` and the

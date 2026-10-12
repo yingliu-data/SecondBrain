@@ -113,15 +113,19 @@ from typing import Callable
 from flows.activities import WALL_CLOCK_GRACE_S, SessionConfig
 from protocol.allowlist import effective_tools
 from protocol.canonical import derive_key_id
+from protocol.clock import elapsed_ms, now_ms
 from protocol.events import ENUMS
+from protocol.fsio import atomic_write
+from protocol.limits import default_limits
 from protocol.messages import Outbox, ProtocolError, ack, control_message
+from protocol.version import HARNESS_VERSION
 
 from app.config import (
     HARNESS_ABORT_WAIT_S, HARNESS_ASYNC_TOOLS, HARNESS_CONTEXT_WINDOW_TOKENS, HARNESS_GUEST_ROOT, HARNESS_HEARTBEAT_S,
     HARNESS_HELLO_TIMEOUT_S, HARNESS_HOST_TOOL_TIMEOUT_S, HARNESS_MAX_RESUMES,
     HARNESS_MAX_CONCURRENT_TASKS, HARNESS_MAX_QUEUE_WAIT_S, HARNESS_MAX_TURNS, HARNESS_PARK_GRACE_S, HARNESS_PARK_TIMEOUT_S, HARNESS_PORTS, HARNESS_QUESTION_TIMEOUT_S,
     HARNESS_RESERVE_TOKENS, HARNESS_SANDBOX, HARNESS_SESSION_IDLE_S, HARNESS_SHUTDOWN_PARK_S,
-    HARNESS_SPILL_THRESHOLD, HARNESS_STOP_AT_SETTLE,
+    HARNESS_SPILL_THRESHOLD,
     HARNESS_TOKEN_BUDGET, HARNESS_WALL_CLOCK_S, LLM_ENABLE_THINKING,
     LLM_MAX_TOKENS, LLM_MODEL, LLM_STREAM, LLM_TEMPERATURE, LLM_URL, MAX_TOOLS,
     MCP_GATEWAY_TOOLS_TIMEOUT_S, MCP_GATEWAY_URL, SYSTEM_PROMPT, TOOL_TIMEOUT,
@@ -139,11 +143,9 @@ from app.host.state_sync import StateSync, StateSyncError
 from app.host.stream import DONE, Projector, fatal_items, sse, tokens
 from app.session.ids import session_key, session_ref
 from app.user.context_builder import ContextBuilder
-from app.util.ipc import atomic_write_json
 
 logger = logging.getLogger("host.worker")
 
-HARNESS_VERSION = "0.0.3"
 # the guest's settle outcomes (anything else a task returns counts as failed)
 SETTLE_OUTCOMES = ENUMS["settle"]["outcome"]
 
@@ -165,16 +167,19 @@ def wake_order(item: tuple[str, dict]) -> bool:
     return item[0] != "ui_response"
 
 
+def write_json(path: Path, obj: dict) -> None:
+    """An atomic, durable JSON file (a ticket, vm/parked.json): what a
+    restart reads back. 0644 as before."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write(path, json.dumps(obj, separators=(",", ":")).encode("utf-8"), mode=0o644)
+
+
 class GuestError(RuntimeError):
     """The guest died, broke the protocol, or never connected."""
 
 
 def new_input_id() -> str:
     return "in_" + uuid.uuid4().hex
-
-
-def now_ms() -> int:
-    return int(time.time() * 1000)
 
 
 _TIME_FRAGMENT = re.compile(r"\s*(?:[-*]\s*)?current time:\s*\{current_time\}\.?", re.IGNORECASE)
@@ -244,7 +249,6 @@ class Worker:
                  ports: dict = HARNESS_PORTS, hello_timeout_s: float = HARNESS_HELLO_TIMEOUT_S,
                  heartbeat_s: float = HARNESS_HEARTBEAT_S,
                  wall_clock_s: float = HARNESS_WALL_CLOCK_S,
-                 stop_at_settle: bool = HARNESS_STOP_AT_SETTLE,
                  session_idle_s: float | None = HARNESS_SESSION_IDLE_S,
                  park_timeout_s: float = HARNESS_PARK_TIMEOUT_S,
                  max_resumes: int = HARNESS_MAX_RESUMES,
@@ -265,7 +269,6 @@ class Worker:
         self.hello_timeout_s = hello_timeout_s
         self.heartbeat_s = heartbeat_s
         self.wall_clock_s = wall_clock_s
-        self.stop_at_settle = stop_at_settle
         self.session_idle_s = session_idle_s
         self.park_timeout_s = park_timeout_s
         self.max_resumes = max_resumes
@@ -721,7 +724,7 @@ class Worker:
             task.result() if task is not None and task_ok(task) else {})
         if outcome is None:
             outcome = settle_outcome(settle.get("outcome"))
-        atomic_write_json(path, {
+        write_json(path, {
             "ticket_id": ticket_id, "input_id": input_id,
             "driver": driver, "outcome": outcome,
             "answer": settle.get("answer", ""), "question_id": question_id,
@@ -822,14 +825,16 @@ class Worker:
                  "body": r.body.strip()} for r in recalled[:3]]
 
     def limits(self) -> dict:
-        return {
+        """hello.config.limits: protocol.limits.DEFAULT_LIMITS with the env
+        (HARNESS_*, whose defaults are DEFAULT_LIMITS too) and tenant
+        overrides applied."""
+        limits = default_limits()
+        limits.update({
             # the default only: every task message carries its own
             "wall_clock_s": int(self.default_wall_clock_s()),
             "max_tools": self.tenant.max_tools or MAX_TOOLS,
             "max_turns": HARNESS_MAX_TURNS,
             "max_tokens": self.tenant.max_tokens or LLM_MAX_TOKENS,
-            "op_timeout_s": {"guest": 120, "host": HARNESS_HOST_TOOL_TIMEOUT_S,
-                             "device": TOOL_TIMEOUT, "mcp": 300},
             "spill_threshold": HARNESS_SPILL_THRESHOLD,
             # the guest compacts when its estimate exceeds window - reserve
             # (the token budget is a proxy knob, not a guest limit)
@@ -839,7 +844,9 @@ class Worker:
             "park_grace_s": self.park_grace_s,
             # > 0 = a question deadline parks the task (either driver)
             "answer_wait_s": int(self.answer_wait_s),
-        }
+        })
+        limits["op_timeout_s"].update(host=HARNESS_HOST_TOOL_TIMEOUT_S, device=TOOL_TIMEOUT)
+        return limits
 
     def answer_wait_for(self, driver: str | None) -> int:
         """limits.answer_wait_s of a guest booted for a task of `driver`
@@ -867,7 +874,6 @@ class Worker:
             "params": params,
             "tools": self.tool_entries(),
             "limits": self.limits(),
-            "hooks": {},
             "async_tools": async_tools_for(self.tenant),
             "exclude_builtins": list(self.tenant.exclude_builtins),
             "question_timeout_s": HARNESS_QUESTION_TIMEOUT_S,
@@ -988,7 +994,7 @@ class Worker:
         """vm{op, source, ms}: ms is the sandbox's own figure for the op when
         it reports one (`last_vm_event`), else the host's wall time; ready_ms
         is the host's (restore/boot: until the guest's link is up)."""
-        ready_ms = int((time.monotonic() - t0) * 1000)
+        ready_ms = elapsed_ms(t0)
         body = {"op": op, "ms": ready_ms, "ready_ms": ready_ms, "run": self._guest_run,
                 "sandbox": type(self.sandbox).__name__, **extra}
         if source is not None:
@@ -1315,7 +1321,7 @@ class Worker:
             info.update(question=dict(self.question_park), driver=self._park_driver,
                         answer_deadline_ms=self._answer_deadline_ms)
         try:
-            atomic_write_json(self.parked_file, info)
+            write_json(self.parked_file, info)
         except OSError as e:
             logger.warning("could not write %s: %s", self.parked_file, e)
 
@@ -1625,7 +1631,7 @@ class Worker:
         self.sync.host_event("workflow", {"kind": "completed", "input_id": input_id,
                                           "outcome": result.get("outcome")})
         async with self._vm_lock:
-            if self.vm_state != "parked" and (self.stop_at_settle or not guest_settled
+            if self.vm_state != "parked" and (not guest_settled
                                               or not self.sandbox.is_alive()):
                 # a guest that did not settle may still be working: never keep it
                 await self._destroy("settle" if result.get("outcome") == "done"
@@ -1816,6 +1822,8 @@ class Worker:
             return                      # duplicate or gap: nothing new
         self._emit_many(self.projector.project(ev))
         etype, body = ev["type"], ev["body"]
+        if etype == "session_start":
+            self._check_harness_version(body.get("harness_version"))
         if etype == "tool_call" and self.sides is not None:
             if body["call_id"] in self._lost_calls:
                 return
@@ -1852,6 +1860,15 @@ class Worker:
             fut = self._current_future()
             if fut is not None:
                 fut.set_exception(GuestError(body["message"]))
+
+    def _check_harness_version(self, guest_version) -> None:
+        """Warn (host event `harness_skew`, never fatal) when the guest's
+        session_start names another harness version than this host's."""
+        if guest_version == HARNESS_VERSION:
+            return
+        logger.warning("session %s: guest harness_version %r != host %r", self.session_key,
+                       guest_version, HARNESS_VERSION)
+        self.sync.host_event("harness_skew", {"guest": guest_version, "host": HARNESS_VERSION})
 
     def _on_lost(self, call_id: str) -> None:
         """The resumed guest gave up on a host-originated call: stop running

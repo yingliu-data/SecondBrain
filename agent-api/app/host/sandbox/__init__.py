@@ -9,8 +9,11 @@
                   same Unix sockets (--connect unix:{session_dir}/ipc);
                   tests and the no-KVM build machine
 
-Standard library only: firecracker.py imports this module (and falls back
-when it is loaded standalone by harness/image/build_snapshot.py).
+  base_snapshot.py  building / checking the shared BASE snapshot (CLI)
+
+Standard library only: firecracker.py and base_snapshot.py import this module
+also when harness/image/build_snapshot.py runs them with just agent-api/ and
+harness/ on sys.path.
 """
 from __future__ import annotations
 

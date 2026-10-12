@@ -5,6 +5,7 @@ import json
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from protocol.mcp import GATEWAY_EVENTS_PATH
 
 from app.gateway import events
 from app.host.state_sync import StateSync
@@ -31,18 +32,18 @@ AUTH = {"Authorization": "Bearer tok"}
 
 def test_gateway_event_auth_and_validation(api):
     client, store = api
-    assert client.post("/internal/gateway-events", json=EVENT).status_code == 401
-    assert client.post("/internal/gateway-events", json=EVENT,
+    assert client.post(GATEWAY_EVENTS_PATH, json=EVENT).status_code == 401
+    assert client.post(GATEWAY_EVENTS_PATH, json=EVENT,
                        headers={"Authorization": "Bearer nope"}).status_code == 401
     bad = dict(EVENT, session_id="../x")
-    assert client.post("/internal/gateway-events", json=bad, headers=AUTH).status_code == 400
-    assert client.post("/internal/gateway-events", json={"user": "u"},
+    assert client.post(GATEWAY_EVENTS_PATH, json=bad, headers=AUTH).status_code == 400
+    assert client.post(GATEWAY_EVENTS_PATH, json={"user": "u"},
                        headers=AUTH).status_code == 400
 
 
 def test_unknown_session_is_dropped_with_404(api):
     client, store = api
-    r = client.post("/internal/gateway-events", json=EVENT, headers=AUTH)
+    r = client.post(GATEWAY_EVENTS_PATH, json=EVENT, headers=AUTH)
     assert r.status_code == 404 and r.json() == {"stored": False}
     assert not (store.root / "u").exists()
 
@@ -54,7 +55,7 @@ def test_without_a_worker_the_event_continues_the_host_log(api):
     sync.host_event("workflow", {"kind": "task_signal"})       # an earlier worker's
     del sync
     for _ in range(2):
-        r = client.post("/internal/gateway-events", json=EVENT, headers=AUTH)
+        r = client.post(GATEWAY_EVENTS_PATH, json=EVENT, headers=AUTH)
         assert r.status_code == 202 and r.json() == {"stored": True}
     host = StateSync(session).read_host()
     assert [h["hseq"] for h in host] == [1, 2, 3]
@@ -68,7 +69,7 @@ def test_with_a_live_state_sync_the_event_shares_its_counter(api):
     session = store.get_or_create("u", "t", "s1")
     sync = StateSync(session)
     sync.host_event("workflow", {"kind": "task_signal"})
-    assert client.post("/internal/gateway-events", json=EVENT, headers=AUTH).status_code == 202
+    assert client.post(GATEWAY_EVENTS_PATH, json=EVENT, headers=AUTH).status_code == 202
     sync.host_event("workflow", {"kind": "completed"})          # one counter, no duplicate hseq
     assert [h["hseq"] for h in sync.read_host()] == [1, 2, 3]
     assert sync.read_host()[1]["type"] == "gateway"
@@ -78,7 +79,7 @@ def test_empty_token_means_no_check(api, monkeypatch):
     client, store = api
     monkeypatch.setattr(events, "INTERNAL_TOKEN", "")
     store.get_or_create("u", "t", "s1")
-    assert client.post("/internal/gateway-events", json=EVENT).status_code == 202
+    assert client.post(GATEWAY_EVENTS_PATH, json=EVENT).status_code == 202
 
 
 # ---------------------------------------------------------------- tenants

@@ -42,9 +42,11 @@ import sys
 import time
 from pathlib import Path
 
+from protocol.clock import now_ms
+
 from app.config import HARNESS_GUEST_ROOT
 from app.host.sandbox import Sandbox, SandboxError
-from app.host.sandbox.firecracker import _ms_since, _now_ms, _unlink, _write_json
+from app.host.sandbox.firecracker import _ms_since, _unlink, write_json
 
 logger = logging.getLogger("host.sandbox")
 
@@ -216,7 +218,7 @@ class LocalSandbox(Sandbox):
         _signal_group(proc.pid, signal.SIGSTOP)
         snapshot_dir = Path(snapshot_dir)
         snapshot_dir.mkdir(parents=True, exist_ok=True)
-        _write_json(snapshot_dir / LOCAL_SNAPSHOT_MARKER, {"pid": proc.pid, "created_ms": _now_ms()})
+        write_json(snapshot_dir / LOCAL_SNAPSHOT_MARKER, {"pid": proc.pid, "created_ms": now_ms()})
         self._frozen, self.proc = proc, None
         self.last_vm_event = {"op": "snapshot", "source": "session", "ms": _ms_since(t0)}
 

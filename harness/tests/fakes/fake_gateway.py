@@ -44,7 +44,9 @@ import socket
 import socketserver
 import threading
 
-PORT = 5011
+from protocol.ports import GATEWAY, socket_name
+
+PORT = GATEWAY
 GATED = "wcc-events__slow"
 APPROVAL_SCHEMA = {"type": "object", "properties": {
     "decision": {"type": "string", "enum": ["approve", "reject"]}}, "required": ["decision"]}
@@ -63,7 +65,7 @@ def input_required(request_state: str, message: str, schema: dict, expires_in_s=
 class FakeGateway:
     def __init__(self, dir, tools=None):
         self.dir = str(dir)
-        self.path = os.path.join(self.dir, f"v.sock_{PORT}")
+        self.path = os.path.join(self.dir, socket_name(PORT))
         self.requests: list[dict] = []
         self.calls: dict[str, int] = {}
         self._held: dict[str, dict] = {}          # call_id -> {"done": Event, "response": (status, bytes)}

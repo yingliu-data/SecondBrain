@@ -44,7 +44,9 @@ from typing import Callable
 
 import httpx
 from protocol.canonical import is_int
+from protocol.clock import elapsed_ms
 from protocol.sse import iter_sse_data
+from protocol.usage import normalise_usage
 
 from app.config import HARNESS_TOKEN_BUDGET, LLM_TIMEOUT, LLM_URL
 from app.host.uds_http import UDSHandler, UDSService
@@ -119,7 +121,7 @@ class _Handler(UDSHandler):
     def _unreachable(self, proxy: "LLMProxy", e: Exception, started: float) -> None:
         logger.warning("upstream %s unreachable: %s", proxy.upstream_url, e)
         proxy.record({"status": 502, "error": str(e)[:300],
-                      "duration_ms": int((time.monotonic() - started) * 1000)})
+                      "duration_ms": elapsed_ms(started)})
         self._error(502, f"upstream unreachable: {e}", "upstream_unreachable")
 
 
@@ -146,7 +148,7 @@ def _wants_stream(body: bytes) -> bool:
 
 
 def _usage_body(status: int, raw: bytes, started: float) -> dict:
-    body: dict = {"status": status, "duration_ms": int((time.monotonic() - started) * 1000)}
+    body: dict = {"status": status, "duration_ms": elapsed_ms(started)}
     if status == 200:
         try:
             data = json.loads(raw)
@@ -161,11 +163,7 @@ def _usage_body(status: int, raw: bytes, started: float) -> dict:
 
 
 def _put_usage(body: dict, usage) -> None:
-    usage = usage if isinstance(usage, dict) else {}
-    body["prompt_tokens"] = int(usage.get("prompt_tokens") or 0)
-    body["completion_tokens"] = int(usage.get("completion_tokens") or 0)
-    body["total_tokens"] = int(usage.get("total_tokens")
-                               or body["prompt_tokens"] + body["completion_tokens"])
+    body.update(normalise_usage(usage))
 
 
 _EVENT_END = re.compile(rb"\r?\n\r?\n")
@@ -216,7 +214,7 @@ class _SSEUsageScanner:
                 self.usage = chunk["usage"]
 
     def usage_body(self, started: float, error: str | None = None) -> dict:
-        body: dict = {"status": 200, "duration_ms": int((time.monotonic() - started) * 1000),
+        body: dict = {"status": 200, "duration_ms": elapsed_ms(started),
                       "stream": True, "chunks": self.chunks}
         _put_usage(body, self.usage)
         body["model"] = self.model

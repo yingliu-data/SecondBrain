@@ -29,10 +29,10 @@ The path is configuration, never liveness: `TEMPORAL_ADDRESS` set → every
 input of every session goes through the session workflow; unset → the direct
 path (`Worker.act`) only, so tests and a Temporal-less box keep working. A
 session never switches path. agent-api
-depends on `flows` (editable path dependency `../flows`) and starts the
+depends on `flows` (a member of the one uv workspace) and starts the
 Temporal worker on its own loop in the background at startup
 (`app/host/temporal.py`: `flows.worker.build_worker(client,
-activities=[...real bodies...])`, then `flows.schedules.ensure_schedules`
+activities=[...real bodies...])`; `activities` is required), then `flows.schedules.ensure_schedules`
 with the loaded tenants doc); startup never waits for Temporal. A failed
 connect, or a worker that exits on its own later, logs an error; a
 supervisor tries again every `TEMPORAL_RECONNECT_S` (5). While it is not
@@ -157,9 +157,16 @@ sessions (or to a session after `terminate`, §6.3), not to a running one.
 
 ## 3. Activities
 
-Names and payloads are `flows/activities.py` (stubs there; change them only
-additively). The real bodies are agent-api's `app/host/activities.py`; they
-drive the Worker's task API as `act()` does on the direct path.
+Names and payloads are `flows/activities.py` (change them only additively);
+the workflow calls the activities by name. The real bodies are agent-api's
+`app/host/activities.py`; they drive the Worker's task API as `act()` does on
+the direct path. Stub bodies (record calls in `CALLS`, return what `SCRIPTS`
+says) are `flows/tests/stubs.py`, for the workflow tests and the dev runner.
+agent-api's defaults `TEMPORAL_TASK_QUEUE`, `TEMPORAL_NAMESPACE` and
+`HARNESS_MAX_QUEUE_WAIT_S` are `flows.TASK_QUEUE`, `flows.NAMESPACE` and
+`flows.activities.MAX_QUEUE_WAIT_S`; `Outcome` is the guest's settle outcomes
+plus `parked` (agent-api's `test_flows_outcomes_are_the_settle_outcomes_plus_parked`
+checks it, since flows does not import protocol).
 
 | Activity | Payload → result | Timeout / retries | Heartbeat |
 |---|---|---|---|
@@ -357,7 +364,8 @@ agent-api.
 
 ### 6.5 Worker without agent-api (smoke test)
 
-7233 is not published, so run the stub worker where `temporal:7233`
+7233 is not published, so run the stub worker (`python -m flows.worker`
+imports `flows.tests.stubs` explicitly) where `temporal:7233`
 resolves, i.e. in the agent-api container (it has `flows` installed), on a
 task queue of its own so it never picks up real work:
 
@@ -372,7 +380,8 @@ Stub activities record calls in memory and return `done`. Never run it on
 ## 7. Tests
 
 ```sh
-cd flows && uv sync && uv run pytest -q          # time-skipping test server (Java, auto-downloaded)
+uv sync --all-packages                           # once, at the repo root (the one workspace)
+cd flows && uv run pytest -q -n auto             # time-skipping test server (Java, auto-downloaded), one per xdist worker
 FLOWS_TEST_ENV=local uv run pytest -q            # CLI dev server (auto-downloaded)
 FLOWS_TEST_ENV=external TEMPORAL_TEST_ADDRESS=localhost:7233 uv run pytest -q   # a running server
 ```

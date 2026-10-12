@@ -271,6 +271,21 @@ async def test_hello_carries_the_m2_stream_and_limit_keys(session, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_harness_version_skew_is_a_warning_host_event(session):
+    from protocol.version import HARNESS_VERSION
+
+    sandbox = FakeSandbox([{"text": "x"}], harness_version="0.0.0-old")
+    w = Worker(session, FakeTenant(), FakeRegistry(), sandbox, device_calls=DeviceCalls(),
+               **worker_kwargs())
+    assert w.build_hello()["config"]["harness_version"] == HARNESS_VERSION
+    result = await w.act({"input_id": "in_1", "text": "hi"})
+    assert result["outcome"] == "done"                              # warn only
+    skew = [h["body"] for h in w.sync.read_host() if h["type"] == "harness_skew"]
+    assert skew == [{"guest": "0.0.0-old", "host": HARNESS_VERSION}]
+    await w.close()
+
+
+@pytest.mark.asyncio
 async def test_streamed_deltas_reach_the_sink_verbatim_once(session):
     """Streaming: the guest's content fragments are the tokens, the
     response is not re-emitted, reasoning never shows; a non-streamed turn's
@@ -333,3 +348,14 @@ def test_tenant_async_tools_key_loads():
     from app.tenants import Tenant
     assert Tenant(name="a", api_key="k").async_tools is None
     assert Tenant(name="a", api_key="k", async_tools=True).async_tools is True
+
+
+def test_flows_outcomes_are_the_settle_outcomes_plus_parked():
+    """flows stays independent of protocol, so its Outcome vocabulary is
+    spelled twice: run_task returns a guest settle's outcome, or `parked`."""
+    from typing import get_args
+
+    from flows.activities import Outcome
+    from protocol.events import ENUMS
+
+    assert set(get_args(Outcome)) == set(ENUMS["settle"]["outcome"]) | {"parked"}

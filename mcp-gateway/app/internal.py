@@ -9,6 +9,7 @@ from __future__ import annotations
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
+from protocol.mcp import INTERNAL_TOOLS_PATH
 
 from app.gateway import Gateway
 from app.identity import request_identity
@@ -19,4 +20,4 @@ def routes(gateway: Gateway) -> list[Route]:
         ident = request_identity(request)
         return JSONResponse({"tools": await gateway.hello_entries(ident)})
 
-    return [Route("/internal/tools", tools, methods=["GET"])]
+    return [Route(INTERNAL_TOOLS_PATH, tools, methods=["GET"])]

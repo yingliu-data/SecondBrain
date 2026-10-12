@@ -1,6 +1,6 @@
 """guest.mcp — the MCP client over :5011 (docs/GUEST.md).
 
-    McpClient(connector, port=5011, *, path="/mcp", host="gateway.local")
+    McpClient(connector, port=protocol.ports.GATEWAY, *, path="/mcp", host="gateway.local")
         .start(call_id, name, arguments, *, attempt=0, input_response=None,
                timeout_s=None, reattach=False) -> McpCall
         .call_tool(...same...) -> McpResult           start(...).run()
@@ -58,9 +58,10 @@ from dataclasses import dataclass
 
 from guest.provider import ConnectorConnection, close_quietly, read_lines
 from protocol.mcp import ACTIONS, CALL_HEADER, INPUT_REQUIRED, INPUT_RESPONSE, REATTACH_HEADER
+from protocol.ports import GATEWAY
 from protocol.sse import iter_sse_data
 
-DEFAULT_PORT = 5011
+DEFAULT_PORT = GATEWAY
 PATH = "/mcp"
 ACCEPT = "application/json, text/event-stream"
 GONE = 410                           # a re-attach the forwarder does not know

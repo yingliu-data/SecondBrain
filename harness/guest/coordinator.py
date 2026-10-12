@@ -209,20 +209,21 @@ import dataclasses
 import json
 import math
 import threading
-import time
-from datetime import datetime, timezone
 
+from protocol import clock as proto_clock
 from protocol.allowlist import is_allowed
 from protocol.canonical import canonical_json, canonicalisable_error, derive_id, hash_value, is_int, sha256_hex
 from protocol.events import OP_INPUT_REQUIRED, UNANSWERED, make_event, validate_event
 from protocol.fold import State, apply, checkpoint_body
+from protocol.limits import DEFAULT_LIMITS
 from protocol.mcp import CALL_TOOL, split_namespaced
+from protocol.usage import normalise_usage
+from protocol.version import HARNESS_VERSION
 from guest import hooks as default_hooks
 from guest.config import stream_enabled
 from guest.context import build_compaction_request, build_request, estimate_tokens, system_hash
 from guest.mcp import input_response, question_options
 
-HARNESS_VERSION = "0.0.1"
 DOOM_LOOP_REPEATS = 3
 MAX_UNANSWERED = 3
 QUESTION_TOOL = "question"
@@ -247,10 +248,10 @@ class SystemClock:
     """The real clock and threading.Timer. Tests use a fake with the same shape."""
 
     def now_ms(self) -> int:
-        return int(time.time() * 1000)
+        return proto_clock.now_ms()
 
     def now_iso(self) -> str:
-        return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+        return proto_clock.now_iso()
 
     def timer(self, delay_s: float, fn):
         t = threading.Timer(max(0.0, float(delay_s)), fn)
@@ -288,7 +289,7 @@ def _limit(limits, name, default):
 def _usage_delta(now: dict, base: dict) -> dict:
     p = now.get("prompt_tokens", 0) - base.get("prompt_tokens", 0)
     c = now.get("completion_tokens", 0) - base.get("completion_tokens", 0)
-    return {"prompt_tokens": p, "completion_tokens": c, "total_tokens": p + c}
+    return normalise_usage({"prompt_tokens": p, "completion_tokens": c})
 
 
 def _parse_arguments(raw):
@@ -507,7 +508,7 @@ class Coordinator:
         if self.state.last_seq == 0:
             self._emit_session_start()
         if self.task_input_id is None:
-            self._arm("idle_timer", "idle", _limit(self.limits, "idle_wake_s", 600))
+            self._arm("idle_timer", "idle", _limit(self.limits, "idle_wake_s", DEFAULT_LIMITS["idle_wake_s"]))
         self.live("ready", {"session_id": self.cfg.session_id, "seq": self.state.last_seq})
         try:
             if self._restored is not None:
@@ -1263,14 +1264,14 @@ class Coordinator:
         if self._async:
             # the grace window batches this round's results; _async_tick wakes
             self._grace_fired = False
-            grace = _limit(self.limits, "grace_s", 1.0)
+            grace = _limit(self.limits, "grace_s", DEFAULT_LIMITS["grace_s"])
             if grace and any(c in self._turn_pending for c in self._turn_calls):
                 self._arm("grace_expiry", "grace", float(grace))
             return
         if not self._turn_pending:
             self._after_round()
         else:
-            grace = _limit(self.limits, "grace_s", 1.0)
+            grace = _limit(self.limits, "grace_s", DEFAULT_LIMITS["grace_s"])
             if grace:
                 self._arm("grace_expiry", "grace", float(grace))
 
@@ -1588,7 +1589,7 @@ class Coordinator:
             return
         if self._guest_running():
             if "park_grace" not in self._timers:
-                self._arm("grace_park", "park_grace", float(_limit(self.limits, "park_grace_s", 30.0)))
+                self._arm("grace_park", "park_grace", float(_limit(self.limits, "park_grace_s", DEFAULT_LIMITS["park_grace_s"])))
             return
         if self.current_turn is not None:       # a provider call in flight: its turn ends first
             return

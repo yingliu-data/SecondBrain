@@ -2,8 +2,9 @@
 
 ``start_worker`` is what agent-api calls at startup on its own asyncio loop
 (behind ``AGENT_ENGINE=harness``), passing its real activity bodies.  The
-``__main__`` below runs the worker standalone with the stub activities, for
-the spike and for the compose ``temporal`` service smoke test::
+``__main__`` below runs the worker standalone with the stub activities
+(``flows/tests/stubs.py``, imported explicitly there), for the spike and for
+the compose ``temporal`` service smoke test::
 
     TEMPORAL_ADDRESS=localhost:7233 uv run python -m flows.worker
 """
@@ -19,28 +20,27 @@ from typing import Any
 from temporalio.client import Client
 from temporalio.worker import Worker
 
-from flows import TASK_QUEUE
-from flows import activities as stub_activities
+from flows import NAMESPACE, TASK_QUEUE
 from flows.schedules import SessionSignaller
 from flows.session_workflow import WORKFLOWS
 
 DEFAULT_ADDRESS = "localhost:7233"
-DEFAULT_NAMESPACE = "secondbrain"
+DEFAULT_NAMESPACE = NAMESPACE
 
 
 def build_worker(
     client: Client,
     task_queue: str = TASK_QUEUE,
     *,
-    activities: Sequence[Callable[..., Any]] | None = None,
+    activities: Sequence[Callable[..., Any]],
     **worker_kwargs: Any,
 ) -> Worker:
     """A Worker with both workflows, the four session activities and the
-    schedule glue activity.  ``activities`` defaults to the stubs in
-    ``flows.activities``; agent-api passes its real ``prepare_vm``,
-    ``run_task``, ``park_vm`` and ``deliver`` instead (same names, same payloads).
+    schedule glue activity.  ``activities``: the bodies of ``prepare_vm``,
+    ``run_task``, ``park_vm`` and ``deliver`` (agent-api's real ones; the
+    tests and the dev runner pass ``flows.tests.stubs.STUB_ACTIVITIES``).
     """
-    acts = list(activities if activities is not None else stub_activities.STUB_ACTIVITIES)
+    acts = list(activities)
     acts.append(SessionSignaller(client).signal_session)
     return Worker(
         client,
@@ -55,7 +55,7 @@ def start_worker(
     client: Client,
     task_queue: str = TASK_QUEUE,
     *,
-    activities: Sequence[Callable[..., Any]] | None = None,
+    activities: Sequence[Callable[..., Any]],
     **worker_kwargs: Any,
 ) -> tuple[Worker, asyncio.Task[None]]:
     """Build the worker and start polling on the current event loop.
@@ -85,8 +85,11 @@ async def connect(
 
 
 async def _main() -> None:
+    from flows.tests.stubs import STUB_ACTIVITIES      # the dev runner only
+
     client = await connect()
-    worker, task = start_worker(client, os.environ.get("TEMPORAL_TASK_QUEUE", TASK_QUEUE))
+    worker, task = start_worker(client, os.environ.get("TEMPORAL_TASK_QUEUE", TASK_QUEUE),
+                                activities=STUB_ACTIVITIES)
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):

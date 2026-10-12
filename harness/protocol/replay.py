@@ -38,8 +38,10 @@ JSON objects with `type` (str), `body` (dict) and `hseq` gapless from 1.
 
 The on-disk layout is spelled here once: RUN_RE / SEGMENT_RE /
 HOST_SEGMENT_RE, run_name(n), segment_name(n, host=), segments(dir),
-host_segments(events_dir), run_numbers(events_dir) (agent-api's StateSync
-and migration write with them).
+host_segments(events_dir), run_numbers(events_dir), before_resume_name(n)
+(agent-api's StateSync and migration and the guest's EventLog write with
+them); iter_segment(path, on_bad=) reads one segment file's events (the
+guest skips a bad line, StateSync raises).
 
 Stdlib only. Reading files is the point of this module; the fold itself stays
 pure (protocol/fold.py).
@@ -72,8 +74,31 @@ def segment_name(n: int, *, host: bool = False) -> str:
     return f"{'host-' if host else ''}{n:06d}.jsonl"
 
 
+def before_resume_name(n: int) -> str:
+    """The name a log return moves the guest's old buffer to: events.before-resume-N."""
+    return f"{FLAT_RUN}.before-resume-{n}"
+
+
 class ReplayError(ValueError):
     """A log that cannot be read (layout, I/O, a line that is not a JSON object)."""
+
+
+def iter_segment(path, on_bad=None) -> Iterator[dict]:
+    """The events of one segment file, in file order; blank lines skipped.
+    A line that is not JSON goes to on_bad(path, lineno, exc) and is
+    skipped; without on_bad it raises ReplayError naming the file and line."""
+    path = Path(path)
+    with path.open("r", encoding="utf-8") as fh:
+        for lineno, line in enumerate(fh, 1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                yield json.loads(line)
+            except ValueError as exc:
+                if on_bad is None:
+                    raise ReplayError(f"{path}:{lineno}: line is not JSON ({exc})") from None
+                on_bad(path, lineno, exc)
 
 
 # ---------------------------------------------------------------- reading

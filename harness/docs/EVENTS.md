@@ -143,6 +143,7 @@ and `POST /internal/gateway-events` share it.
 | `memory` | `scope`, `op`, `slug`, `sha256`, `call_id`: a `remember`/`forget` write | sides |
 | `bulk` | `kind`, `path`, `bytes`, `sha256`: a bulk `put` the host stored | worker |
 | `input` | `kind: side_result`, `call_id`, `side`, `dedupe: late`: a side result for a call no longer open, dropped | worker |
+| `harness_skew` | `guest`, `host`: the guest's `session_start.harness_version` differs from the host's `protocol.version.HARNESS_VERSION` (a warning; the session runs) | worker |
 
 ## Log rules (`validate_log`)
 

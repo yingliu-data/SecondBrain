@@ -10,6 +10,7 @@ from guest.config import GuestConfig, Limits, Principal
 from protocol.allowlist import effective_tools
 from protocol.canonical import canonical_json, hash_value, sha256_hex
 from protocol.fold import PLACEHOLDER, State, fold
+from protocol.ports import PORTS
 from tests.logbuilder import Log
 
 SID = "sess-ctx"
@@ -33,11 +34,10 @@ def make_cfg(extra_tools=(), system_block=None, params=None, **kw) -> GuestConfi
             "memory_index": {"user": "- likes tea", "session": ""},
         },
         limits=Limits(max_tokens=256),
-        hooks={},
         async_tools=False,
         question_timeout_s=60,
         ui_attached=True,
-        ports={"control": 5000, "bulk": 5001, "llm": 5010},
+        ports=dict(PORTS),
         resume=False,
         at=1_790_000_000_000,
         **kw,

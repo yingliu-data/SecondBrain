@@ -14,6 +14,8 @@ import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from protocol.mcp import INTERNAL_TOOLS_PATH
+
 
 class FakeGateway:
     def __init__(self) -> None:
@@ -50,7 +52,7 @@ class FakeGateway:
 
             def do_GET(self):
                 self._record()
-                if self.path == "/internal/tools":
+                if self.path == INTERNAL_TOOLS_PATH:
                     self._json({"tools": outer.tools})
                 else:
                     self._json({"error": "nope"}, 404)

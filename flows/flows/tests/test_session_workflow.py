@@ -11,7 +11,7 @@ import pytest
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
-from flows import activities as acts
+from flows.tests import stubs as acts
 from flows.activities import (MAX_QUEUE_WAIT_S, WALL_CLOCK_GRACE_S, RunResult, RunTask,
                               SessionConfig, SessionRef, TaskSignal, run_task_timeout_s)
 from flows.client import session_handle, signal_abort, signal_answer

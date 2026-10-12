@@ -43,6 +43,8 @@ import logging
 import time
 from typing import Callable
 
+from protocol.clock import elapsed_ms
+
 from app.host.sanitize import sanitize
 from app.skills.avatar_control import AVATAR_TOOLS
 from app.config import HARNESS_HOST_TOOL_TIMEOUT_S, TOOL_TIMEOUT
@@ -252,7 +254,7 @@ class Sides:
         self.send_control("side_result", result)
         self.host_event("side_call", {
             "side": body["side"], "call_id": body["call_id"], "name": body["name"],
-            "ok": ok, "duration_ms": int((time.monotonic() - started) * 1000),
+            "ok": ok, "duration_ms": elapsed_ms(started),
         })
         return result
 

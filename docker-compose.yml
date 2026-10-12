@@ -52,18 +52,16 @@ services:
     image: ghcr.io/yingliu-data/secondbrain-agent-api:latest
     stop_grace_period: 20s                      # shutdown parks running guests (HARNESS_SHUTDOWN_PARK_S 8 s + snapshot)
     build:
-      context: .                                # needs harness/ + flows/ (path deps)
+      context: .                                # the uv workspace root: harness/ + flows/ are workspace members
       dockerfile: agent-api/Dockerfile
     container_name: secondbrain-agent-api
     restart: unless-stopped
     environment:
       - LLM_URL=http://secondbrain-llm:8080
       - API_SECRET_KEY=${API_SECRET_KEY}
-      - SESSION_SECRET=${SESSION_SECRET}
       - LOG_LEVEL=warning
       - MAX_TOOL_CALLS_PER_TURN=10
       - MAX_INPUT_LENGTH=4096
-      - RATE_LIMIT_PER_MINUTE=30
       - MCP_GATEWAY_URL=http://mcp-gateway:8090
       - INTERNAL_TOKEN=${INTERNAL_TOKEN}          # shared bearer with mcp-gateway (both directions)
       # Harness tenants run through the Temporal session workflow (and the
@@ -90,7 +88,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock  # Auto-start local LLM on fallback
       # Harness VM cache (HARNESS_VM_CACHE default): vmlinux, rootfs.ext4,
       # IMAGE_VERSION, workspace-template.img and the base snapshot in base/.
-      # Read-write so `python -m app.host.sandbox.firecracker build-base` can
+      # Read-write so `python -m app.host.sandbox.base_snapshot build-base` can
       # (re)build base/ in place (harness/docs/RUNBOOK-M3.md).
       - ~/data/SecondBrain/vm:/var/lib/secondbrain/vm
       # Guest image outputs of `cd harness/image && make image`: vmlinux,
@@ -122,7 +120,7 @@ services:
   mcp-gateway:
     image: ghcr.io/yingliu-data/secondbrain-mcp-gateway:latest
     build:
-      context: .                                # needs harness/ (protocol.canonical)
+      context: .                                # the uv workspace root: harness/ (protocol) is a workspace member
       dockerfile: mcp-gateway/Dockerfile
     container_name: secondbrain-mcp-gateway
     restart: unless-stopped

@@ -61,8 +61,8 @@ HARNESS_KERNEL=/opt/harness-image/vmlinux
 HARNESS_ROOTFS=/opt/harness-image/rootfs.ext4
 HARNESS_WORKSPACE_TEMPLATE=/opt/harness-image/workspace-template.img   # only used without mkfs.ext4
 HARNESS_VM_CACHE=/var/lib/secondbrain/vm         # base/ lives here
-# unset, defaults: HARNESS_FIRECRACKER_BIN=firecracker (on PATH),
-# HARNESS_STOP_AT_SETTLE=false (a VM spans the session; park instead)
+# unset, defaults: HARNESS_FIRECRACKER_BIN=firecracker (on PATH)
+# (a VM spans the session: the idle timer parks it, it never stops at a settle)
 ```
 
 A box without KVM (dev laptop, CI): `HARNESS_SANDBOX=local` in `.env` plus a
@@ -119,7 +119,7 @@ format is tied to the Firecracker version and the vCPU model). Inside the
 container:
 
 ```sh
-docker compose exec agent-api python -m app.host.sandbox.firecracker build-base
+docker compose exec agent-api python -m app.host.sandbox.base_snapshot build-base
 # or on the host with the out/ artifacts (then copy out/vm/base/ to the cache):
 cd harness/image && make snapshot
 # with explicit deployed paths:
@@ -145,7 +145,7 @@ Expected stderr:
 and `MANIFEST.json` on stdout. Check it:
 
 ```sh
-docker compose exec agent-api python -m app.host.sandbox.firecracker check-base   # exit 0, the manifest on stdout
+docker compose exec agent-api python -m app.host.sandbox.base_snapshot check-base   # exit 0, the manifest on stdout
 ls -ls ~/data/SecondBrain/vm/base        # vmstate (KiB), mem (sparse, ~guest RSS), MANIFEST.json
 tail -20 ~/data/SecondBrain/vm/.build-base/vm/console.log 2>/dev/null   # only with --keep-build-dir
 ```
@@ -153,9 +153,9 @@ tail -20 ~/data/SecondBrain/vm/.build-base/vm/console.log 2>/dev/null   # only w
 If idle detection times out (`[snapshot] error: guest never reached
 idle-wait within 120.0s (no vsock connect attempts; see .../console.log);
 retry with a fixed delay`), look at the console (`--keep-build-dir`). Init
-logs `harness-init: starting guest harness (idle-wait, then vsock -> CID 2)`
+logs `harness-init: starting guest harness <image version> (idle-wait, then vsock -> CID 2)`
 just before it starts the guest; the guest's idle-wait itself is silent (no
-log line per 50 ms poll; `idle-wait over: the host answered on :5000` only
+log line per 5 ms poll; `idle-wait over: the host answered on :5000` only
 appears once a host listener answers, never during a build). What must not
 be there is a Python traceback or `guest.main: error: unrecognized
 arguments` (an old `guest.pyz` without `--idle-wait vsock`) followed by
@@ -190,7 +190,7 @@ EOF
 ```
 
 Expect `ms` in the tens and `guest connected` well under 200 ms
-(the guest's poll is 50 ms). If `/snapshot/load` fails, the API body is in
+(the guest's poll is 5 ms). If `/snapshot/load` fails, the API body is in
 the `SandboxError`; common causes: `workspace.img` missing in `vm/` (the
 sandbox creates it; check the template), `../ipc/v.sock` already exists
 (stale; the sandbox unlinks it), a Firecracker version change (rebuild base).

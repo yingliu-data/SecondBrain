@@ -70,16 +70,18 @@ import sqlite3
 from pathlib import Path
 
 from protocol.canonical import derive_id, derive_key_id, hash_value
+from protocol.clock import now_iso
 from protocol.events import make_event
 from protocol.fold import checkpoint_body, replay
+from protocol.limits import SEGMENT_EVENTS
 from protocol.replay import run_name, run_numbers
 
-from app.config import HARNESS_SEGMENT_EVENTS, SESSION_DB_PATH, SESSIONS_ROOT
+from app.config import SESSION_DB_PATH, SESSIONS_ROOT
 from app.host.state_sync import replace_run_dir
 from app.session.dir_store import DirStore
 from app.session.eventlog import parse_ts
 from app.session.ids import is_safe_id
-from app.session.session_dir import SessionDir, utcnow_iso
+from app.session.session_dir import SessionDir
 
 LEGACY_MODEL = "legacy"
 LEGACY_TOOL = "legacy_tool"          # a legacy tool row that names no tool
@@ -100,7 +102,7 @@ def _tenant_users() -> dict[str, str]:
 
 
 def migrate(db_path: str = SESSION_DB_PATH, root: str = SESSIONS_ROOT,
-            segment_events: int = HARNESS_SEGMENT_EVENTS) -> dict:
+            segment_events: int = SEGMENT_EVENTS) -> dict:
     store = DirStore(root)
     users = _tenant_users()
     stats = {"migrated": 0, "skipped_existing": 0, "skipped_invalid": 0, "failed": 0}
@@ -129,7 +131,7 @@ def migrate(db_path: str = SESSION_DB_PATH, root: str = SESSIONS_ROOT,
             messages = json.loads(messages_json)
         except json.JSONDecodeError:
             messages = []
-        now = utcnow_iso()
+        now = now_iso()
         history = list(enumerate(
             ({"ts": now, "role": m["role"], "content": m.get("content") or ""}
              for m in messages if m.get("role") in ("user", "assistant")), start=1))
@@ -395,7 +397,7 @@ def _meta(session: SessionDir) -> dict | None:
 
 
 def write_run(session: SessionDir, events: list[dict],
-              segment_events: int = HARNESS_SEGMENT_EVENTS) -> Path:
+              segment_events: int = SEGMENT_EVENTS) -> Path:
     """Write `events` as events/r0000 (segments as StateSync lays them out),
     through a temporary directory renamed into place."""
     target = session.events / run_name(MIGRATED_RUN)
@@ -405,7 +407,7 @@ def write_run(session: SessionDir, events: list[dict],
 
 
 def migrate_session(session: SessionDir, *, dry_run: bool = False,
-                    segment_events: int = HARNESS_SEGMENT_EVENTS) -> dict:
+                    segment_events: int = SEGMENT_EVENTS) -> dict:
     """Convert one session; returns its report {status, ...counts}."""
     if run_numbers(session.events):
         return {"status": "skipped_existing"}
@@ -432,7 +434,7 @@ def _session_dirs(root: Path):
 
 
 def migrate_events(root: str | Path = SESSIONS_ROOT, *, dry_run: bool = False,
-                   segment_events: int = HARNESS_SEGMENT_EVENTS, quiet: bool = False) -> dict:
+                   segment_events: int = SEGMENT_EVENTS, quiet: bool = False) -> dict:
     """Every legacy session under `root` → events/r0000. Returns
     {stats: {status: count}, sessions: {relative path: report}}."""
     root = Path(root)

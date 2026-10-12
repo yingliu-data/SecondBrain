@@ -23,6 +23,7 @@ from protocol.allowlist import effective_tools
 from protocol.canonical import derive_id, sha256_hex
 from protocol.events import UNANSWERED, validate_log
 from protocol.fold import State, fold, replay, state_hash
+from protocol.ports import PORTS
 from tests.fakes.fake_llm import response, text, tool_calls
 
 SID = "sess-coord"
@@ -299,8 +300,8 @@ def make_cfg(extra_tools=(), **over) -> GuestConfig:
         session_id=SID, principal=Principal(user=USER, tenant=TENANT), model="fake-model",
         params={"temperature": 0}, tools=effective_tools({"tools": list(extra_tools)}),
         system_block={"base_prompt": "You are a test.", "profile": "", "memory_index": ""},
-        limits=limits, hooks={}, async_tools=False, question_timeout_s=int(QUESTION_S),
-        ui_attached=True, ports={"control": 5000, "bulk": 5001, "llm": 5010}, resume=False, at=T0,
+        limits=limits, async_tools=False, question_timeout_s=int(QUESTION_S),
+        ui_attached=True, ports=dict(PORTS), resume=False, at=T0,
     )
     kw.update(over)
     return GuestConfig(**kw)

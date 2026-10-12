@@ -1,7 +1,7 @@
 """guest.bulk — the :5001 bulk channel from the guest's side
 (docs/PROTOCOL.md).
 
-  BulkClient(connector, session_id, port=5001, timeout_s=60)
+  BulkClient(connector, session_id, port=protocol.ports.BULK, timeout_s=60)
     put(kind, path, data: bytes, sha256=None) -> None   spill | workspace | manifest
     get_log(after_seq=0) -> (events, last_seq) the host's acked events, in seq order
   workspace_files(workspace, digests=None) -> ([{path, bytes, sha256, mode}], {path: abs})
@@ -24,20 +24,21 @@ re-hashing unchanged files across settles.
 """
 from __future__ import annotations
 
-import json
 import logging
 import os
 import socket
 import stat
 
-from guest.ops import HARNESS_DIR, _file_digest
+from guest.ops import HARNESS_DIR
 from protocol import bulk as proto
 from protocol.bulk import BulkError
 from protocol.canonical import canonical_json, is_int
+from protocol.fsio import file_sha256
+from protocol.ports import BULK
 
 log = logging.getLogger("guest.bulk")
 
-BULK_PORT = 5001
+BULK_PORT = BULK
 MAX_UPLOAD_BYTES = 8 * 1024 * 1024
 TIMEOUT_S = 60.0
 
@@ -89,27 +90,8 @@ class BulkClient:
                 payload = proto.read_exact(rfile, n)
             except OSError as exc:
                 raise BulkError(f"get log: {exc}") from None
-        if proto.sha256_hex(payload) != reply.get("sha256"):
-            raise BulkError("get log: payload sha256 does not match the reply")
-        events = []
-        for line in payload.splitlines():
-            if not line.strip():
-                continue
-            try:
-                ev = json.loads(line.decode("utf-8"))
-            except (UnicodeDecodeError, ValueError) as exc:
-                raise BulkError(f"get log: bad event line: {exc}") from None
-            if not isinstance(ev, dict):
-                raise BulkError("get log: event line is not an object")
-            events.append(ev)
         last_seq = reply.get("last_seq")
-        if not is_int(last_seq, after_seq):
-            raise BulkError(f"get log: bad reply.last_seq {last_seq!r}")
-        seqs = [e.get("seq") for e in events]
-        if seqs != list(range(after_seq + 1, after_seq + 1 + len(events))) or (
-                events and seqs[-1] != last_seq) or (not events and last_seq != after_seq):
-            raise BulkError(f"get log: seqs are not {after_seq + 1}..{last_seq} gapless")
-        return events, last_seq
+        return proto.decode_log(payload, reply.get("sha256"), after_seq, last_seq), last_seq
 
     def _connect(self) -> socket.socket:
         try:
@@ -156,7 +138,7 @@ def workspace_files(workspace, digests: dict | None = None) -> tuple[list[dict],
                 continue
             key = (st.st_size, st.st_mtime_ns, st.st_ino)
             cached = cache.get(rel)
-            digest = cached[1] if cached is not None and cached[0] == key else _file_digest(full)
+            digest = cached[1] if cached is not None and cached[0] == key else file_sha256(full)
             if digest is None:
                 continue
             seen[rel] = (key, digest)

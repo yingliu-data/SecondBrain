@@ -24,6 +24,8 @@ import re
 import shutil
 from pathlib import Path
 
+from protocol.limits import DEFAULT_LIMITS
+
 READ_DEFAULT_LIMIT = 2000
 READ_MAX_LINE_CHARS = 2000
 GREP_MAX_MATCHES = 500
@@ -500,7 +502,7 @@ def bash_command(args: dict, limits=None) -> tuple[list[str], float]:
             if isinstance(op, dict):
                 timeout = op.get("guest")
         if not timeout:
-            timeout = 120
+            timeout = DEFAULT_LIMITS["op_timeout_s"]["guest"]
     shell = shutil.which("bash") or "/bin/sh"
     return [shell, "-c", args["command"]], float(timeout)
 

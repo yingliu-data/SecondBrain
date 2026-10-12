@@ -33,6 +33,11 @@ Workspace manifest (settle.manifest and the "manifest" put):
   files sorted by path; ".spill/" and ".git/" excluded. manifest() is the one
   place that sorts and excludes: a walk hands it every file it found.
 
+The log return payload: encode_log(events) is the one byte form (canonical
+JSON, one event per line, "\n"-terminated); decode_log(payload, sha256,
+after_seq, last_seq) checks the digest, parses the lines and checks the seqs
+run gapless from after_seq + 1 to last_seq (BulkError otherwise).
+
 Wire paths: SPILL_DIR (".spill", spill puts go under it) and MANIFEST_PATH
 ("manifest.json", the manifest put's path).
 """
@@ -40,7 +45,7 @@ from __future__ import annotations
 
 import json
 
-from protocol.canonical import is_int, sha256_hex
+from protocol.canonical import canonical_json, is_int, sha256_hex
 
 OPS = frozenset({"put", "get"})
 PUT_KINDS = frozenset({"spill", "workspace", "manifest"})
@@ -175,3 +180,35 @@ def manifest(files: list[dict]) -> dict:
     out.sort(key=lambda f: f["path"])
     return {"version": MANIFEST_VERSION, "files": out,
             "total_bytes": sum(f["bytes"] for f in out)}
+
+
+# ---------------------------------------------------------------- the log return
+def encode_log(events: list[dict]) -> bytes:
+    """The get-log payload: one canonical JSON event per line, in the given order."""
+    return b"".join(canonical_json(ev).encode("utf-8") + b"\n" for ev in events)
+
+
+def decode_log(payload: bytes, sha256, after_seq: int, last_seq) -> list[dict]:
+    """The events of a get-log payload, verified against the reply: the
+    sha256 matches, every line is a JSON object, and the seqs run gapless
+    from after_seq + 1 to last_seq (none at all when last_seq == after_seq)."""
+    if sha256_hex(payload) != sha256:
+        raise BulkError("get log: payload sha256 does not match the reply")
+    events = []
+    for line in payload.splitlines():
+        if not line.strip():
+            continue
+        try:
+            ev = json.loads(line.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise BulkError(f"get log: bad event line: {exc}") from None
+        if not isinstance(ev, dict):
+            raise BulkError("get log: event line is not an object")
+        events.append(ev)
+    if not is_int(last_seq, after_seq):
+        raise BulkError(f"get log: bad reply.last_seq {last_seq!r}")
+    seqs = [e.get("seq") for e in events]
+    if seqs != list(range(after_seq + 1, after_seq + 1 + len(events))) or (
+            events and seqs[-1] != last_seq) or (not events and last_seq != after_seq):
+        raise BulkError(f"get log: seqs are not {after_seq + 1}..{last_seq} gapless")
+    return events

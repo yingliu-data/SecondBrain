@@ -95,14 +95,18 @@ from guest import tools
 from guest.mcp import GONE, McpAborted, McpError
 from guest.tools import builtin
 from protocol.bulk import spill_path as bulk_spill_path
+from protocol.canonical import sha256_hex
+from protocol.clock import elapsed_ms
+from protocol.fsio import file_sha256
+from protocol.limits import DEFAULT_LIMITS
 
 log = logging.getLogger("guest.ops")
 
 HARNESS_DIR = builtin.HARNESS_DIR     # the guest's own top-level dir (spill, todo.json)
 LOCAL_SPILL_DIR = "spill"             # local spill copies: {workspace}/.harness/spill/
-DEFAULT_SPILL_THRESHOLD = 2000
-DEFAULT_SPILL_QUOTA = 50_000_000
-DEFAULT_OP_TIMEOUT = 120.0
+DEFAULT_SPILL_THRESHOLD = DEFAULT_LIMITS["spill_threshold"]
+DEFAULT_SPILL_QUOTA = DEFAULT_LIMITS["spill_quota_bytes"]
+DEFAULT_OP_TIMEOUT = float(DEFAULT_LIMITS["op_timeout_s"]["guest"])
 RESEND_TIMEOUT_S = 30.0               # send_mcp: a fire-and-forget re-send nobody waits for
 LOST_MCP = "error: operation lost (the gateway forwarder no longer holds this call)"
 KILLED, DROPPED = "killed", "dropped"  # _Job.stop: abort_all (report "killed") / cancel, detach (report nothing)
@@ -166,25 +170,13 @@ def workspace_tree_id(workspace: Path) -> str:
         if p.is_symlink():
             digest = _symlink_digest(p)
         elif p.is_file():
-            digest = _file_digest(p)
+            digest = file_sha256(p)
             if digest is None:
                 continue
         else:
             continue
         h.update(rel.encode("utf-8") + b"\0" + digest.encode() + b"\n")
     return h.hexdigest()
-
-
-def _file_digest(path) -> str | None:
-    """sha256 hex of a file's bytes; None when it cannot be read."""
-    fh = hashlib.sha256()
-    try:
-        with open(path, "rb") as f:
-            for chunk in iter(lambda: f.read(1 << 16), b""):
-                fh.update(chunk)
-    except OSError:
-        return None
-    return fh.hexdigest()
 
 
 def _symlink_digest(path) -> str:
@@ -234,7 +226,7 @@ class _TreeCache:
                 seen[rel] = cached
                 continue
             try:
-                digest = _symlink_digest(entry.path) if link else _file_digest(entry.path)
+                digest = _symlink_digest(entry.path) if link else file_sha256(entry.path)
             except OSError:
                 digest = None
             if digest is not None:
@@ -519,7 +511,7 @@ class OperationManager:
             "ok": bool(ok),
             "content": content,
             "state": state,
-            "duration_ms": int((time.monotonic() - started) * 1000),
+            "duration_ms": elapsed_ms(started),
             "spill": spill,
         }
         self.inbound.put(("op", call_id, result))
@@ -553,7 +545,7 @@ class OperationManager:
             with self._lock:
                 self._spill_used -= len(data)
             return head + f"\n[truncated: {dropped} chars; spill failed: {e.strerror or e}]", None
-        spill = {"path": str(path), "sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data)}
+        spill = {"path": str(path), "sha256": sha256_hex(data), "bytes": len(data)}
         if self.bulk is not None:
             spill["bulk_path"] = bulk_spill_path(f"{call_id}.txt")
             try:

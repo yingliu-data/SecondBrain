@@ -9,6 +9,7 @@ import pytest
 
 from guest.context import Request
 from guest.provider import DIVERGENCE_MARK, DeltaRelay, Provider, ProviderError, assemble_chunks
+from protocol.ports import LLM
 from protocol.sse import (
     DONE_FRAME, iter_sse_data, response_chunks, split_arguments, split_words, sse_frame,
 )
@@ -33,7 +34,7 @@ def llm(tmp_path):
 
 def provider(tmp_path, **kw) -> Provider:
     kw.setdefault("sleep", lambda s: None)
-    return Provider(UnixConnector(str(tmp_path)), port=5010, model="fake-model", timeout_s=5, **kw)
+    return Provider(UnixConnector(str(tmp_path)), port=LLM, model="fake-model", timeout_s=5, **kw)
 
 
 def test_chat_completion_posts_the_vllm_shape_and_returns_the_response(tmp_path, llm):

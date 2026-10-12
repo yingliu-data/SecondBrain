@@ -12,6 +12,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 from starlette.types import ASGIApp, Receive, Scope, Send
+from protocol.mcp import INTERNAL_TOOLS_PATH
 
 from app import internal, tool_server
 from app.config import GatewayConfig, Settings
@@ -25,7 +26,7 @@ for _noisy in ("mcp.server.lowlevel.server", "mcp.server.streamable_http"):
     logging.getLogger(_noisy).setLevel(logging.WARNING)
 
 # Routes whose callers must stamp X-SB-User/Tenant/Session.
-IDENTITY_PATHS = {"/mcp", "/internal/tools"}
+IDENTITY_PATHS = {"/mcp", INTERNAL_TOOLS_PATH}
 
 
 class AuthMiddleware:

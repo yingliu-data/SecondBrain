@@ -14,6 +14,7 @@ on:
       - 'pyproject.toml'                          # workspace root + the one lock
       - 'uv.lock'
       - '.github/workflows/build_mcp_gateway.yml'
+      - '.github/workflows/test.yml'
   push:
     branches:
       - main
@@ -24,33 +25,18 @@ on:
       - 'pyproject.toml'                          # workspace root + the one lock
       - 'uv.lock'
       - '.github/workflows/build_mcp_gateway.yml'
+      - '.github/workflows/test.yml'
 
 permissions:
   contents: read
   packages: write
 
 jobs:
+  # The suite from test.yml (workflow_call), not a copy of its job.
   test:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v6
-        with:
-          enable-cache: true
-          version: '0.12.3'
-          cache-dependency-glob: uv.lock
-
-      # The workspace lock, synced for this member only (test.yml runs
-      # every suite).
-      - name: Sync workspace (mcp-gateway)
-        run: uv sync --frozen --package mcp-gateway
-
-      - name: Run tests
-        working-directory: mcp-gateway
-        run: uv run --frozen pytest -q
+    uses: ./.github/workflows/test.yml
+    with:
+      suites: '["mcp-gateway"]'
 
   build:
     needs: test

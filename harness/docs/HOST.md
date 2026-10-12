@@ -5,7 +5,22 @@ guest, the HTTP API both drivers serve, and the agent-api configuration the
 harness depends on. The wire is docs/PROTOCOL.md, the Temporal path
 docs/FLOWS.md, the host log docs/EVENTS.md "Host log", the gateway
 docs/GATEWAY.md. The module docstrings (`worker.py`, `state_sync.py`,
-`gateway_forwarder.py`, `sandbox/firecracker.py`) carry the details.
+`gateway_forwarder.py`, `sandbox/firecracker.py`, `sandbox/base_snapshot.py`)
+carry the details.
+
+Shared definitions come from `protocol` (one home each): the ports
+(`protocol.ports`), the limit defaults and `SEGMENT_EVENTS`
+(`protocol.limits`; `Worker.limits()` starts from `DEFAULT_LIMITS` and
+applies only the `HARNESS_*` env and tenant overrides, whose own defaults are
+`DEFAULT_LIMITS` too), atomic writes and file digests (`protocol.fsio`: tickets
+and `vm/parked.json` durable, `session.json` and snapshot `META.json` renamed
+without fsync as before), `now_ms`/`now_iso`/`elapsed_ms` (`protocol.clock`),
+the usage rule (`protocol.usage`), the log return bytes
+(`protocol.bulk.encode_log`), the bearer and internal paths (`protocol.mcp`)
+and `HARNESS_VERSION` (`protocol.version`). The Temporal defaults
+(`TEMPORAL_TASK_QUEUE`, `TEMPORAL_NAMESPACE`, `HARNESS_MAX_QUEUE_WAIT_S`) are
+`flows`' constants. Events per segment are a constant, not a knob (the
+store finds a seq's segment by it).
 
 ## 1. Worker lifecycle
 
@@ -14,7 +29,7 @@ running → parking → parked → booting ...).
 
 | Step | What the worker does |
 |---|---|
-| boot | A fresh session restores the BASE snapshot when the sandbox has one, else a rootfs start; `hello{resume: false}`. |
+| boot | A fresh session restores the BASE snapshot when the sandbox has one, else a rootfs start; `hello{resume: false}`. The guest's `session_start.harness_version` is checked against the host's `HARNESS_VERSION`: a mismatch logs a `harness_skew{guest, host}` host event (warn only). |
 | park | Control `park{reason}`, wait for the acked `parked`, close the guest's :5000/:5001/:5011 listeners (held gateway calls keep running), `sandbox.snapshot({session}/vm/snapshot)`, write `vm/parked.json` for a restarted worker. A guest that parks itself on a question is adopted the same way. |
 | wake | The next task, `ui_response` or `side_result` of a parked session restores the session snapshot (no hello; `seq`/`cseq` continue) and sends the held controls, `ui_response` first. Fallback: base restore + `hello{resume: true}` + log return. |
 | idle | `HARNESS_SESSION_IDLE_S` (1800) after a settle: park, snapshot, destroy. |
@@ -98,6 +113,14 @@ snapshot_dir=None)`, `snapshot(snapshot_dir)`, `has_snapshot(snapshot_dir=None)`
 - `restore` raises `SandboxError` before launching anything when the snapshot
   is missing or was taken from another image or Firecracker version; the
   worker then falls back to `start()`.
+- Unix sockets at any path length (`app/host/uds.py`: `bind_unix` for the
+  `Endpoints` listeners, `connect_unix` and `firecracker_path` for the
+  Firecracker API socket; the connect half is `protocol.uds`, which the
+  guest's test connector uses too): a path past sun_path's limit goes
+  through `/proc/self/fd/{dirfd}/{name}`.
+- The base-snapshot build is `sandbox/base_snapshot.py` (`python -m
+  app.host.sandbox.base_snapshot build-base|check-base`; the old
+  `python -m app.host.sandbox.firecracker ...` still runs it).
 - `LocalSandbox` (tests, no KVM) emulates it: snapshot = SIGSTOP the parked
   guest, restore = SIGCONT it (or start a guest process when none is kept).
   Its guest workspace is the private `{session}/vm/workspace`, so nothing the

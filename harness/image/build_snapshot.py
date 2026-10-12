@@ -12,41 +12,36 @@ with no listener show up as packets in Firecracker's metrics), pauses,
 snapshots into `{cache}/base/{vmstate,mem}` and writes `MANIFEST.json`.
 
 Configuration is the agent-api's HARNESS_* environment (`make snapshot` fills
-in out/ defaults). The logic lives in agent-api/app/host/sandbox/firecracker.py
-(stdlib-only); this script loads that file directly, so neither the agent-api
-package nor its dependencies need to be installed. Inside the agent-api
-container the same thing is `python -m app.host.sandbox.firecracker build-base`.
+in out/ defaults). The logic lives in agent-api/app/host/sandbox/base_snapshot.py
+(standard library, `protocol` and the firecracker backend only); this script
+puts agent-api/ and harness/ on sys.path and runs its main(), so neither the
+agent-api's dependencies nor a virtualenv are needed. Inside the agent-api
+container the same thing is `python -m app.host.sandbox.base_snapshot build-base`.
+HARNESS_AGENT_API_ROOT points at another agent-api checkout.
 """
 from __future__ import annotations
 
-import importlib.util
 import os
 import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-DEFAULT_MODULE = HERE.parent.parent / "agent-api" / "app" / "host" / "sandbox" / "firecracker.py"
-
-
-def load_sandbox_module(path: Path):
-    spec = importlib.util.spec_from_file_location("harness_fc_sandbox", path)
-    if spec is None or spec.loader is None:
-        raise SystemExit(f"cannot load {path}")
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = mod          # dataclasses look the module up by name
-    spec.loader.exec_module(mod)
-    return mod
+HARNESS_ROOT = HERE.parent                                  # protocol/
+DEFAULT_AGENT_API = HARNESS_ROOT.parent / "agent-api"       # app/host/sandbox/
 
 
 def main() -> int:
-    path = Path(os.environ.get("HARNESS_SANDBOX_MODULE", DEFAULT_MODULE))
-    if not path.is_file():
-        print(f"[snapshot] error: {path} not found (set HARNESS_SANDBOX_MODULE)", file=sys.stderr)
+    agent_api = Path(os.environ.get("HARNESS_AGENT_API_ROOT", DEFAULT_AGENT_API))
+    module = agent_api / "app" / "host" / "sandbox" / "base_snapshot.py"
+    if not module.is_file():
+        print(f"[snapshot] error: {module} not found (set HARNESS_AGENT_API_ROOT)", file=sys.stderr)
         return 2
     if not os.access("/dev/kvm", os.R_OK | os.W_OK) and "--help" not in sys.argv:
         print("[snapshot] warning: /dev/kvm is not accessible; Firecracker will fail to boot",
               file=sys.stderr)
-    return load_sandbox_module(path).main(sys.argv[1:])
+    sys.path[:0] = [str(agent_api), str(HARNESS_ROOT)]
+    from app.host.sandbox.base_snapshot import main as snapshot_main
+    return snapshot_main(sys.argv[1:])
 
 
 if __name__ == "__main__":

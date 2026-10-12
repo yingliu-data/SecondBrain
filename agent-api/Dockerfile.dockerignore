@@ -14,6 +14,9 @@
 !agent-api/app
 !mcp-gateway/pyproject.toml
 flows/flows/tests
+# ...but the stub activities: `python -m flows.worker` (docs/FLOWS.md 6.5) imports them
+!flows/flows/tests/__init__.py
+!flows/flows/tests/stubs.py
 **/__pycache__
 **/*.pyc
 **/.venv

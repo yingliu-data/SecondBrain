@@ -14,7 +14,7 @@ package `flows`). Date: 2026-10-07.
 | Docker image `temporalio/temporal:latest` (same dev server) | CLI 1.9.1, Server 1.32.0, UI 2.54.1 |
 
 ```
-cd flows && uv sync && uv run pytest -q        # 12 passed in 11 s (time-skipping server)
+cd flows && uv run pytest -q                  # 12 passed in 11 s (time-skipping server; `uv sync --all-packages` at the root first)
 FLOWS_TEST_ENV=local uv run pytest -q          # 12 passed in 13 s (CLI dev server, in-memory)
 FLOWS_TEST_ENV=external TEMPORAL_TEST_ADDRESS=localhost:17233 uv run pytest -q
                                                # 12 passed in 21 s (docker dev server, SQLite file)

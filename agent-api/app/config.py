@@ -1,11 +1,16 @@
 import os
 
+from flows import NAMESPACE as DEFAULT_NAMESPACE, TASK_QUEUE
+from flows.activities import MAX_QUEUE_WAIT_S
+from protocol.limits import DEFAULT_LIMITS, HELLO_TIMEOUT_S, QUESTION_TIMEOUT_S
+from protocol.ports import PORTS
+
 # ── LLM Provider (local vLLM only) ──
 LLM_URL = os.environ.get("LLM_URL", "http://secondbrain-llm:8080")
 LLM_MODEL = os.environ.get("LLM_MODEL", "qwen3-14b")
 
 LLM_TIMEOUT = int(os.environ.get("LLM_TIMEOUT", 120))         # seconds
-LLM_MAX_TOKENS = int(os.environ.get("LLM_MAX_TOKENS", 512))
+LLM_MAX_TOKENS = int(os.environ.get("LLM_MAX_TOKENS", DEFAULT_LIMITS["max_tokens"]))
 LLM_TEMPERATURE = float(os.environ.get("LLM_TEMPERATURE", 0.7))
 
 # Qwen3 thinking during agent-loop turns. With realistic tool sets (10+ real
@@ -33,8 +38,9 @@ MCP_GATEWAY_TOOLS_TIMEOUT_S = float(os.environ.get("MCP_GATEWAY_TOOLS_TIMEOUT_S"
 # (calls run up to 45 min).
 MCP_GATEWAY_CALL_TIMEOUT_S = float(os.environ.get("MCP_GATEWAY_CALL_TIMEOUT_S", 3600))
 MAX_INPUT = int(os.environ.get("MAX_INPUT_LENGTH", 4096))
-MAX_TOOLS = int(os.environ.get("MAX_TOOL_CALLS_PER_TURN", 10))
-TOOL_TIMEOUT = int(os.environ.get("TOOL_TIMEOUT", 60))        # seconds for device tool response
+MAX_TOOLS = int(os.environ.get("MAX_TOOL_CALLS_PER_TURN", DEFAULT_LIMITS["max_tools"]))
+# seconds for a device tool's response (limits.op_timeout_s.device)
+TOOL_TIMEOUT = int(os.environ.get("TOOL_TIMEOUT", DEFAULT_LIMITS["op_timeout_s"]["device"]))
 
 # ── Session Store (swap backend without touching agent code) ──
 # The harness engine runs on "dir" only; anything else is a startup error
@@ -81,9 +87,8 @@ HARNESS_GUEST_ROOT = os.environ.get(
     os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "harness")),
 )
 HARNESS_SANDBOX = os.environ.get("HARNESS_SANDBOX", "local")       # "local" | "firecracker"
-HARNESS_PORTS = {"control": 5000, "bulk": 5001, "llm": 5010,      # fixed
-                 "gateway": 5011}                                 # MCP gateway forwarder
-HARNESS_HELLO_TIMEOUT_S = int(os.environ.get("HARNESS_HELLO_TIMEOUT_S", 30))   # guest connect
+HARNESS_PORTS = dict(PORTS)          # fixed (protocol.ports); "gateway" = the MCP forwarder
+HARNESS_HELLO_TIMEOUT_S = int(os.environ.get("HARNESS_HELLO_TIMEOUT_S", HELLO_TIMEOUT_S))   # guest connect
 # host → guest heartbeat; also run_task's Temporal heartbeat (the
 # workflow's heartbeat timeout is 120 s; an abort reaches the activity on one)
 HARNESS_HEARTBEAT_S = int(os.environ.get("HARNESS_HEARTBEAT_S", 60))
@@ -91,28 +96,28 @@ HARNESS_KEEPALIVE_S = int(os.environ.get("HARNESS_KEEPALIVE_S", 15))            
 # A task's wall clock when its tenant sets no `wall_clock_s` (the tenant's
 # value wins; both paths read it through SessionConfig, worker.session_config).
 # It travels in the `task` message; the guest settles `timeout` at it.
-HARNESS_WALL_CLOCK_S = int(os.environ.get("HARNESS_WALL_CLOCK_S", 600))
+HARNESS_WALL_CLOCK_S = int(os.environ.get("HARNESS_WALL_CLOCK_S", DEFAULT_LIMITS["wall_clock_s"]))
 # Running tasks across all sessions (both paths; a task parked on a question
 # holds none). Tasks over the cap wait for a slot.
 HARNESS_MAX_CONCURRENT_TASKS = int(os.environ.get("HARNESS_MAX_CONCURRENT_TASKS", 5))
 # Workflow path: how long a task may wait to start (Temporal's task queue, a
 # slot of the cap above) before run_task times out. Its Temporal timeouts are
-# wall_clock_s + 30 + this (flows.activities.run_task_timeout_s), a safety net:
-# the task's own time limit counts from when it took its slot.
-HARNESS_MAX_QUEUE_WAIT_S = int(os.environ.get("HARNESS_MAX_QUEUE_WAIT_S", 3600))
+# wall_clock_s + WALL_CLOCK_GRACE_S + this (flows.activities.run_task_timeout_s),
+# a safety net: the task's own time limit counts from when it took its slot.
+HARNESS_MAX_QUEUE_WAIT_S = int(os.environ.get("HARNESS_MAX_QUEUE_WAIT_S", MAX_QUEUE_WAIT_S))
 # hello.config.async_tools when the tenant sets no `async_tools`
 HARNESS_ASYNC_TOOLS = os.environ.get("HARNESS_ASYNC_TOOLS", "false").lower() in ("1", "true", "yes")
-HARNESS_MAX_TURNS = int(os.environ.get("HARNESS_MAX_TURNS", 12))
-HARNESS_QUESTION_TIMEOUT_S = int(os.environ.get("HARNESS_QUESTION_TIMEOUT_S", 300))
-HARNESS_HOST_TOOL_TIMEOUT_S = int(os.environ.get("HARNESS_HOST_TOOL_TIMEOUT_S", 120))
-HARNESS_SPILL_THRESHOLD = int(os.environ.get("HARNESS_SPILL_THRESHOLD", 2000))
-HARNESS_SEGMENT_EVENTS = int(os.environ.get("HARNESS_SEGMENT_EVENTS", 1000))   # events per segment
-# The guest outlives a settle (one long-lived guest per session, one log
-# run); the idle timer parks it. "true" restores the old guest-per-task runs.
-HARNESS_STOP_AT_SETTLE = os.environ.get("HARNESS_STOP_AT_SETTLE", "false").lower() in ("1", "true", "yes")
+HARNESS_MAX_TURNS = int(os.environ.get("HARNESS_MAX_TURNS", DEFAULT_LIMITS["max_turns"]))
+HARNESS_QUESTION_TIMEOUT_S = int(os.environ.get("HARNESS_QUESTION_TIMEOUT_S", QUESTION_TIMEOUT_S))
+HARNESS_HOST_TOOL_TIMEOUT_S = int(os.environ.get("HARNESS_HOST_TOOL_TIMEOUT_S",
+                                                 DEFAULT_LIMITS["op_timeout_s"]["host"]))
+HARNESS_SPILL_THRESHOLD = int(os.environ.get("HARNESS_SPILL_THRESHOLD", DEFAULT_LIMITS["spill_threshold"]))
+# Events per segment file: protocol.limits.SEGMENT_EVENTS, a constant (not a
+# knob: the store finds a seq's segment by it). The guest outlives a settle
+# (one long-lived guest per session, one log run); the idle timer parks it.
 # Snapshots, park and resume
 HARNESS_SESSION_IDLE_S = float(os.environ.get("HARNESS_SESSION_IDLE_S", 1800))  # idle -> park + snapshot + destroy
-HARNESS_PARK_GRACE_S = float(os.environ.get("HARNESS_PARK_GRACE_S", 30))        # hello limit park_grace_s
+HARNESS_PARK_GRACE_S = float(os.environ.get("HARNESS_PARK_GRACE_S", DEFAULT_LIMITS["park_grace_s"]))  # hello limit park_grace_s
 HARNESS_PARK_TIMEOUT_S = float(os.environ.get("HARNESS_PARK_TIMEOUT_S", 60))    # park sent -> acked `parked` (> park_grace_s)
 HARNESS_MAX_RESUMES = int(os.environ.get("HARNESS_MAX_RESUMES", 1))             # death resumes per task
 # Graceful shutdown parks every running guest (snapshot; a restart adopts its
@@ -123,8 +128,9 @@ HARNESS_SHUTDOWN_PARK_S = float(os.environ.get("HARNESS_SHUTDOWN_PARK_S", 8))
 HARNESS_BULK_MAX_BYTES = int(os.environ.get("HARNESS_BULK_MAX_BYTES", 64 * 1024 * 1024))  # one :5001 put
 HARNESS_TOKEN_BUDGET = int(os.environ.get("HARNESS_TOKEN_BUDGET", 0))        # total_tokens per session; 0 = unlimited
 # Context window the guest plans against (compaction trigger: estimate > window - reserve).
-HARNESS_CONTEXT_WINDOW_TOKENS = int(os.environ.get("HARNESS_CONTEXT_WINDOW_TOKENS", 32768))
-HARNESS_RESERVE_TOKENS = int(os.environ.get("HARNESS_RESERVE_TOKENS", 4096))
+HARNESS_CONTEXT_WINDOW_TOKENS = int(os.environ.get("HARNESS_CONTEXT_WINDOW_TOKENS",
+                                                   DEFAULT_LIMITS["context_window_tokens"]))
+HARNESS_RESERVE_TOKENS = int(os.environ.get("HARNESS_RESERVE_TOKENS", DEFAULT_LIMITS["reserve_tokens"]))
 
 # ── Temporal ──
 # Configuration, not liveness: set -> every input goes through the session
@@ -135,8 +141,8 @@ TEMPORAL_ADDRESS = os.environ.get("TEMPORAL_ADDRESS", "")
 TEMPORAL_READY_WAIT_S = float(os.environ.get("TEMPORAL_READY_WAIT_S", 5))
 TEMPORAL_RETRY_AFTER_S = int(os.environ.get("TEMPORAL_RETRY_AFTER_S", 5))
 TEMPORAL_RECONNECT_S = float(os.environ.get("TEMPORAL_RECONNECT_S", 5))   # connect / worker restart backoff
-TEMPORAL_NAMESPACE = os.environ.get("TEMPORAL_NAMESPACE", "secondbrain")
-TEMPORAL_TASK_QUEUE = os.environ.get("TEMPORAL_TASK_QUEUE", "secondbrain-agent")   # flows.TASK_QUEUE
+TEMPORAL_NAMESPACE = os.environ.get("TEMPORAL_NAMESPACE", DEFAULT_NAMESPACE)
+TEMPORAL_TASK_QUEUE = os.environ.get("TEMPORAL_TASK_QUEUE", TASK_QUEUE)
 TEMPORAL_CONNECT_TIMEOUT_S = float(os.environ.get("TEMPORAL_CONNECT_TIMEOUT_S", 10))
 # abort sent to the guest -> how long to wait for its settle (run_task
 # cancellation, deliver of escalated/aborted)

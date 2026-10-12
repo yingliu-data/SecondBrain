@@ -3,8 +3,9 @@
 
 The guest never listens. A `Connector` opens an outbound stream to a port:
 `VsockConnector(cid=2)` over AF_VSOCK in the microVM, `UnixConnector(dir)`
-over the Unix socket `{dir}/v.sock_{port}` in tests (the name Firecracker
-gives the host side of a guest-initiated vsock connection).
+over the Unix socket `{dir}/v.sock_{port}` in tests (protocol.ports.socket_name:
+the name Firecracker gives the host side of a guest-initiated vsock
+connection; protocol.uds.connect_unix, so a long test directory works too).
 
 `Transport(connector, inbound, session_id=None)` runs two threads:
 
@@ -55,10 +56,12 @@ from typing import Protocol
 
 from protocol import messages
 from protocol.messages import ProtocolError
+from protocol.ports import CONTROL, socket_name
+from protocol.uds import connect_unix
 
 log = logging.getLogger("guest.transport")
 
-CONTROL_PORT = 5000
+CONTROL_PORT = CONTROL
 BACKOFF_INITIAL_S = 0.1
 BACKOFF_MAX_S = 5.0
 # 5 ms: after a restore the first connect waits half a poll on average (2.5 ms,
@@ -76,7 +79,7 @@ class Connector(Protocol):
 
 def socket_path(dir, port: int) -> str:
     """The Unix-socket double of vsock port `port`: {dir}/v.sock_{port}."""
-    return os.path.join(str(dir), f"v.sock_{port}")
+    return os.path.join(str(dir), socket_name(port))
 
 
 class UnixConnector:
@@ -89,13 +92,7 @@ class UnixConnector:
         return socket_path(self.dir, port)
 
     def connect(self, port: int) -> socket.socket:
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        try:
-            sock.connect(self.path(port))
-        except OSError:
-            sock.close()
-            raise
-        return sock
+        return connect_unix(self.path(port))
 
     def __repr__(self) -> str:
         return f"UnixConnector({self.dir!r})"

@@ -9,9 +9,10 @@
 
 and `config` carries `model`, `params`, `tools` (host/device/mcp entries,
 turned into the effective list by protocol.allowlist.effective_tools),
-`limits` (merged over the Limits defaults), `hooks`, `async_tools`,
-`question_timeout_s`, `ui_attached`, `ports` (`gateway`, default 5011;
-a port name this guest does not know is logged and ignored).
+`limits` (merged over the Limits defaults, protocol.limits.DEFAULT_LIMITS),
+`async_tools`, `question_timeout_s`, `ui_attached`, `ports` (default
+protocol.ports.PORTS; a port name this guest does not know is logged and
+ignored).
 Each tools entry may also carry `schema` (OpenAI function def; a bare
 `description` stands in when there is none), kept as `tool_schemas`, and
 `timeout_s`, kept as `tool_timeouts` (the op timeout of that tool's calls;
@@ -20,9 +21,9 @@ the config must equal protocol.SCHEMA_VERSION.
 
 Streaming and compaction: `params.stream` (bool, default True; the
 coordinator reads it with `stream_enabled(cfg)`) and the limits
-`context_window_tokens` (32768) and `reserve_tokens` (4096: the compaction
-threshold is window - reserve). Park: `park_grace_s` (30): how long running
-guest operations may finish after a `park` before they are killed. Questions:
+`context_window_tokens` and `reserve_tokens` (the compaction threshold is
+window - reserve). Park: `park_grace_s`: how long running guest operations
+may finish after a `park` before they are killed. Questions:
 `answer_wait_s` (int >= 0, default 0): > 0 means the host waits that long for
 an answer (the Temporal path), so a question deadline parks the task
 (`parked{reason: question, question_id}`) instead of denying it. The token budget is the host proxy's knob
@@ -40,11 +41,13 @@ from dataclasses import dataclass, field, fields, replace
 from protocol import SCHEMA_VERSION
 from protocol.allowlist import SIDES, effective_tools
 from protocol.canonical import hash_value, is_int
+from protocol.limits import DEFAULT_LIMITS, QUESTION_TIMEOUT_S, default_limits
+from protocol.ports import PORTS
 
 log = logging.getLogger("guest.config")
 
-DEFAULT_PORTS = {"control": 5000, "bulk": 5001, "llm": 5010, "gateway": 5011}
-DEFAULT_QUESTION_TIMEOUT_S = 300
+DEFAULT_PORTS = PORTS
+DEFAULT_QUESTION_TIMEOUT_S = QUESTION_TIMEOUT_S
 
 
 @dataclass(frozen=True)
@@ -53,21 +56,26 @@ class Principal:
     tenant: str
 
 
+def _default(name: str):
+    return field(default_factory=lambda: default_limits()[name])
+
+
 @dataclass
 class Limits:
-    wall_clock_s: int = 600              # a task whose task message names no wall_clock_s
-    max_tools: int = 10
-    max_turns: int = 12
-    max_tokens: int = 512
-    op_timeout_s: dict = field(default_factory=lambda: {"guest": 120, "host": 120, "device": 60, "mcp": 300})
-    spill_threshold: int = 2000
-    spill_quota_bytes: int = 50_000_000
-    grace_s: float = 1.0
-    idle_wake_s: int = 600
-    context_window_tokens: int = 32768   # the model's context length
-    reserve_tokens: int = 4096           # headroom kept for the response
-    park_grace_s: float = 30.0           # guest ops get this long after `park`, then killed
-    answer_wait_s: int = 0               # > 0 = a question deadline parks the task
+    """hello.config.limits; every default is protocol.limits.DEFAULT_LIMITS."""
+    wall_clock_s: int = DEFAULT_LIMITS["wall_clock_s"]   # a task whose task message names none
+    max_tools: int = DEFAULT_LIMITS["max_tools"]
+    max_turns: int = DEFAULT_LIMITS["max_turns"]
+    max_tokens: int = DEFAULT_LIMITS["max_tokens"]
+    op_timeout_s: dict = _default("op_timeout_s")        # per side
+    spill_threshold: int = DEFAULT_LIMITS["spill_threshold"]
+    spill_quota_bytes: int = DEFAULT_LIMITS["spill_quota_bytes"]
+    grace_s: float = DEFAULT_LIMITS["grace_s"]
+    idle_wake_s: int = DEFAULT_LIMITS["idle_wake_s"]
+    context_window_tokens: int = DEFAULT_LIMITS["context_window_tokens"]   # the model's context length
+    reserve_tokens: int = DEFAULT_LIMITS["reserve_tokens"]                 # headroom for the response
+    park_grace_s: float = DEFAULT_LIMITS["park_grace_s"]   # guest ops get this long after `park`
+    answer_wait_s: int = DEFAULT_LIMITS["answer_wait_s"]   # > 0 = a question deadline parks the task
 
 
 @dataclass
@@ -79,11 +87,10 @@ class GuestConfig:
     tools: list            # [{name, side, pin}] — the effective list (protocol.allowlist)
     system_block: dict     # {base_prompt, profile, memory_index}
     limits: Limits
-    hooks: dict
     async_tools: bool
     question_timeout_s: int
     ui_attached: bool
-    ports: dict            # {"control": 5000, "bulk": 5001, "llm": 5010, "gateway": 5011}
+    ports: dict            # protocol.ports.PORTS, hello overrides applied
     resume: bool
     at: int                # host clock at hello, ms
     # what hello.config.tools entries carry beyond {name, side, pin}
@@ -106,7 +113,6 @@ class GuestConfig:
             "params": self.params,
             "tools": self.tools,
             "limits": _limits_dict(self.limits),
-            "hooks": self.hooks,
             "async_tools": self.async_tools,
             "question_timeout_s": self.question_timeout_s,
             "ui_attached": self.ui_attached,
@@ -266,7 +272,6 @@ def from_hello(body) -> GuestConfig:
         tools=tools,
         system_block=_dict(body.get("system_block"), "system_block", {}),
         limits=_limits(config.get("limits")),
-        hooks=_dict(config.get("hooks"), "config.hooks", {}),
         async_tools=_bool(config.get("async_tools"), "config.async_tools", False),
         question_timeout_s=_int(config.get("question_timeout_s"), "config.question_timeout_s",
                                 DEFAULT_QUESTION_TIMEOUT_S),

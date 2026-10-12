@@ -22,14 +22,12 @@ from app.host.sandbox.firecracker import (
     FirecrackerConfig,
     FirecrackerSandbox,
     SandboxError,
-    build_base_snapshot,
     derive_guest_cid,
     image_version,
     image_version_from_shas,
-    main as fc_main,
     sha256_file,
-    wait_guest_idle,
 )
+from app.host.sandbox.base_snapshot import build_base_snapshot, main as fc_main, wait_guest_idle
 from test_sandbox_firecracker import (  # noqa: F401  (fixtures)
     _config,
     _from_vm_dir,

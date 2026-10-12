@@ -59,6 +59,7 @@ from typing import Callable
 
 import httpx
 
+from protocol.clock import elapsed_ms
 from protocol.mcp import CALL_HEADER, REATTACH_HEADER
 
 from app.config import INTERNAL_TOKEN, MCP_GATEWAY_CALL_TIMEOUT_S
@@ -196,7 +197,7 @@ class GatewayRelay:
         except httpx.HTTPError as e:
             logger.warning("gateway %s unreachable: %s", self.upstream_url, e)
             self.record({"op": "error", "source": "forwarder", "ok": False,
-                         "ms": int((time.monotonic() - started) * 1000),
+                         "ms": elapsed_ms(started),
                          "error": f"gateway unreachable: {e}"[:300]})
             entry.finish(502, error_body(f"gateway unreachable: {e}", "gateway_unreachable"))
             return

@@ -63,9 +63,6 @@ def ready() -> bool:
     return client is not None
 
 
-enabled = ready     # the old name
-
-
 async def wait_ready(timeout_s: float) -> bool:
     """ready() now or within `timeout_s` (Temporal connecting, or its
     worker being restarted)."""

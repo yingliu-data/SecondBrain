@@ -10,20 +10,18 @@ Storage layout::
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from app.config import USERS_ROOT
+from app.session.ids import is_safe_id
 
 # Profile sits in the system prompt on every turn — keep it cheap.
 _PROMPT_MAX_CHARS = 1200
 
-_SAFE_USER_RE = re.compile(r"^[A-Za-z0-9_\-]{1,64}$")
-
-
 def _user_dir(user_id: str) -> Path:
-    if not _SAFE_USER_RE.match(user_id):
+    # is_safe_id: fullmatch (the old `^...$` regex accepted a trailing newline)
+    if not is_safe_id(user_id):
         raise ValueError(f"user_id fails safe-path validation: {user_id!r}")
     return Path(USERS_ROOT) / user_id
 

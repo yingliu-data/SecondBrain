@@ -47,13 +47,15 @@ import socketserver
 import threading
 import time
 
+from protocol.ports import LLM, socket_name
+from protocol.uds import connect_unix
 from protocol.sse import DONE_FRAME, response_chunks, split_arguments, split_words, sse_frame  # noqa: F401
 
-PORT = 5010
+PORT = LLM
 
 
 def socket_path(directory: str, port: int = PORT) -> str:
-    return os.path.join(directory, f"v.sock_{port}")
+    return os.path.join(directory, socket_name(port))
 
 
 # ---------------------------------------------------------------- builders
@@ -300,6 +302,4 @@ class UnixConnector:
         self.dir = directory
 
     def connect(self, port: int) -> socket.socket:
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.connect(socket_path(self.dir, port))
-        return sock
+        return connect_unix(socket_path(self.dir, port))

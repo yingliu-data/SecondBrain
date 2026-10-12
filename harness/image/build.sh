@@ -3,7 +3,8 @@
 #
 #   build.sh pyz        harness/guest + harness/protocol -> out/guest.pyz   (stdlib zipapp
 #                       with precompiled .pyc: pyz_pack.py; measure_imports.py times it)
-#   build.sh rootfs     Dockerfile.rootfs -> docker export -> out/rootfs.ext4 (mkfs.ext4 -d)
+#   build.sh rootfs     Dockerfile.rootfs -> docker export -> out/rootfs.ext4 (mkfs.ext4 -d);
+#                       bakes out/GUEST_IMAGE_VERSION in as /opt/harness/IMAGE_VERSION
 #   build.sh kernel     pinned Firecracker CI kernel -> out/vmlinux (sha256 verified)
 #   build.sh workspace  out/workspace-template.img (sparse ext4; HARNESS_WORKSPACE_TEMPLATE)
 #   build.sh firecracker  pinned release tarball -> out/firecracker (host binary, sha256 verified)
@@ -98,6 +99,21 @@ PY
 }
 
 # ------------------------------------------------------------- rootfs
+# The guest's own image identity, baked into the rootfs as
+# /opt/harness/IMAGE_VERSION: harness-init passes it as --image-version, so
+# session_start.image_version names the image a guest runs. It cannot be
+# out/IMAGE_VERSION (that hashes rootfs.ext4 itself, which would contain it),
+# so it is the identity of the rootfs's inputs: first 16 hex of
+# sha256 over the sha256 of guest.pyz, Dockerfile.rootfs, harness-init,
+# pyz_pack.py and versions.env (the kernel pin, KERNEL_SHA256, is in
+# versions.env). out/IMAGE_VERSION stays the snapshot identity.
+guest_image_version() {
+    local f
+    for f in "$OUT/guest.pyz" "$HERE/Dockerfile.rootfs" "$HERE/harness-init" "$HERE/pyz_pack.py" "$HERE/versions.env"; do
+        sha256sum "$f" | cut -d' ' -f1
+    done | sha256sum | cut -c1-16
+}
+
 rootfs_size_mib() {  # rootfs_size_mib DIR
     if [ "${ROOTFS_MIB:-0}" -gt 0 ]; then echo "$ROOTFS_MIB"; return; fi
     local used; used="$(du -sm "$1" | cut -f1)"
@@ -161,6 +177,8 @@ build_rootfs() {
         log "rootfs.ext4 up to date"; return 0
     fi
     need docker
+    guest_image_version > "$OUT/GUEST_IMAGE_VERSION"
+    log "guest image version $(cat "$OUT/GUEST_IMAGE_VERSION") (/opt/harness/IMAGE_VERSION)"
     log "docker build $ROOTFS_IMAGE_TAG"
     docker build --quiet -f "$HERE/Dockerfile.rootfs" \
         --build-arg "ROOTFS_BASE_IMAGE=$ROOTFS_BASE_IMAGE" -t "$ROOTFS_IMAGE_TAG" "$HERE" >/dev/null
@@ -252,6 +270,7 @@ check() {
         fi
     done
     [ -f "$OUT/IMAGE_VERSION" ] && echo "[check] IMAGE_VERSION $(cat "$OUT/IMAGE_VERSION")"
+    [ -f "$OUT/GUEST_IMAGE_VERSION" ] && echo "[check] GUEST_IMAGE_VERSION $(cat "$OUT/GUEST_IMAGE_VERSION") (in the rootfs)"
     [ -f "$OUT/workspace-template.img" ] && printf '[check] %-22s %12s bytes (sparse, %s KiB used)\n' \
         workspace-template.img "$(stat -c %s "$OUT/workspace-template.img")" "$(du -k "$OUT/workspace-template.img" | cut -f1)"
     if [ -f "$OUT/vmlinux" ]; then
@@ -271,7 +290,7 @@ check() {
     fi
     if [ -f "$OUT/rootfs.ext4" ]; then
         if command -v debugfs >/dev/null 2>&1; then
-            for p in /sbin/harness-init /opt/harness/guest.pyz /usr/local/bin/python3.12 /bin/bash /usr/bin/git; do
+            for p in /sbin/harness-init /opt/harness/guest.pyz /opt/harness/IMAGE_VERSION /usr/local/bin/python3.12 /bin/bash /usr/bin/git; do
                 if debugfs -R "stat $p" "$OUT/rootfs.ext4" 2>/dev/null | grep -q 'Inode:'; then
                     echo "[check] rootfs has $p"
                 else echo "[check] rootfs MISSING $p"; rc=1; fi

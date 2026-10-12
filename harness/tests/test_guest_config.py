@@ -42,7 +42,7 @@ def test_happy_path():
     assert cfg.model == "qwen"
     assert cfg.params == {"temperature": 0.2}
     assert cfg.system_block["base_prompt"] == "be brief"
-    assert cfg.hooks == {"before_tool": ["sanitize"]}
+    assert not hasattr(cfg, "hooks")          # an older host's hello.config.hooks is ignored
     assert cfg.async_tools is False
     assert cfg.question_timeout_s == 90
     assert cfg.ui_attached is True
@@ -77,7 +77,6 @@ def test_defaults_for_optional_fields():
     cfg = from_hello(body)
     assert cfg.params == {}
     assert cfg.limits == Limits()
-    assert cfg.hooks == {}
     assert cfg.async_tools is False
     assert cfg.question_timeout_s == DEFAULT_QUESTION_TIMEOUT_S
     assert cfg.ui_attached is False
@@ -92,7 +91,7 @@ def test_ports_merge_over_defaults():
     body = hello()
     body["config"]["ports"] = {"llm": 6010}
     cfg = from_hello(body)
-    assert cfg.ports == {"control": 5000, "bulk": 5001, "llm": 6010, "gateway": 5011}
+    assert cfg.ports == {**DEFAULT_PORTS, "llm": 6010}
     body["config"]["ports"] = {"gateway": 6011}
     assert from_hello(body).ports["gateway"] == 6011
     body["config"]["ports"] = {"proxy": 5012, "gateway": 6011}   # unknown names are ignored

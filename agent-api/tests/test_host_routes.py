@@ -89,7 +89,7 @@ def test_harness_chat_streams_and_device_result_resolves(client):
     # thread through the tool-result route while the chat request is open.
     def answer_device(answers: list):
         def run():
-            deadline = time.time() + 5
+            deadline = time.time() + 30             # a condition wait: generous under load
             while time.time() < deadline and not DEVICE_CALLS.is_open("call_x"):
                 time.sleep(0.02)
             raw2, h2 = _headers("harn-key", {"tool_call_id": "call_x", "result": "[]"})
@@ -101,7 +101,7 @@ def test_harness_chat_streams_and_device_result_resolves(client):
     answers: list = []
     t = answer_device(answers)
     r = c.post("/api/v1/chat", content=raw, headers=h)
-    t.join(5)
+    t.join(30)
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("text/event-stream")
     assert answers and answers[0].json() == {"status": "ok"}
@@ -125,7 +125,7 @@ def test_harness_chat_streams_and_device_result_resolves(client):
     raw, h = _headers("harn-key", {"message": "again", "session_id": "s1"})
     t = answer_device(answers)
     r = c.post("/api/v1/chat", content=raw, headers=h)
-    t.join(5)
+    t.join(30)
     assert answers[-1].json() == {"status": "ok"}
     assert "event: done" in r.text and '"text": "one "' in r.text
     assert w.sandbox.starts == 2 and w.sync.runs() == [1, 2]

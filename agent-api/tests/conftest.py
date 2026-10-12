@@ -4,6 +4,9 @@ import os
 os.environ.setdefault("API_SECRET_KEY", "test-default-key")
 # No gateway unless a test points a Worker / skill at a fake one.
 os.environ.setdefault("MCP_GATEWAY_URL", "")
+# The guest's provider retry backoff (guest.main reads it; LocalSandbox
+# guests inherit the environment): 1 s, 2 s, 4 s in production.
+os.environ.setdefault("HARNESS_LLM_BACKOFF_S", "0.01")
 
 import json
 

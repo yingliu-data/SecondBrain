@@ -24,7 +24,7 @@ import logging
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from protocol.mcp import is_safe_id
+from protocol.mcp import GATEWAY_EVENT_IDENTITY as IDENTITY, GATEWAY_EVENTS_PATH, is_safe_id
 
 from app.config import INTERNAL_TOKEN
 from app.gateway.client import bearer_ok
@@ -33,8 +33,6 @@ from app.host.state_sync import host_log
 logger = logging.getLogger("gateway.events")
 
 router = APIRouter()
-
-IDENTITY = ("user", "tenant", "session_id")
 
 
 def record_gateway_event(payload: dict, *, sessions) -> bool:
@@ -50,7 +48,7 @@ def record_gateway_event(payload: dict, *, sessions) -> bool:
     return True
 
 
-@router.post("/internal/gateway-events")
+@router.post(GATEWAY_EVENTS_PATH)
 async def gateway_events(request: Request):
     from app.routes import chat            # the process's session store
 

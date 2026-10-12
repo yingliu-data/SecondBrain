@@ -26,7 +26,8 @@ from protocol import bulk as pbulk
 from protocol.canonical import hash_value
 from protocol.events import validate_log
 from protocol.fold import State, replay, state_hash, verify_checkpoints
-from protocol.messages import Inbox, Outbox, ProtocolError, control_message
+from protocol.messages import Inbox, Outbox, ProtocolError, control_message, encode
+from protocol.ports import CONTROL, socket_name
 from tests.fakes.fake_host import FakeHost
 from tests.test_guest_coordinator import (
     DEVICE, FakeOps, Scenario, T0, make_cfg, text, tool_calls,
@@ -323,8 +324,10 @@ def test_fresh_transport_takes_the_resume_hellos_cseq_as_its_floor(tmp_path):
         t.start()
         try:
             host.wait_connected()
-            host.redeliver(host.outbox.pending[2])       # a stale control before the hello: a gap
-            hello = host.send("hello", HELLO)
+            # a stale control right before the hello, in one write: the gap's
+            # re-ack must not let the host's resend of 1..4 overtake the hello
+            hello = host.send("hello", HELLO, deliver=False)
+            host.write_raw(encode(host.outbox.pending[2]) + encode(hello))
             assert hello["cseq"] == 5
             item = _wait(inbound, "control")
             assert item[1]["type"] == "hello"            # the stale one was never delivered
@@ -391,7 +394,7 @@ def test_idle_transport_polls_silently_until_a_listener_exists(tmp_path):
 def test_idle_transport_survives_a_reset_right_after_connect(tmp_path):
     """A snapshot restore resets vsock connections: a connection that dies
     before the host said anything sends the guest back to silent polling."""
-    path = os.path.join(str(tmp_path), "v.sock_5000")
+    path = os.path.join(str(tmp_path), socket_name(CONTROL))
     srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     srv.bind(path)
     srv.listen(8)

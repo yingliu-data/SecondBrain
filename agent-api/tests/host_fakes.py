@@ -29,7 +29,10 @@ from protocol.fold import fold, state_hash
 from guest.bulk import BulkClient
 from guest.transport import UnixConnector
 from protocol.messages import ack, encode, parse
+from protocol.ports import CONTROL, socket_name
+from protocol.uds import connect_unix
 from protocol.sse import DONE_FRAME, response_chunks, sse_frame
+from protocol.version import HARNESS_VERSION
 
 from app.host.sandbox import Sandbox, SandboxError
 
@@ -66,7 +69,8 @@ class FakeGuest:
     non-streamed whole-message delta), and `reasoning` fragments."""
 
     def __init__(self, script, *, guest_result="ok", exit_after_settle=True,
-                 dedupe=True, seq_start=0, die=False, resume_text="resumed answer"):
+                 dedupe=True, seq_start=0, die=False, resume_text="resumed answer",
+                 harness_version=HARNESS_VERSION):
         self.script = list(script)
         self.guest_result = guest_result
         self.exit_after_settle = exit_after_settle
@@ -98,16 +102,15 @@ class FakeGuest:
         self._suspending = False
         self.parks = 0
         self.returned: list[dict] | None = None   # the log return, if any
+        self.harness_version = harness_version        # session_start.harness_version
 
     # ---------------------------------------------------------------- wire
-    def connect(self, ipc: Path, port: int = 5000, timeout: float = 5.0) -> None:
-        path = Path(ipc) / f"v.sock_{port}"
+    def connect(self, ipc: Path, port: int = CONTROL, timeout: float = 5.0) -> None:
+        path = Path(ipc) / socket_name(port)
         deadline = time.monotonic() + timeout
         while True:
             try:
-                s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                s.connect(str(path))
-                self.sock = s
+                self.sock = connect_unix(path)          # any path length (protocol.uds)
                 return
             except OSError:
                 if time.monotonic() > deadline:
@@ -272,7 +275,7 @@ class FakeGuest:
                 "user": p["user"], "tenant": p["tenant"],
                 "workflow_run_id": f"{p['user']}/{p['tenant']}/{self.session_id}",
                 "config_hash": HASH, "system_hash": HASH, "tools": self.tools,
-                "harness_version": "fake", "image_version": "fake",
+                "harness_version": self.harness_version, "image_version": "fake",
                 "resumed": bool(self.hello.get("resume")),
             })
         self.live("ready", {"at": int(time.time() * 1000)})

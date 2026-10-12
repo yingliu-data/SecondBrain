@@ -1,9 +1,11 @@
 """The gateway's /internal/* routes as agent-api calls them.
 
   identity_headers(user, tenant, session)   X-SB-User / X-SB-Tenant / X-SB-Session
-  auth_headers(token)                       Authorization: Bearer (none when empty)
-  bearer_ok(header, token)                  an incoming Authorization matches (empty token = ok)
-  fetch_session_tools(...)   GET  /internal/tools                -> hello entries
+  auth_headers(token)                       Authorization: Bearer (none when empty;
+                                            protocol.mcp.bearer_header)
+  bearer_ok(header, token)                  an incoming Authorization matches (empty
+                                            token = ok; protocol.mcp.bearer_ok)
+  fetch_session_tools(...)   GET  /internal/tools (INTERNAL_TOOLS_PATH) -> hello entries
   aclose_clients()           close the shared clients (app shutdown)
 
 One httpx.AsyncClient per base URL is shared by every call (per-request
@@ -13,11 +15,11 @@ status or a malformed body; callers decide what an outage means.
 from __future__ import annotations
 
 import asyncio
-import hmac
 
 import httpx
 
-from protocol.mcp import SESSION_HEADER, TENANT_HEADER, USER_HEADER
+from protocol import mcp as proto_mcp
+from protocol.mcp import INTERNAL_TOOLS_PATH, SESSION_HEADER, TENANT_HEADER, USER_HEADER
 
 from app.config import INTERNAL_TOKEN, MCP_GATEWAY_TOOLS_TIMEOUT_S, MCP_GATEWAY_URL
 
@@ -31,15 +33,13 @@ def identity_headers(user: str, tenant: str, session: str) -> dict:
 
 
 def auth_headers(token: str = INTERNAL_TOKEN) -> dict:
-    return {"Authorization": f"Bearer {token}"} if token else {}
+    return proto_mcp.bearer_header(token)
 
 
 def bearer_ok(header: str | None, token: str = INTERNAL_TOKEN) -> bool:
     """An incoming Authorization header carries `token` (constant time);
     an empty token means no check (dev only)."""
-    if not token:
-        return True
-    return hmac.compare_digest((header or "").encode(), f"Bearer {token}".encode())
+    return proto_mcp.bearer_ok(header, token)
 
 
 # base_url -> (the loop it was made on, client): a client is bound to its loop
@@ -91,7 +91,7 @@ async def fetch_session_tools(user: str, tenant: str, session: str, *,
                               base_url: str = MCP_GATEWAY_URL, token: str = INTERNAL_TOKEN,
                               timeout_s: float = MCP_GATEWAY_TOOLS_TIMEOUT_S) -> list[dict]:
     """The session's pinned tool surface, hello-entry shaped, verbatim."""
-    path = "/internal/tools"
+    path = INTERNAL_TOOLS_PATH
     data = await _request("GET", path, base_url=base_url, timeout_s=timeout_s,
                           headers={**auth_headers(token), **identity_headers(user, tenant, session)})
     return _tool_list(data, path)

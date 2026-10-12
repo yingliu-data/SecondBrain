@@ -108,7 +108,7 @@ def test_bulk_put_spill_workspace_and_manifest(bulk, session):
     assert json.loads((session.root / "manifest.json").read_text())["files"][0]["path"] == "src/a.py"
     assert not (ws / "manifest.json").exists()
     assert [p[0] for p in bulk.puts] == ["spill", "workspace", "manifest"]
-    assert not list(ws.rglob(".bulk-*"))                    # no temp file left
+    assert not list(ws.rglob(".*.tmp"))                    # no temp file left
 
 
 def test_bulk_put_rejects_sha_mismatch_escape_and_foreign_session(bulk, session, tmp_path):
@@ -116,7 +116,7 @@ def test_bulk_put_rejects_sha_mismatch_escape_and_foreign_session(bulk, session,
     h = put_header("s1", "workspace", "a.txt", b"good")
     reply, _ = _transfer(bulk.path, h, b"evil")             # same length, other bytes
     assert reply["ok"] is False and "sha256" in reply["error"]
-    assert not (ws / "a.txt").exists() and not list(ws.rglob(".bulk-*"))
+    assert not (ws / "a.txt").exists() and not list(ws.rglob(".*.tmp"))
     # ".." and absolute paths: refused by the header check, nothing read
     for bad in ("../x.txt", "/etc/passwd", "a/../../x"):
         h = {"op": "put", "session_id": "s1", "kind": "workspace", "path": bad,

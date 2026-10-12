@@ -30,6 +30,25 @@ def test_listeners_are_created_unlinked_and_chmod_600(tmp_path):
     assert not socket_path(tmp_path, 5000).exists()
 
 
+def test_listeners_bind_past_the_sun_path_limit(tmp_path):
+    """A session directory too deep for sun_path (108 bytes): Endpoints binds
+    through /proc/self/fd and a client connects the same way (app.host.uds)."""
+    from app.host.uds import UNIX_PATH_MAX, connect_unix
+    deep = tmp_path / ("d" * 60) / ("e" * 60)
+    ep = Endpoints(deep, [5000])
+    path = ep.path(5000)
+    assert len(str(path)) > UNIX_PATH_MAX and stat.S_ISSOCK(path.stat().st_mode)
+    client = connect_unix(path, 5)
+    conn = ep.accept_control(timeout=5)
+    assert conn is not None
+    client.sendall(b"x")
+    assert conn.recv(1) == b"x"
+    for s in (client, conn):
+        s.close()
+    ep.close()
+    assert not path.exists()
+
+
 @pytest.mark.asyncio
 async def test_accept_control_and_channel_round_trip(tmp_path):
     ep = Endpoints(tmp_path, [5000])

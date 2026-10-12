@@ -10,13 +10,15 @@ gateway_forwarder.py  :5011 -> mcp-gateway (POST /mcp only), identity headers, h
 uds_http.py    the threaded HTTP server llm_proxy and gateway_forwarder share
 state_sync.py  ack after append; events/ segments in the session dir; projections
 stream.py      events -> SSE (token, tool_call, avatar_command, question, done, seq, error)
-sandbox/       firecracker.py (boot, kill, snapshots), local.py (guest subprocess, tests)
+uds.py         Unix sockets past sun_path's limit (bind; connect from protocol.uds)
+sandbox/       firecracker.py (boot, kill, snapshots), base_snapshot.py (the BASE
+               snapshot build CLI), local.py (guest subprocess, tests)
 
 Every tenant runs this engine (the in-process legacy loop, AGENT_ENGINE
 and the per-tenant `engine` switch are gone).
 
 Dependencies: agent-api imports the stdlib-only `protocol` package and runs
-the guest from `secondbrain-harness` (pyproject: path ../harness, editable).
-The Docker image must `COPY ../harness` next to the app; HARNESS_GUEST_ROOT
+the guest from `secondbrain-harness` (a member of the one uv workspace, like
+`flows`). The Docker image copies harness/ next to the app; HARNESS_GUEST_ROOT
 points at it.
 """

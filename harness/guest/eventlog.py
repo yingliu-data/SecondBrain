@@ -3,11 +3,12 @@
 
 EventLog(dir)
   JSONL segments `events/000001.jsonl`, `events/000002.jsonl`, ... of at most
-  SEGMENT_EVENTS (1000) events each; a new segment opens when the current one
+  SEGMENT_EVENTS (protocol.limits, 1000) events each, named and read through
+  protocol.replay (segment_name, segments, iter_segment); a new segment opens when the current one
   is full (or after rotate()). append(event) writes one line, flushes and
   fsyncs; the event must be the next seq. extend(events) writes several and
   fsyncs once per segment. mark_acked(seq) records the host's
-  ack in the marker file `events/acked` (written atomically) so a restarted
+  ack in the marker file `events/acked` (protocol.fsio.atomic_write) so a restarted
   guest knows what the host already holds. read(after_seq=0) returns the
   events in seq order. On open, last_seq and acked_seq are recovered from
   the files.
@@ -21,7 +22,6 @@ LogWriter(eventlog, transport)
 """
 from __future__ import annotations
 
-import json
 import logging
 import os
 import queue
@@ -29,17 +29,14 @@ import threading
 from pathlib import Path
 
 from protocol.canonical import is_int
+from protocol.fsio import atomic_write
+from protocol.limits import SEGMENT_EVENTS
 from protocol.messages import encode
+from protocol.replay import iter_segment, segment_name, segments
 
 log = logging.getLogger("guest.eventlog")
 
-SEGMENT_EVENTS = 1000
-SEGMENT_SUFFIX = ".jsonl"
 ACKED_MARKER = "acked"
-
-
-def segment_name(index: int) -> str:
-    return f"{index:06d}{SEGMENT_SUFFIX}"
 
 
 def _torn_tail(path: Path) -> bool:
@@ -87,8 +84,7 @@ class EventLog:
 
     def segments(self) -> list[Path]:
         """Segment files in order."""
-        return sorted(p for p in self.events_dir.glob(f"[0-9]*{SEGMENT_SUFFIX}")
-                      if p.stem.isdigit())
+        return segments(self.events_dir)
 
     # ------------------------------------------------------------ recovery
 
@@ -114,15 +110,8 @@ class EventLog:
 
     @staticmethod
     def _read_segment(path: Path):
-        with path.open("r", encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    yield json.loads(line)
-                except ValueError:
-                    log.error("corrupt line in %s ignored", path)
+        return iter_segment(path, on_bad=lambda p, lineno, exc: log.error(
+            "corrupt line %d in %s ignored", lineno, p))
 
     # ------------------------------------------------------------ writing
 
@@ -191,12 +180,7 @@ class EventLog:
                 raise ValueError(f"ack {seq} beyond last appended seq {self._last_seq}")
             if seq <= self._acked:
                 return
-            tmp = self.marker_path.with_suffix(".tmp")
-            with tmp.open("w", encoding="utf-8") as fh:
-                fh.write(f"{seq}\n")
-                fh.flush()
-                os.fsync(fh.fileno())
-            os.replace(tmp, self.marker_path)
+            atomic_write(self.marker_path, f"{seq}\n".encode())
             self._acked = seq
 
     # ------------------------------------------------------------ reading

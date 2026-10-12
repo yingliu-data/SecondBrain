@@ -31,6 +31,8 @@ RUN python3 -m compileall -q -j0 --invalidation-mode unchecked-hash \
 
 COPY harness-init /sbin/harness-init
 COPY out/guest.pyz /opt/harness/guest.pyz
+# build.sh guest_image_version: harness-init passes it as --image-version
+COPY out/GUEST_IMAGE_VERSION /opt/harness/IMAGE_VERSION
 COPY pyz_pack.py /tmp/pyz_pack.py
 # Recompile guest.pyz's .pyc with the guest's own python3 (same magic number
 # whatever Python built out/guest.pyz), then check it imports from bytecode.

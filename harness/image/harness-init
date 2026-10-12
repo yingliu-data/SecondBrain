@@ -76,9 +76,13 @@ finish() {
 }
 trap finish INT TERM
 
-log "starting guest harness (idle-wait, then vsock -> CID 2)"
+# The image identity build.sh baked in (session_start.image_version).
+IMAGE_VERSION="$(cat /opt/harness/IMAGE_VERSION 2>/dev/null || true)"
+IMAGE_VERSION="${IMAGE_VERSION:-unknown}"
+
+log "starting guest harness $IMAGE_VERSION (idle-wait, then vsock -> CID 2)"
 python3 /opt/harness/guest.pyz --connect vsock --idle-wait vsock "${MOUNT_ARGS[@]}" \
-    --log-dir /var/harness --workspace /workspace &
+    --log-dir /var/harness --workspace /workspace --image-version "$IMAGE_VERSION" &
 GUEST_PID=$!
 wait "$GUEST_PID"
 rc=$?

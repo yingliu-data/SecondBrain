@@ -27,6 +27,7 @@ import guest.ops
 import guest.transport
 from protocol.events import validate_log
 from protocol.fold import fold, replay, state_hash
+from protocol.ports import PORTS
 from tests.fakes.fake_host import FakeHost
 from tests.fakes.fake_llm import FakeLLM, text, tool_calls
 
@@ -43,11 +44,10 @@ def hello_body(extra_tools=(), **config_over) -> dict:
         "tools": list(extra_tools),
         "limits": {"wall_clock_s": 60, "max_tools": 10, "max_turns": 12, "max_tokens": 128,
                    "op_timeout_s": {"device": 5, "host": 5}, "grace_s": 0.2, "idle_wake_s": 600},
-        "hooks": {},
         "async_tools": False,
         "question_timeout_s": 5,
         "ui_attached": True,
-        "ports": {"control": 5000, "bulk": 5001, "llm": 5010},
+        "ports": dict(PORTS),
     }
     config.update(config_over)
     return {

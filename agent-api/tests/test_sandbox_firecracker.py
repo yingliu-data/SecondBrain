@@ -538,7 +538,25 @@ def test_from_env():
 
 
 def test_module_is_httpx_free():
+    import app.host.sandbox.base_snapshot as base
     import app.host.sandbox.firecracker as mod
-    src = Path(mod.__file__).read_text()
-    assert "httpx" not in src.replace("httpx-free", "")
-    assert "import requests" not in src
+    import app.host.uds as uds
+    for m in (mod, base, uds):
+        src = Path(m.__file__).read_text()
+        assert "httpx" not in src.replace("httpx-free", ""), m.__name__
+        assert "import requests" not in src and "from app.config" not in src, m.__name__
+
+
+def test_build_snapshot_script_runs_without_the_agent_api_venv(tmp_path):
+    """harness/image/build_snapshot.py needs only agent-api/ and harness/ on
+    sys.path (a bare python3, no third-party packages)."""
+    import subprocess
+    import sys
+    script = Path(__file__).resolve().parents[2] / "harness" / "image" / "build_snapshot.py"
+    proc = subprocess.run([sys.executable, "-I", "-S", str(script), "check-base",
+                           "--cache", str(tmp_path)], capture_output=True, text=True,
+                          env={"PATH": "/usr/bin:/bin", "HARNESS_ROOTFS": "/nonexistent",
+                               "HARNESS_IMAGE_VERSION": "img-1",
+                               "HARNESS_FIRECRACKER_VERSION": "v1.17.0"}, timeout=60)
+    assert proc.returncode == 1, proc.stderr
+    assert "no base snapshot" in proc.stderr

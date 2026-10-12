@@ -12,7 +12,13 @@ A test that writes a broken log on purpose opts out with
 """
 from __future__ import annotations
 
+import os
+
 import pytest
+
+# guest.main reads it: the provider's retry backoff in the guest subprocesses
+# the tests start (1 s, 2 s, 4 s in production)
+os.environ.setdefault("HARNESS_LLM_BACKOFF_S", "0.01")
 
 from protocol.fold import replay
 from tests.fakes import fake_host
