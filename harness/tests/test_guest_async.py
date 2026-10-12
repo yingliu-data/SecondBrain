@@ -1,7 +1,7 @@
 """Async tool calls (hello.config.async_tools = true; docs/GUEST.md "Async
 mode", docs/ASYNC-TOOLS.md).
 
-Units drive the coordinator with the fakes of test_guest_coordinator (manual
+Units drive the coordinator with the fakes of tests.fakes.coordinator (manual
 ops, a fake clock whose grace timer the test fires); the e2e runs the guest
 subprocess against FakeHost and a FakeLLM scripted for async. Every log must
 validate, replay (its state equal to the coordinator's), verify its
@@ -18,7 +18,7 @@ from guest.context import (
 )
 from guest.coordinator import LOST_CONTENT
 from protocol.fold import PLACEHOLDER, fold, verify_checkpoints
-from tests.test_guest_coordinator import (
+from tests.fakes.coordinator import (
     BIG, DEVICE, GRACE_S, LONG_TASK, Scenario, T0, check_log, make_cfg, sized, text, tool_calls,
 )
 from tests.test_guest_e2e import guest_factory  # noqa: F401  (fixture)

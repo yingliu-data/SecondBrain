@@ -19,9 +19,11 @@ timers           ─┘                                               ▼
   assigns `seq`, stamps `ts`, applies `protocol.fold.apply(state, event)`,
   puts the event on the log writer's queue, and returns it. Nothing else
   touches `State`.
-- **The log writer** appends each event to the local segment (`EventLog.append`)
-  and then hands it to `Transport.send_event`. Durable = host ack
-  (`Transport` reports acks as `("ack", seq)` items; the log marks them).
+- **The log writer** drains its queue in batches: one `EventLog.extend(batch)`
+  (one fsync per batch), then `Transport.send_event` per event in seq order.
+  Durable = host ack (`Transport` reports acks as `("ack", seq)` items; the
+  log writer keeps the highest in memory and writes the `acked` marker at most
+  every `ACK_MARKER_INTERVAL_MS` (200 ms) and on `flush()` / `stop()`).
 - **Inbound items** (tuples; first element is the kind):
   - `("control", msg)` — a host→guest control message (`protocol.messages.CONTROL_TYPES`)
   - `("ack", seq)` — host acked guest events up to seq
@@ -58,7 +60,8 @@ Fatal protocol errors (`second hello`, unsupported schema): emit
   (`protocol.messages.Outbox/Inbox/resend_plan`).
 - `guest.eventlog`: `EventLog(dir)`: `append(event)`, `mark_acked(seq)`,
   `last_seq`, `acked_seq`, `read(after_seq=0)`, `rotate()`; `LogWriter(eventlog,
-  transport)`: `start()`, `put(event)`, `flush(timeout)`. Segment names, the
+  transport)`: `start()`, `put(event)`, `flush(timeout)`, `mark_acked(seq)`
+  (coalesced), `sync_acked()`, `stop()`. Segment names, the
   segment reader and `protocol.limits.SEGMENT_EVENTS` are protocol.replay's /
   protocol.limits' (the host store uses the same); the `acked` marker is written
   with `protocol.fsio.atomic_write`.
@@ -80,8 +83,9 @@ Fatal protocol errors (`second hello`, unsupported schema): emit
 - `guest.hooks`: `before_tool(state, call) -> ("allow"|"deny"|"ask", reason)`,
   `after_tool(state, call, content) -> str | None` (rewrite); pass-through defaults.
 - `guest.coordinator`: `Coordinator(cfg, state, inbound, log_writer, transport,
-  provider, ops, clock)`: `run() -> settle body`; `emit(type, body) -> event`.
-  Wake rules and limits: PLAN.md section 6; async mode below ("Async mode").
+  provider, ops, clock)`: `run() -> settle body`; `emit(type, body) -> event`;
+  `restore(events)`; `view` (the `TaskView`). Rules: "Coordinator" below;
+  async mode below ("Async mode").
 
 ## Sides
 
@@ -91,6 +95,64 @@ A `tool_call` whose side is `host` or `device` (not `mcp`: see "MCP over :5011")
 `tool_result`. Timeouts from `cfg.op_timeout_for(name, side)` (the hello
 entry's `timeout_s`, else `cfg.limits.op_timeout_s[side]`).
 Guest-side tools go to `OperationManager.submit`.
+
+## Coordinator
+
+**Modules.** `guest.coordinator` holds the loop (`run`, `_dispatch`), turns,
+the provider call and tool calls, and re-exports the public names
+(`Coordinator`, `SystemClock`, `FatalProtocolError`, `LOST_CONTENT`,
+`INPUT_KINDS`, `HARNESS_VERSION`, ...). The rest are mixins of `Coordinator`:
+`guest.questions` (questions, deadlines, the question park), `guest.mcp_ops`
+(the mcp op lifecycle: "MCP over :5011"), `guest.park` (park, resume, the
+settle and its manifest), `guest.restore` (resuming from a returned log).
+
+**One reducer.** `guest.taskview.TaskView.apply(state, event)` owns every
+piece of task bookkeeping that follows from the log: the open task
+(`task_input_id`, its usage and ops baselines, regular-turn count, user-scope
+memory slugs), the attachments and wall clock each task message named, the
+round (`pending_inputs`, `unseen`, `turn_calls`, `turn_pending`,
+`last_response_had_calls`, the turn without a response), side calls waiting
+for `side_result`, open questions (kind `question` / `ask` / `mcp_input`,
+`expired` once a `clock{question_deadline}` names them), doom-loop counts,
+the park accounting (`wall_used_ms`, `live_since`, the last park's question
+and `question_left_ms`) and the files of the last settle manifest.
+`emit()` applies every event it writes to it, right after the fold;
+`restore()` applies every returned event the same way, so a restored
+TaskView is the one the live loop had (the suite checks this for every
+coordinator scenario: `tests/conftest.py` `verify_task_views`). The loop's
+handlers never edit it. What stays on the coordinator is what the log does
+not say: timers, the mcp ops in flight (`_mcp_calls`), the provider call in
+flight (`current_turn`), the questions past their deadline it parks on
+(`_waiting`: a zero-timeout question without UI expires without a clock
+event), the park request, the usage correction, the preamble registry (on
+restore rebuilt per regular turn from the state before it) and the files
+uploaded this process (`_uploaded`, seeded from the last settle manifest on
+restore). None of it is hashed: checkpoints cover `protocol.fold.State` only.
+
+**Sync wake rules** (`async_tools` false, the default): a turn starts when
+nothing is running and nothing is awaited.
+- The task's first turn starts on the task input (no wake event).
+- After a response with tool calls, the next turn starts on the last
+  terminal tool_result of the round: `wake{tool_result}`.
+- After a response without tool calls, staged inputs (a follow_up or steer
+  that landed mid-turn) start another turn: `wake{input}`; otherwise settle.
+- Grace: armed after a response with tool calls; if it fires while
+  operations still run it is recorded (`clock{grace_expiry}` + a log line)
+  and has no other effect.
+
+**Limits** (`cfg.limits`): the task's wall clock → `settle{timeout}`;
+`max_tools` → one final turn without tools, then `settle{done}`;
+`max_turns` → `error{limit}` + `settle{failed}`; `finish_reason` "length" →
+no tool runs, `settle{done}` with the partial text; question deadline →
+`guard_decision{deny, unanswered}` (three → `settle{escalated}`) or, with
+`answer_wait_s > 0`, a question park; doom loop (same name + args three
+times after the hooks) → an "ask" question. Time: every timer that has an
+effect is first recorded as a `clock` event; `ts` is never read back; ids
+are `derive_id(user, tenant, session_id, seq, kind)`.
+
+**Known gaps**: an op timeout has no clock kind in the schema (recorded as
+`op_state{timeout, duration_ms}` alone); malformed tool arguments get an
+error result straight away (no repair turn).
 
 ## As built in M1 (deviations from the contract above, kept on purpose)
 
@@ -143,7 +205,10 @@ on the host sets it false), `limits.context_window_tokens` (32768),
 - Coordinator: every regular turn passes an `on_delta` that sends live
   `delta{session_id, turn_id, kind, index, text}` per fragment; `llm_response`
   is emitted once from the assembled response (verbatim).
-  `turn_start.workspace_tree_id = ops.workspace_tree_id()`.
+  `turn_start.workspace_tree_id = ops.workspace_tree_id()` (cached: the
+  workspace is re-walked only after an operation that may write finished —
+  bash, write, edit, apply_patch; never after `guest.tools.READ_ONLY` tools
+  or mcp ops).
   Token estimate = ceil(`Request.chars`/4) × correction (`Request.chars` is the
   length of the canonical text whose sha256 is `request_hash`), correction =
   last `usage.prompt_tokens` / that turn's raw estimate (1.0 until the first usage).
@@ -253,10 +318,11 @@ The wire side is docs/PROTOCOL.md sections 5, 6 and 8. What the guest does:
   moves any older local buffer to `events.before-resume-N`, writes the
   returned events as the new buffer (all marked acked), `Transport.seed_seq
   (last_seq)` (next event = last_seq + 1) and `Coordinator.restore(events)`:
-  the log is folded into a fresh State and the loop's bookkeeping rebuilt (the
-  open task, the round, side calls, questions, attachments, user memory,
-  doom-loop counts; each regular turn's preamble text is rebuilt and kept when
-  its hash matches `turn_start.preamble_hash`). `run()` then emits
+  the log is folded into a fresh State and through the same `TaskView`
+  reducer the live loop uses ("Coordinator"), so the open task, the round,
+  side calls, questions, attachments, user memory and doom-loop counts are
+  what the live loop had; each regular turn's preamble text is rebuilt and
+  kept when its hash matches `turn_start.preamble_hash`. `run()` then emits
   `clock{host_hello, at}` (when hello.at > 0), `error{transient, ref: turn}`
   for a turn whose response never came, `op_state{lost}` + `tool_result
   {"error: operation lost (VM restarted)"}` per open call, and wakes:

@@ -1,6 +1,6 @@
 """Guest questions: questions park the task, escalation via abort.
 
-Coordinator scenarios with the fakes of test_guest_coordinator (manual clock),
+Coordinator scenarios with the fakes of tests.fakes.coordinator (manual clock),
 then guest.main as a subprocess against FakeHost / FakeLLM / FakeGateway.
 Every resulting log validates, replays and its checkpoints verify.
 """
@@ -13,7 +13,7 @@ import pytest
 from guest.config import from_hello
 from protocol.events import UNANSWERED, validate_event
 from protocol.fold import state_hash, verify_checkpoints
-from tests.test_guest_coordinator import (
+from tests.fakes.coordinator import (
     DEVICE, QUESTION_S, WALL_S, Scenario, make_cfg, text, tool_calls,
 )
 from tests.test_guest_e2e import check_replay
@@ -277,7 +277,7 @@ def test_two_parks_without_a_guest_clock_between_count_neither_stretch():
     b = Scenario(cfg=m5_cfg(resume=True), script=[text("b it is")])
     b.clock.ms = a.clock.ms + 3_600_000 * 5                    # parked again for five hours
     b.coord.restore(log)
-    assert set(b.coord._questions) == {q2}
+    assert set(b.coord.view.questions) == {q2}
     b.start()
     b.wait_for(lambda: len(b.events) >= 2)
     assert clock_kinds(b) == ["resumed", "host_hello"]
@@ -451,7 +451,7 @@ def test_restore_ignores_a_question_closed_by_an_earlier_tasks_timeout():
     b = Scenario(cfg=m5_cfg(resume=True), script=[text("x")])
     b.clock.ms = a.clock.ms + 3_600_000
     b.coord.restore(log)
-    assert stale not in b.coord._questions
+    assert stale not in b.coord.view.questions
     b.start()
     b.wait_for(lambda: len(b.events) >= 2)
     assert clock_kinds(b) == ["resumed", "host_hello"]           # nothing else

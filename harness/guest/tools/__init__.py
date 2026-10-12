@@ -11,6 +11,7 @@ Public contract (docs/GUEST.md):
   impl_for(name) -> callable | None                   (workspace, args, limits) -> str
   path_errors(key, value) -> list[str]                the relative-path rule
   SERIALISED: tools whose ops queue per file (write, edit, apply_patch)
+  READ_ONLY: tools that leave the workspace (outside .harness/) unchanged
 
 The schemas are written for a 14B model: short, imperative descriptions,
 `required` lists and `additionalProperties: false` everywhere. Every `path`
@@ -42,6 +43,10 @@ class ToolSpec:
 
 # Tools whose operations must run serially per file.
 SERIALISED = ("write", "edit", "apply_patch")
+
+# Tools that never change the workspace outside `.harness/` (todo writes
+# .harness/todo.json): the workspace tree id is not re-walked after them.
+READ_ONLY = ("read", "grep", "glob", "ls", "todo", "skill", "question")
 
 # Argument keys that name workspace paths.
 PATH_KEYS = ("path",)

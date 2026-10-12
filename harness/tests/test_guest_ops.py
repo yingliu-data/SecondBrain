@@ -374,6 +374,22 @@ def test_workspace_tree_id_is_cached_until_an_operation_finishes(ws, inbound, mg
     assert mgr.workspace_tree_id() == b and len(walks) == 2
 
 
+def test_workspace_tree_id_is_not_rewalked_after_read_only_ops(ws, inbound, mgr, monkeypatch):
+    walks = []
+    real = mgr._tree.tree_id
+    monkeypatch.setattr(mgr._tree, "tree_id", lambda: walks.append(1) or real())
+    a = mgr.workspace_tree_id()
+    for cid, name, args in [("r", "read", {"path": "a.txt"}), ("l", "ls", {}),
+                            ("g", "grep", {"pattern": "alpha"}), ("t", "todo", {"items": []})]:
+        mgr.submit(cid, name, args)
+        assert take(inbound, 1)[cid]["ok"]
+    assert mgr.workspace_tree_id() == a and len(walks) == 1      # nothing that writes ran
+    mgr.submit("w", "write", {"path": "b.txt", "content": "b"})
+    take(inbound, 1)
+    b = mgr.workspace_tree_id()
+    assert b != a and b == workspace_tree_id(ws) and len(walks) == 2
+
+
 def test_workspace_tree_id_rehashes_only_changed_files(ws, inbound, mgr, monkeypatch):
     import guest.ops as ops_mod
     for i in range(5):

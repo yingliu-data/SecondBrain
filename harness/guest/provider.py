@@ -129,12 +129,16 @@ class DeltaRelay:
     from `sent`, forwarded as DIVERGENCE_MARK + the text from the divergence
     point (and `sent` becomes the new attempt's text). `restart()` marks a new
     attempt; the provider calls it at the top of every attempt, so the relay
-    never has to guess a restart from the text."""
+    never has to guess a restart from the text.
+
+    After every fragment `cur` is a prefix of `sent`, so only its length is
+    kept; `sent` is a list of parts joined only when a retry has to compare
+    against it (linear in the text, not quadratic)."""
 
     def __init__(self, send: Callable[[dict], object]):
         self._send = send
-        self._sent: dict = {}
-        self._cur: dict = {}
+        self._sent: dict = {}      # key -> [parts, total length]
+        self._cur: dict = {}       # key -> length of the current attempt's text
 
     def restart(self) -> None:
         self._cur = {}
@@ -146,21 +150,31 @@ class DeltaRelay:
         if not text:
             return
         key = (kind, index)
-        sent = self._sent.get(key, "")
-        cur = self._cur.get(key, "") + text
-        self._cur[key] = cur
-        if len(cur) <= len(sent) and sent.startswith(cur):
-            return                                  # re-delivered: already shown
-        if cur.startswith(sent):
-            out = cur[len(sent):]
+        sent = self._sent.setdefault(key, [[], 0])
+        parts, sent_len = sent
+        cur_len = self._cur.get(key, 0)
+        self._cur[key] = cur_len + len(text)
+        if cur_len == sent_len:                     # the attempt is at the head: plain extension
+            out = text
+            parts.append(text)
         else:
+            if len(parts) > 1:
+                parts[:] = ["".join(parts)]
+            rest = parts[0][cur_len:cur_len + len(text)]
+            if rest == text:
+                return                              # re-delivered: already shown
             p = 0
-            for a, b in zip(cur, sent):
-                if a != b:
+            for x, y in zip(text, rest):
+                if x != y:
                     break
                 p += 1
-            out = DIVERGENCE_MARK + cur[p:]
-        self._sent[key] = cur
+            if p == len(rest) and cur_len + p == sent_len:
+                out = text[p:]                      # extends what was sent
+                parts.append(out)
+            else:
+                out = DIVERGENCE_MARK + text[p:]
+                parts[:] = [parts[0][:cur_len + p], text[p:]]
+        sent[1] = cur_len + len(text)
         self._send({"kind": kind, "index": index, "text": out})
 
     __call__ = on_delta

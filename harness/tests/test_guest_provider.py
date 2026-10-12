@@ -569,3 +569,48 @@ def test_delta_relay_ignores_empty_fragments_and_is_callable():
     relay({"kind": "content", "index": 0, "text": ""})
     relay({"kind": "content", "index": 0, "text": "x"})
     assert out == [{"kind": "content", "index": 0, "text": "x"}]
+
+
+def test_delta_relay_matches_the_reference_on_many_fragments():
+    """The offset-tracking relay against the plain string rebuild it replaced,
+    over many small fragments and retries that re-deliver, extend and diverge."""
+    import random
+
+    def reference(attempts):
+        sent, out = {}, []
+        for attempt in attempts:
+            cur = {}
+            for kind, index, t in attempt:
+                key = (kind, index)
+                s, c = sent.get(key, ""), cur.get(key, "") + t
+                cur[key] = c
+                if len(c) <= len(s) and s.startswith(c):
+                    continue
+                if c.startswith(s):
+                    o = c[len(s):]
+                else:
+                    p = 0
+                    for a, b in zip(c, s):
+                        if a != b:
+                            break
+                        p += 1
+                    o = DIVERGENCE_MARK + c[p:]
+                sent[key] = c
+                out.append((kind, index, o))
+        return out
+
+    rng = random.Random(7)
+    for _ in range(200):
+        base = "".join(rng.choice("ab ") for _ in range(rng.randint(0, 60)))
+        attempts = []
+        for _ in range(rng.randint(1, 4)):
+            text = base[:rng.randint(0, len(base))] + "".join(rng.choice("abc") for _ in range(rng.randint(0, 20)))
+            frags, i = [], 0
+            while i < len(text):
+                n = rng.randint(1, 5)
+                frags.append((rng.choice(["content", "reasoning"]), 0, text[i:i + n]))
+                i += n
+            attempts.append(frags)
+        assert relay_run(attempts) == reference(attempts)
+    many = [C(*["x"] * 20_000)]
+    assert len(relay_run(many)) == 20_000

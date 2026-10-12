@@ -19,9 +19,11 @@ Contract (docs/GUEST.md):
 Tree id cache: the manager keeps `relative path -> ((st_mtime_ns, st_size,
 st_ino), digest)` and re-hashes only files whose stat key changed (entries
 that disappeared are dropped). It returns the previous id without walking at
-all while no operation has finished since the last call, so a change made
-behind the manager's back (not by one of its operations) shows up only after
-the next operation finishes. A rewrite that keeps size, mtime_ns and inode is
+all while no operation that may write has finished since the last call
+(READ_ONLY_TOOLS and mcp ops never count: they do not touch the workspace
+outside `.harness/`), so a change made behind the manager's back (not by one
+of its operations) shows up only after the next writing operation (bash,
+write, edit, apply_patch) finishes. A rewrite that keeps size, mtime_ns and inode is
 not detected by the cache; the id is still a pure function of the tree
 whenever every file's stat key changes with its content.
 
@@ -109,6 +111,7 @@ DEFAULT_SPILL_QUOTA = DEFAULT_LIMITS["spill_quota_bytes"]
 DEFAULT_OP_TIMEOUT = float(DEFAULT_LIMITS["op_timeout_s"]["guest"])
 RESEND_TIMEOUT_S = 30.0               # send_mcp: a fire-and-forget re-send nobody waits for
 LOST_MCP = "error: operation lost (the gateway forwarder no longer holds this call)"
+READ_ONLY_TOOLS = frozenset(tools.READ_ONLY)   # finishing one does not invalidate the tree id
 KILLED, DROPPED = "killed", "dropped"  # _Job.stop: abort_all (report "killed") / cancel, detach (report nothing)
 
 
@@ -499,7 +502,8 @@ class OperationManager:
         content, spill = self._spill(job.call_id, content)
         with self._lock:
             self._jobs.pop(job.call_id, None)
-            self._finished += 1                   # the workspace may have changed
+            if not job.mcp_job and job.name not in READ_ONLY_TOOLS:
+                self._finished += 1               # the workspace may have changed
             if job.held:
                 job.held = False
                 self._busy -= job.keys

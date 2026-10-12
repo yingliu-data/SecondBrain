@@ -1,5 +1,5 @@
 """Park/resume units: the coordinator's park, restore and determinism (fakes from
-test_guest_coordinator), the transport's hello floor / seed / park, the bulk
+tests.fakes.coordinator), the transport's hello floor / seed / park, the bulk
 client against FakeHost's :5001, the workspace manifest, mount_workspace and
 the Outbox/Inbox resume_from."""
 from __future__ import annotations
@@ -29,7 +29,7 @@ from protocol.fold import State, replay, state_hash, verify_checkpoints
 from protocol.messages import Inbox, Outbox, ProtocolError, control_message, encode
 from protocol.ports import CONTROL, socket_name
 from tests.fakes.fake_host import FakeHost
-from tests.test_guest_coordinator import (
+from tests.fakes.coordinator import (
     DEVICE, FakeOps, Scenario, T0, make_cfg, text, tool_calls,
 )
 
@@ -168,7 +168,7 @@ def test_restore_marks_open_calls_lost_and_continues():
     log = _run_until(a, "op_state")                  # the device call runs; the VM dies here
     b = Scenario(cfg=make_cfg(DEVICE, resume=True, at=T0 + 9_000), script=[text("recovered")])
     b.coord.restore(log)
-    assert b.coord.task_input_id == "in-1" and b.coord._side_calls
+    assert b.coord.task_input_id == "in-1" and b.coord.view.side_calls
     result = b.run()
     assert result["outcome"] == "done" and result["answer"] == "recovered"
     new = b.events

@@ -148,7 +148,7 @@ def system_block(cfg) -> str:
     """The tenant base prompt (without {current_time}), the profile block and
     the memory indexes, from cfg.system_block = {base_prompt, profile,
     memory_index}. Fixed for the session."""
-    block = getattr(cfg, "system_block", None) or {}
+    block = cfg.system_block or {}
     if isinstance(block, str):
         base, profile, index = block, "", ""
     else:
@@ -157,7 +157,7 @@ def system_block(cfg) -> str:
         index = _render_block(block.get("memory_index"))
     base = base.replace(CURRENT_TIME_TOKEN, "").strip()
     sections = [base]
-    if getattr(cfg, "async_tools", False):
+    if cfg.async_tools:
         sections.append(ASYNC_TOOLS_NOTE)
     if profile:
         sections.append("## Profile\n" + profile)
@@ -189,13 +189,12 @@ def tool_schemas(cfg) -> list:
     "schema" key or from `cfg.tool_schemas` ({name: schema}, since
     allowlist.effective_tools keeps only name/side/pin); a minimal schema
     with the name otherwise."""
-    extra = getattr(cfg, "tool_schemas", None) or {}
     out = []
-    for entry in getattr(cfg, "tools", None) or []:
+    for entry in cfg.tools:
         name = entry["name"]
         schema = entry.get("schema")
         if schema is None:
-            schema = extra.get(name) if isinstance(extra, dict) else None
+            schema = cfg.tool_schemas.get(name)
         if schema is None and entry.get("side") == "guest":
             schema = TOOL_DEFINITIONS.get(name)
         out.append(_as_function_schema(name, schema))
@@ -261,8 +260,8 @@ def _is_late(item: dict, state) -> bool:
     if message.get("role") != "tool":
         return False
     cid = message.get("tool_call_id")
-    call = (getattr(state, "open_calls", None) or {}).get(cid)
-    return (call is not None and cid in (getattr(state, "placeholders", None) or ())
+    call = state.open_calls.get(cid)
+    return (call is not None and cid in state.placeholders
             and item["origin"] != call["seq"])
 
 
@@ -313,13 +312,11 @@ def _fill_missing_tool_messages(messages: list, known_call_ids: set, present: se
 
 
 def _params(cfg) -> dict:
-    params = dict(getattr(cfg, "params", None) or {})
+    params = dict(cfg.params)
     for key in NON_SAMPLING_PARAMS:
         params.pop(key, None)
-    limits = getattr(cfg, "limits", None)
-    max_tokens = getattr(limits, "max_tokens", None)
-    if "max_tokens" not in params and max_tokens is not None:
-        params["max_tokens"] = max_tokens
+    if "max_tokens" not in params and cfg.limits.max_tokens is not None:
+        params["max_tokens"] = cfg.limits.max_tokens
     return params
 
 
@@ -331,7 +328,7 @@ def _assemble(state, cfg, preambles: dict, tail: list, *, with_tools: bool, prea
     {messages, tools, params} gives both `chars` and `request_hash`."""
     system = system_block(cfg)
     schemas = tool_schemas(cfg)
-    known_calls = set(getattr(state, "open_calls", {}) or {})
+    known_calls = set(state.open_calls)
     prefix = [_render(it, state, preambles) for it in _prefix_items(state)]
     present = {m.get("tool_call_id") for m in prefix + tail if m.get("role") == "tool"}
     prefix = _fill_missing_tool_messages(prefix, known_calls, present)
@@ -361,10 +358,10 @@ def placeholder_items(state) -> list:
     call's position (origin = the tool_call's seq). The fold gives them the
     turn_start's seq; any seq above every staged one sorts the same. Empty in
     sync mode (a turn never starts with a call open)."""
-    after = getattr(state, "last_seq", 0) + 1
+    after = state.last_seq + 1
     return [{"seq": after, "origin": call["seq"],
              "message": {"role": "tool", "tool_call_id": cid, "content": PLACEHOLDER}}
-            for cid, call in (getattr(state, "open_calls", None) or {}).items()
+            for cid, call in state.open_calls.items()
             if "result" not in call and cid not in state.placeholders]
 
 
@@ -393,7 +390,7 @@ def build_request(state, cfg, clock_at_ms: int, *, attachments=None, preambles=N
     attachments = attachments or {}
     preambles = preambles if preambles is not None else {}
     if new_memory is None:
-        new_memory = getattr(state, "session_memory", None) or ()
+        new_memory = state.session_memory
 
     # the staged suffix: the first user message gets this turn's preamble
     first_input = None

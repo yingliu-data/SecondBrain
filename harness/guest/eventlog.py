@@ -14,11 +14,13 @@ EventLog(dir)
   the files.
 
 LogWriter(eventlog, transport)
-  The thread the coordinator hands events to: put(event) appends to the log
-  and then calls transport.send_event(event); flush(timeout) waits until
+  The thread the coordinator hands events to: put(event) queues it; the
+  thread drains the queue in batches, extend(batch) (one fsync per batch),
+  then transport.send_event per event; flush(timeout) waits until
   everything put so far has been written and handed to the transport;
-  mark_acked(seq) forwards the host's ack to the log; stop() ends the thread
-  after draining.
+  mark_acked(seq) records the host's ack in memory and the thread writes the
+  marker at most every ACK_MARKER_INTERVAL_MS (and on flush()/stop());
+  stop() ends the thread after draining.
 """
 from __future__ import annotations
 
@@ -26,6 +28,7 @@ import logging
 import os
 import queue
 import threading
+import time
 from pathlib import Path
 
 from protocol.canonical import is_int
@@ -37,6 +40,7 @@ from protocol.replay import iter_segment, segment_name, segments
 log = logging.getLogger("guest.eventlog")
 
 ACKED_MARKER = "acked"
+ACK_MARKER_INTERVAL_MS = 200   # LogWriter: the acked marker is written at most this often
 
 
 def _torn_tail(path: Path) -> bool:
@@ -214,8 +218,18 @@ class EventLog:
 
 
 class LogWriter:
-    """Appends each event to the EventLog, then hands it to the transport.
-    One thread; put() never blocks the caller (the coordinator)."""
+    """Appends events to the EventLog, then hands them to the transport.
+    One thread; put() never blocks the caller (the coordinator).
+
+    Batching: the thread blocks for one event, then drains whatever else is
+    queued and writes the batch with one EventLog.extend (one fsync per
+    batch); the events then go to the transport one by one, in seq order.
+
+    Ack marker: mark_acked(seq) only records the highest ack in memory; the
+    thread writes it to the marker file (EventLog.mark_acked) at most every
+    ACK_MARKER_INTERVAL_MS, clamped to what is on disk (an ack beyond the
+    appended seq is applied once that seq is written), and flush() / stop()
+    write it before returning."""
 
     def __init__(self, eventlog: EventLog, transport):
         self.eventlog = eventlog
@@ -224,6 +238,8 @@ class LogWriter:
         self._cv = threading.Condition()
         self._put = 0
         self._done = 0
+        self._ack_pending = 0            # highest ack seen (mark_acked), not yet on disk
+        self._ack_written_at = 0.0       # monotonic time of the last marker write
         self._thread: threading.Thread | None = None
         self.errors: list[str] = []
 
@@ -239,36 +255,99 @@ class LogWriter:
         self._q.put(event)
 
     def mark_acked(self, seq: int) -> None:
-        self.eventlog.mark_acked(seq)
+        """Record the host's ack; the writer thread persists it (coalesced)."""
+        if not is_int(seq, 0):
+            raise ValueError(f"acked seq must be a non-negative int, got {seq!r}")
+        with self._cv:
+            self._ack_pending = max(self._ack_pending, seq)
+
+    def sync_acked(self) -> None:
+        """Write the pending ack marker now (clamped to the appended seq)."""
+        with self._cv:
+            target = self._ack_pending
+        seq = min(target, self.eventlog.last_seq)
+        if seq <= self.eventlog.acked_seq:
+            return
+        try:
+            self.eventlog.mark_acked(seq)
+        except Exception as exc:  # noqa: BLE001 - a marker problem is not a loop problem
+            log.exception("acked marker write failed for seq %s", seq)
+            self.errors.append(f"mark_acked {seq}: {exc}")
+        self._ack_written_at = time.monotonic()
 
     def flush(self, timeout: float | None = None) -> bool:
         """Wait until every event put so far is on disk and handed to the
-        transport. False on timeout."""
+        transport (and write the pending ack marker). False on timeout."""
         with self._cv:
             target = self._put
-            return self._cv.wait_for(lambda: self._done >= target, timeout)
+            ok = self._cv.wait_for(lambda: self._done >= target, timeout)
+        if ok:
+            self.sync_acked()
+        return ok
 
     def stop(self, timeout: float | None = 5.0) -> None:
         if self._thread is None:
             return
         self._q.put(None)
         self._thread.join(timeout)
+        self.sync_acked()
+
+    def _ack_due(self) -> bool:
+        return (self._ack_pending > self.eventlog.acked_seq
+                and min(self._ack_pending, self.eventlog.last_seq) > self.eventlog.acked_seq
+                and (time.monotonic() - self._ack_written_at) * 1000 >= ACK_MARKER_INTERVAL_MS)
 
     def _run(self) -> None:
+        wait_s = ACK_MARKER_INTERVAL_MS / 1000.0
         while True:
-            event = self._q.get()
-            if event is None:
+            try:
+                first = self._q.get(timeout=wait_s)
+            except queue.Empty:
+                if self._ack_due():
+                    self.sync_acked()
+                continue
+            batch, stopping = [], first is None
+            if first is not None:
+                batch.append(first)
+            while not stopping:
+                try:
+                    event = self._q.get_nowait()
+                except queue.Empty:
+                    break
+                if event is None:
+                    stopping = True
+                else:
+                    batch.append(event)
+            if batch:
+                self._write(batch)
+                for event in batch:
+                    try:
+                        self.transport.send_event(event)
+                    except Exception as exc:
+                        log.exception("transport refused seq %s", event.get("seq"))
+                        self.errors.append(f"send seq {event.get('seq')}: {exc}")
+                with self._cv:
+                    self._done += len(batch)
+                    self._cv.notify_all()
+            if self._ack_due():
+                self.sync_acked()
+            if stopping:
                 return
+
+    def _write(self, batch: list) -> None:
+        """One extend (one fsync); on an error the events after the last one
+        written are retried one by one, so one bad event loses only itself."""
+        before = self.eventlog.last_seq
+        try:
+            self.eventlog.extend(batch)
+            return
+        except Exception:  # noqa: BLE001 - fall back to per-event appends below
+            pass
+        # extend writes a prefix of the batch: retry the rest one by one
+        for event in batch[self.eventlog.last_seq - before:]:
             try:
                 self.eventlog.append(event)
             except Exception as exc:  # disk trouble: the host is the canonical store
-                log.exception("event log append failed for seq %s", event.get("seq"))
-                self.errors.append(f"append seq {event.get('seq')}: {exc}")
-            try:
-                self.transport.send_event(event)
-            except Exception as exc:
-                log.exception("transport refused seq %s", event.get("seq"))
-                self.errors.append(f"send seq {event.get('seq')}: {exc}")
-            with self._cv:
-                self._done += 1
-                self._cv.notify_all()
+                seq = event.get("seq") if isinstance(event, dict) else None
+                log.exception("event log append failed for seq %s", seq)
+                self.errors.append(f"append seq {seq}: {exc}")

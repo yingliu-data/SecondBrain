@@ -21,11 +21,13 @@ import pytest
 os.environ.setdefault("HARNESS_LLM_BACKOFF_S", "0.01")
 
 from protocol.fold import replay
+from tests.fakes import coordinator as fake_coordinator
 from tests.fakes import fake_host
 
 pytest_plugins = ["logverify"]
 
 _hosts: list = []
+_scenarios: list = []
 
 
 def _track_hosts() -> None:
@@ -46,6 +48,24 @@ def _track_hosts() -> None:
 _track_hosts()
 
 
+def _track_scenarios() -> None:
+    """Record every coordinator Scenario a test creates (wraps __init__ once)."""
+    cls = fake_coordinator.Scenario
+    if getattr(cls, "_view_tracked", False):
+        return
+    original = cls.__init__
+
+    def __init__(self, *args, **kwargs):
+        original(self, *args, **kwargs)
+        _scenarios.append(self)
+
+    cls.__init__ = __init__
+    cls._view_tracked = True
+
+
+_track_scenarios()
+
+
 def host_log_problems(host) -> list[str]:
     """fold.replay over the events a FakeHost received, split into runs at
     each session_start (a fresh guest starts again at seq 1)."""
@@ -59,6 +79,25 @@ def host_log_problems(host) -> list[str]:
         _state, errors = replay(events)
         problems.extend(f"run {i}: {e}" for e in errors)
     return problems
+
+
+@pytest.fixture(autouse=True)
+def verify_task_views(request):
+    """Autouse: for every coordinator Scenario whose loop has returned, the
+    live TaskView equals the one restore() rebuilds from the log (live
+    handling and restore share one reducer)."""
+    from logverify import skipped
+    _scenarios.clear()
+    yield
+    scenarios = list(_scenarios)
+    _scenarios.clear()
+    if skipped(request):
+        return
+    problems = [p for scn in scenarios if scn.thread is not None and not scn.thread.is_alive()
+                for p in fake_coordinator.view_problems(scn)]
+    if problems:
+        pytest.fail("live TaskView differs from the restored one:\n  " + "\n  ".join(problems[:20]),
+                    pytrace=False)
 
 
 @pytest.fixture(autouse=True)

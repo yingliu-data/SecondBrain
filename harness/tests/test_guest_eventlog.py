@@ -1,8 +1,10 @@
 """guest.eventlog — segments, acked marker, recovery, the log-writer thread."""
 import threading
+import time
 
 import pytest
 
+from guest import eventlog as eventlog_mod
 from guest.eventlog import ACKED_MARKER, SEGMENT_EVENTS, EventLog, LogWriter, segment_name
 from protocol.events import make_event
 
@@ -166,6 +168,7 @@ def test_log_writer_appends_then_sends(tmp_path):
     assert log.last_seq == 5
     assert [e["seq"] for e in transport.sent] == [1, 2, 3, 4, 5]
     writer.mark_acked(5)
+    assert writer.flush(timeout=5)           # flush writes the pending marker
     assert log.acked_seq == 5
     writer.stop()
     assert writer.errors == []
@@ -193,3 +196,117 @@ def test_log_writer_flush_times_out_when_not_started(tmp_path):
     writer.start()
     assert writer.flush(timeout=5) is True
     writer.stop()
+
+
+class CountingLog(EventLog):
+    """Counts extend() calls (one fsync each) and marker writes."""
+
+    def __init__(self, *a, **kw):
+        self.extends: list = []
+        self.marks: list = []
+        super().__init__(*a, **kw)
+
+    def extend(self, events):
+        self.extends.append([e["seq"] for e in events])
+        super().extend(events)
+
+    def mark_acked(self, seq):
+        self.marks.append(seq)
+        super().mark_acked(seq)
+
+
+class GatedTransport(SpyTransport):
+    """Blocks the first send until released, so later puts queue up."""
+
+    def __init__(self):
+        super().__init__()
+        self.gate = threading.Event()
+
+    def send_event(self, event):
+        self.gate.wait(5)
+        super().send_event(event)
+
+
+def test_log_writer_batches_queued_events_into_one_extend(tmp_path):
+    log = CountingLog(tmp_path)
+    transport = GatedTransport()
+    writer = LogWriter(log, transport)
+    writer.start()
+    writer.put(ev(1))                          # the thread takes it and blocks in send
+    for seq in range(2, 51):
+        writer.put(ev(seq))
+    transport.gate.set()
+    assert writer.flush(timeout=5)
+    assert [e["seq"] for e in transport.sent] == list(range(1, 51))
+    assert [s for batch in log.extends for s in batch] == list(range(1, 51))
+    assert len(log.extends) <= 3               # 1, then the 49 queued behind it
+    assert log.read() == [ev(s) for s in range(1, 51)]
+    writer.stop()
+    assert writer.errors == []
+
+
+def test_log_writer_batch_with_a_bad_event_still_writes_and_sends_the_rest(tmp_path):
+    log = EventLog(tmp_path)
+    transport = GatedTransport()
+    writer = LogWriter(log, transport)
+    writer.start()
+    writer.put(ev(1))
+    for e in (ev(2), ev(2), ev(3)):            # a duplicate seq in the middle of a batch
+        writer.put(e)
+    transport.gate.set()
+    assert writer.flush(timeout=5)
+    assert log.last_seq == 3
+    assert [e["seq"] for e in transport.sent] == [1, 2, 2, 3]
+    assert len(writer.errors) == 1 and "seq 2" in writer.errors[0]
+    writer.stop()
+
+
+def test_log_writer_coalesces_ack_marker_writes(tmp_path, monkeypatch):
+    monkeypatch.setattr(eventlog_mod, "ACK_MARKER_INTERVAL_MS", 60_000)
+    log = CountingLog(tmp_path)
+    writer = LogWriter(log, SpyTransport())
+    writer.start()
+    for seq in range(1, 21):
+        writer.put(ev(seq))
+    assert writer.flush(timeout=5)
+    for seq in range(1, 21):
+        writer.mark_acked(seq)
+    assert log.marks == []                     # nothing per ack
+    assert writer.flush(timeout=5)
+    assert log.acked_seq == 20 and (tmp_path / "events" / ACKED_MARKER).read_text() == "20\n"
+    assert len(log.marks) == 1
+    writer.stop()
+
+
+def test_log_writer_writes_a_pending_marker_on_its_own(tmp_path, monkeypatch):
+    monkeypatch.setattr(eventlog_mod, "ACK_MARKER_INTERVAL_MS", 20)
+    log = EventLog(tmp_path)
+    writer = LogWriter(log, SpyTransport())
+    writer.start()
+    writer.put(ev(1))
+    assert writer.flush(timeout=5)
+    writer.mark_acked(1)
+    deadline = time.time() + 5
+    while log.acked_seq != 1 and time.time() < deadline:
+        time.sleep(0.01)
+    assert log.acked_seq == 1                  # no event, no flush: the thread wrote it
+    writer.stop()
+
+
+def test_log_writer_ack_beyond_the_appended_seq_applies_once_written(tmp_path):
+    log = EventLog(tmp_path)
+    writer = LogWriter(log, SpyTransport())
+    writer.mark_acked(3)                       # not appended yet: no error, nothing written
+    writer.sync_acked()
+    assert log.acked_seq == 0
+    writer.start()
+    for seq in (1, 2):
+        writer.put(ev(seq))
+    assert writer.flush(timeout=5)
+    assert log.acked_seq == 2                  # clamped to what is on disk
+    writer.put(ev(3))
+    writer.stop()                              # stop drains, then writes the marker
+    assert log.acked_seq == 3
+    assert EventLog(tmp_path).acked_seq == 3
+    with pytest.raises(ValueError):
+        writer.mark_acked(-1)
