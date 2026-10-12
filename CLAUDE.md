@@ -29,10 +29,10 @@
 - Agent engine (host half): [agent-api/app/host/worker.py](agent-api/app/host/worker.py) drives one microVM guest per session; the guest harness (stdlib, event-sourced) is [harness/guest/](harness/guest/), the shared wire/event protocol [harness/protocol/](harness/protocol/), design and runbooks in [harness/docs/](harness/docs/)
 - Auth middleware: [agent-api/app/auth/middleware.py](agent-api/app/auth/middleware.py)
 - Skills folder: [agent-api/app/skills/](agent-api/app/skills/)
-- Tenants ("entries", per-API-key toolsets): [agent-api/app/tenants/](agent-api/app/tenants/) — config `data/tenants.json` (see [tenants.json.example](agent-api/tenants.json.example)), restart to apply
-- MCP: the [mcp-gateway/](mcp-gateway/) service (own container, config `gateway.json`) fronts every upstream MCP server; guests reach it through [agent-api/app/host/gateway_forwarder.py](agent-api/app/host/gateway_forwarder.py) — first server: wcc-pipeline `workspace/mcp_server/`
+- Tenants ("entries", per-API-key toolsets): [agent-api/app/tenants/](agent-api/app/tenants/) — config `data/tenants.json` (see [tenants.json.example](agent-api/tenants.json.example)), restart to apply; its `mcp_servers` lists are ignored by agent-api (MCP access lives in the gateway's `gateway.json`, generated with `cd mcp-gateway && uv run python -m app.migrate_config ../agent-api/data/tenants.json > data/gateway.json`)
+- MCP: the [mcp-gateway/](mcp-gateway/) service (own container, config `mcp-gateway/data/gateway.json` — see [gateway.json.example](mcp-gateway/gateway.json.example), restart to apply) fronts every upstream MCP server; guests reach it through [agent-api/app/host/gateway_forwarder.py](agent-api/app/host/gateway_forwarder.py) — first server: wcc-pipeline `workspace/mcp_server/`
 - Temporal session workflows and schedules: [flows/](flows/) (activities in [agent-api/app/host/activities.py](agent-api/app/host/activities.py))
 - Tests: `cd agent-api && uv sync && uv run pytest`; also `harness/`, `mcp-gateway/` and `flows/` each `uv run pytest` (deps are uv-managed: `pyproject.toml` + `uv.lock`)
-- Replay / verify session event logs: `python -m protocol.replay verify <session_dir>` (see [harness/docs/REPLAY.md](harness/docs/REPLAY.md))
+- Replay / verify session event logs: `cd harness && uv run python -m protocol.replay verify <session_dir>` (see [harness/docs/REPLAY.md](harness/docs/REPLAY.md))
 - CI/CD: [.github/workflows/deploy_agent_api.yml](.github/workflows/deploy_agent_api.yml), [.github/workflows/build_mcp_gateway.yml](.github/workflows/build_mcp_gateway.yml) (images build from the repo root)
 - Docker: [docker-compose.yml](docker-compose.yml)
