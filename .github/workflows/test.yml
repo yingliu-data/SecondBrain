@@ -1,7 +1,9 @@
 name: Test
 
 # The four suites against the one workspace lock (root pyproject.toml +
-# uv.lock), one job per suite, plus a guest-image smoke test. Each suite is
+# uv.lock), one job per suite and Python version, plus a guest-image smoke
+# test, a lint job (ruff, config in the root pyproject.toml) and a lock
+# check (uv.lock matches every pyproject.toml). Each suite is
 # its own pytest process: agent-api and mcp-gateway both have a top-level
 # `app` package, and harness/tests is a package. Every suite runs under
 # pytest-xdist (-n auto; each worker process starts its own Temporal test
@@ -35,14 +37,17 @@ concurrency:
 
 jobs:
   suite:
-    name: ${{ matrix.suite }}
+    name: ${{ matrix.suite }} (py${{ matrix.python }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         suite: ${{ fromJSON(inputs.suites || '["harness", "flows", "agent-api", "mcp-gateway"]') }}
+        # 3.12 = the images (python:3.12-slim) and requires-python's floor
+        python: ['3.12', '3.13']
     env:
       UV_FROZEN: '1'                              # never re-resolve in CI
+      UV_PYTHON: ${{ matrix.python }}
       API_SECRET_KEY: ci-test                     # agent-api's config reads it at import
       # the workspace member's package name (harness/ is secondbrain-harness)
       PACKAGE: ${{ matrix.suite == 'harness' && 'secondbrain-harness' || matrix.suite }}
@@ -63,6 +68,38 @@ jobs:
       - name: pytest
         working-directory: ${{ matrix.suite }}
         run: uv run --frozen pytest -q -n auto
+
+  lint:
+    if: ${{ !inputs.suites }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.12.3'
+
+      - name: ruff check
+        run: uvx ruff@0.14.0 check --output-format github .
+
+  lock:
+    # uv.lock is current: a pyproject.toml change without `uv lock` fails here
+    # (the suites run --frozen, so they would test the stale lock silently)
+    if: ${{ !inputs.suites }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.12.3'
+
+      - name: uv lock --check
+        run: uv lock --check
 
   guest-pyz:
     # Guest image smoke test: only the stdlib zipapp (no rootfs/kernel, so
