@@ -72,8 +72,9 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from protocol.canonical import sha256_hex
 from protocol.clock import elapsed_ms, now_ms
-from protocol.fsio import atomic_write, file_sha256
+from protocol.fsio import atomic_write_json, file_sha256, swap_dir
 from protocol.ports import SOCKET_PREFIX, socket_name
 
 from app.host.sandbox import Sandbox as _SandboxBase
@@ -275,7 +276,7 @@ def image_version_from_shas(kernel_sha256: str, rootfs_sha256: str) -> str:
     """Same formula as harness/image/build.sh `version`:
     first 16 hex of sha256("<kernel sha>\\n<rootfs sha>\\n")."""
     blob = f"{kernel_sha256}\n{rootfs_sha256}\n".encode()
-    return hashlib.sha256(blob).hexdigest()[:16]
+    return sha256_hex(blob)[:16]
 
 
 def image_version(config: FirecrackerConfig) -> str:
@@ -630,7 +631,7 @@ class FirecrackerSandbox(_SandboxBase):
         write_json(staging / meta_name, meta)
         # The VM is paused and its block files fsynced by Firecracker: kill it.
         self._reap()
-        _swap_dir(staging, dest)
+        swap_dir(staging, dest)
         self.last_vm_event = {"op": "snapshot", "source": source, "ms": _ms_since(t0)}
 
     def _ensure_workspace_image(self) -> None:
@@ -803,19 +804,7 @@ def write_json(path: Path, obj: dict) -> None:
     durable=False, as before: the snapshot directory is swapped in by rename
     only after the VM's own files, and a META.json lost to a power cut only
     makes the snapshot unusable (restore falls back), never wrong. 0644."""
-    atomic_write(path, (json.dumps(obj, indent=2, sort_keys=True) + "\n").encode(),
-                 durable=False, mode=0o644)
-
-
-def _swap_dir(staging: Path, dest: Path) -> None:
-    """Replace `dest` with `staging`. A running VM mapping the old `mem` keeps
-    its inode; nothing is truncated in place."""
-    old = dest.parent / f".{dest.name}.old"
-    shutil.rmtree(old, ignore_errors=True)
-    if dest.exists():
-        os.replace(dest, old)
-    os.replace(staging, dest)
-    shutil.rmtree(old, ignore_errors=True)
+    atomic_write_json(path, obj, durable=False, mode=0o644, indent=2, sort_keys=True)
 
 
 def _copy_sparse(src: Path, dst: Path, chunk: int = 1 << 20) -> None:
@@ -843,12 +832,8 @@ def _copy_sparse(src: Path, dst: Path, chunk: int = 1 << 20) -> None:
 
 
 def _unlink(path: Path | None) -> None:
-    if path is None:
-        return
-    try:
-        path.unlink()
-    except FileNotFoundError:
-        pass
+    if path is not None:
+        path.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":  # pragma: no cover - the old entry point

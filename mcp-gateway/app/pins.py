@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from protocol.canonical import canonical_json, sha256_hex
-from protocol.fsio import atomic_write
+from protocol.fsio import atomic_write_json
 from protocol.mcp import gateway_event_identity
 
 
@@ -104,4 +104,4 @@ class PinStore:
         """Atomic write of a `SessionPins.to_json()` snapshot (blocking I/O)."""
         p = self.path(ident)
         p.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write(p, json.dumps(data, sort_keys=True).encode())     # durable
+        atomic_write_json(p, data, sort_keys=True)     # durable

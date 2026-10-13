@@ -21,7 +21,7 @@ import pytest
 
 from guest.coordinator import LOST_CONTENT
 from protocol.canonical import canonical_json
-from protocol.fold import replay, state_hash, verify_checkpoints
+from protocol.fold import state_hash, verify_checkpoints
 from tests.fakes.fake_host import HOLD, FakeHost
 from tests.fakes.fake_llm import FakeLLM, text, tool_calls
 from tests.test_guest_e2e import check_replay, hello_body

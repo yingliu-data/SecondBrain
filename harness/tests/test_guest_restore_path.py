@@ -10,7 +10,6 @@ import json
 import queue
 import subprocess
 import sys
-import threading
 import time
 import zipfile
 from pathlib import Path

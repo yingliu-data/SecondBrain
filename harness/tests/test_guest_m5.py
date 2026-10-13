@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import time
 
-import pytest
 
 from guest.config import from_hello
 from protocol.events import UNANSWERED, validate_event

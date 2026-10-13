@@ -1,7 +1,6 @@
 """Endpoints: listeners named after the vsock ports; ControlChannel hands
 parsed lines to the asyncio loop."""
 import asyncio
-import os
 import socket
 import stat
 import threading

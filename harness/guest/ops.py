@@ -108,7 +108,6 @@ HARNESS_DIR = builtin.HARNESS_DIR     # the guest's own top-level dir (spill, to
 LOCAL_SPILL_DIR = "spill"             # local spill copies: {workspace}/.harness/spill/
 DEFAULT_SPILL_THRESHOLD = DEFAULT_LIMITS["spill_threshold"]
 DEFAULT_SPILL_QUOTA = DEFAULT_LIMITS["spill_quota_bytes"]
-DEFAULT_OP_TIMEOUT = float(DEFAULT_LIMITS["op_timeout_s"]["guest"])
 RESEND_TIMEOUT_S = 30.0               # send_mcp: a fire-and-forget re-send nobody waits for
 LOST_MCP = "error: operation lost (the gateway forwarder no longer holds this call)"
 READ_ONLY_TOOLS = frozenset(tools.READ_ONLY)   # finishing one does not invalidate the tree id
@@ -183,7 +182,7 @@ def workspace_tree_id(workspace: Path) -> str:
 
 
 def _symlink_digest(path) -> str:
-    return hashlib.sha256(b"symlink:" + os.readlink(path).encode()).hexdigest()
+    return sha256_hex(b"symlink:" + os.readlink(path).encode())
 
 
 class _TreeCache:
@@ -264,15 +263,12 @@ class OperationManager:
         """Queue one guest-side tool call. Never blocks, never raises for
         bad input: an unknown tool, a question or invalid args are reported
         as a failed result."""
-        job = _Job(call_id=call_id, name=name, args=args if isinstance(args, dict) else {},
-                   keys=_serial_keys(name, args if isinstance(args, dict) else {}),
+        job_args = args if isinstance(args, dict) else {}
+        job = _Job(call_id=call_id, name=name, args=job_args, keys=_serial_keys(name, job_args),
                    submitted=time.monotonic())
         with self._lock:
-            if call_id in self._jobs:
-                self._post(call_id, False, f"Error: duplicate call_id {call_id!r}", "failed",
-                           job.submitted, None)
+            if not self._register_locked(job):
                 return
-            self._jobs[call_id] = job
             errors = tools.validate_args(name, args)
             spec = tools.SPECS.get(name)
             runnable = spec is not None and (spec.impl is not None or name == "bash")
@@ -291,6 +287,16 @@ class OperationManager:
                 self._dispatch_locked()
             else:
                 self._pool.submit(self._run, job)
+
+    def _register_locked(self, job: _Job) -> bool:
+        """Hold self._lock. Track the job under its call_id; a call_id already
+        tracked is reported failed (the job is not tracked) and False returned."""
+        if job.call_id in self._jobs:
+            self._post(job.call_id, False, f"Error: duplicate call_id {job.call_id!r}", "failed",
+                       job.submitted, None)
+            return False
+        self._jobs[job.call_id] = job
+        return True
 
     def abort_all(self) -> set[str]:
         """SIGKILL every running process group, drop queued ops; each is
@@ -321,11 +327,8 @@ class OperationManager:
         job = _Job(call_id=call_id, name=name, args=args if isinstance(args, dict) else {},
                    keys=frozenset(), submitted=time.monotonic(), mcp_job=True)
         with self._lock:
-            if call_id in self._jobs:
-                self._post(call_id, False, f"Error: duplicate call_id {call_id!r}", "failed",
-                           job.submitted, None)
+            if not self._register_locked(job):
                 return
-            self._jobs[call_id] = job
         if self.mcp is None:
             self._finish(job, False, "error: no gateway client in this guest", "failed")
             return

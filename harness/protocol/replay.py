@@ -63,6 +63,7 @@ import sys
 from collections.abc import Iterator
 from pathlib import Path
 
+from protocol.canonical import is_int
 from protocol.fold import State, replay as fold_replay, state_hash
 
 RUN_RE = re.compile(r"^r\d{4}$")
@@ -170,7 +171,7 @@ def _read_lines(paths: list[Path], label: str, problems: list[str],
             if not line.strip():
                 continue
             prev = out[-1].get(seq_key) if out else 0
-            nxt = prev + 1 if isinstance(prev, int) and not isinstance(prev, bool) else "?"
+            nxt = prev + 1 if is_int(prev) else "?"
             torn = lineno == len(lines) and not text.endswith("\n")
             try:
                 obj = json.loads(line)
@@ -188,7 +189,7 @@ def _read_lines(paths: list[Path], label: str, problems: list[str],
 
 def _by_seq(events: list[dict]) -> list[dict]:
     """Stable sort by seq when every seq is an int (fold.replay reports the rest)."""
-    if all(isinstance(e.get("seq"), int) and not isinstance(e.get("seq"), bool) for e in events):
+    if all(is_int(e.get("seq")) for e in events):
         return sorted(events, key=lambda e: e["seq"])
     return events
 
@@ -313,7 +314,7 @@ def _host_problems(records: list[dict]) -> list[str]:
     problems = []
     for i, rec in enumerate(records, 1):
         hseq = rec.get("hseq")
-        if not isinstance(hseq, int) or isinstance(hseq, bool) or hseq != i:
+        if not is_int(hseq) or hseq != i:
             problems.append(f"host: hseq {i}: expected hseq {i} (gapless from 1), got {hseq!r}")
             break
         if not isinstance(rec.get("type"), str) or not rec.get("type"):

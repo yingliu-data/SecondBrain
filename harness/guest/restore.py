@@ -128,7 +128,7 @@ class RestoreMixin:
             if wall:
                 used_ms = restored["wall_used_ms"]
                 if restored["live_since"] is not None:
-                    used_ms += max(0, self.clock.now_ms() - restored["live_since"])
+                    used_ms += self._since(restored["live_since"])
                 self._arm("wall_clock", "wall", max(1.0, float(wall) - used_ms / 1000.0))
 
     def _resume_after_park(self, restored: dict) -> None:

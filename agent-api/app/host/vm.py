@@ -24,7 +24,7 @@ from pathlib import Path
 
 from protocol.allowlist import effective_tools
 from protocol.clock import elapsed_ms, now_ms
-from protocol.fsio import atomic_write
+from protocol.fsio import atomic_write_json
 from protocol.messages import Outbox
 
 from app.host.bulk_server import BulkServer
@@ -42,7 +42,7 @@ def write_json(path: Path, obj: dict) -> None:
     """An atomic, durable JSON file (a ticket, vm/parked.json): what a
     restart reads back. 0644 as before."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write(path, json.dumps(obj, separators=(",", ":")).encode("utf-8"), mode=0o644)
+    atomic_write_json(path, obj, compact=True, mode=0o644)
 
 
 def wake_order(item: tuple[str, dict]) -> bool:
@@ -82,9 +82,11 @@ class VMLifecycle:
         self._question_park = value
         self._pulse()
 
-    def _set_link(self, up: bool) -> None:
-        if up != self._link_up:
-            self._link_up = up
+    def _set_channel(self, ch) -> None:
+        """The control channel of this guest run (None: the link is down);
+        a change wakes the waiters (_until)."""
+        if ch is not self._channel:
+            self._channel = ch
             self._pulse()
 
     def _set_parked_seen(self, seen: bool) -> None:
@@ -210,12 +212,12 @@ class VMLifecycle:
     def _drop_link(self) -> None:
         if self._channel is not None:
             self._channel.close()
-            self._channel = None
-        self._set_link(False)
+        self._set_channel(None)
 
     async def _wait_link(self) -> bool:
-        await self._until(lambda: self._link_up, timeout=self.settings.hello_timeout_s)
-        return self._link_up
+        await self._until(lambda: self._channel is not None,
+                          timeout=self.settings.hello_timeout_s)
+        return self._channel is not None
 
     # ------------------------------------------------------------ boot
     async def _start_guest(self, snapshot_dir: Path | None) -> tuple[str, str, float] | None:
@@ -281,7 +283,8 @@ class VMLifecycle:
         if driver is not None:
             self.answer_wait_s = self.answer_wait_for(driver)
         carried: list[tuple[str, dict]] = []
-        migrated = not resume and self.sync.migrated_run
+        # off the loop: it reads the run from disk
+        migrated = not resume and await asyncio.to_thread(lambda: self.sync.migrated_run)
         resume = resume or migrated
         if resume:
             highest = 0
@@ -297,20 +300,19 @@ class VMLifecycle:
         held, self._deferred = self._deferred, []
         try:
             started = await self._start_guest(None)
+            if started is None:
+                raise GuestError(f"guest did not connect within {self.settings.hello_timeout_s}s")
         except BaseException:
             self.vm_state = "none"
             self._deferred = held + self._deferred
             raise
-        if started is None:
-            self.vm_state = "none"
-            self._deferred = held + self._deferred
-            raise GuestError(f"guest did not connect within {self.settings.hello_timeout_s}s")
         await self.load_gateway_entries()
-        hello = self.build_hello(resume=resume)
+        # off the loop: the memory indexes are read, a migrated run rewritten
+        hello = await asyncio.to_thread(self.build_hello, resume=resume)
         if migrated:
             # the migrated run's allowlist holds only its legacy tools:
             # re-pin it to this hello's before the guest takes the log return
-            self.sync.retool_migrated(effective_tools(hello["config"]))
+            await asyncio.to_thread(self.sync.retool_migrated, effective_tools(hello["config"]))
         self.last_hello = hello
         self.send_control("hello", hello)
         self._mark_running(*started, carried + held, resume=resume)
@@ -375,17 +377,20 @@ class VMLifecycle:
         if not ok:
             await asyncio.to_thread(self.sandbox.stop)   # its memory is lost: resume from the log
         self._drop_link()
-        self.vm_state = "parked"
         # the answer wait runs from the park: a restarted process resumes
         # the direct path's wait with what is left (vm/parked.json)
         self._answer_deadline_ms = (now_ms() + int(self.answer_wait_s * 1000)
                                     if question else None)
         self._park_driver = self._task_driver if question else None
+        cp = self.sync.state.parked_at
+        # written off the loop while still "parking" (the parked guest's
+        # link-down is expected then): nobody sees "parked" before the file
+        # exists, and the transition through the `parked` event stays atomic
+        await asyncio.to_thread(self._write_parked_info, self._parked_info(reason, cp, question))
+        self.vm_state = "parked"
         if question:
             self._slot.release()        # waiting for an answer is not work
         self.question_park = question
-        cp = self.sync.state.parked_at
-        self._write_parked_file(reason, cp)
         self.sync.host_event("workflow", {"kind": "parked", "reason": reason, "checkpoint_seq": cp,
                                           "snapshot": ok,
                                           **({"question_id": question["question_id"]}
@@ -478,7 +483,7 @@ class VMLifecycle:
             logger.exception("session %s: idle park failed", self.session_key)
 
     # ------------------------------------------------------------ parked file
-    def _write_parked_file(self, reason: str, checkpoint_seq) -> None:
+    def _parked_info(self, reason: str, checkpoint_seq, question: dict | None) -> dict:
         """What a new Worker (agent-api restart) needs to resume the parked
         guest: cseq continues, the guest's answer_wait_s; for a question
         park its {input_id, question_id}, the answer deadline (epoch ms) and
@@ -489,19 +494,20 @@ class VMLifecycle:
                 "reason": reason, "checkpoint_seq": checkpoint_seq,
                 "last_seq": self.sync.last_seq, "at": now_ms(),
                 "answer_wait_s": self.answer_wait_s}
-        if self.question_park is not None:
-            info.update(question=dict(self.question_park), driver=self._park_driver,
+        if question is not None:
+            info.update(question=dict(question), driver=self._park_driver,
                         answer_deadline_ms=self._answer_deadline_ms)
+        return info
+
+    def _write_parked_info(self, info: dict) -> None:
+        """vm/parked.json (_parked_info); a failure is logged. Blocking I/O."""
         try:
             write_json(self.parked_file, info)
         except OSError as e:
             logger.warning("could not write %s: %s", self.parked_file, e)
 
     def _clear_parked_file(self) -> None:
-        try:
-            self.parked_file.unlink()
-        except FileNotFoundError:
-            pass
+        self.parked_file.unlink(missing_ok=True)
 
     def _load_parked(self) -> None:
         try:

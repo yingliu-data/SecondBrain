@@ -3,9 +3,9 @@ halves share. Stdlib only, pure data.
 
   DEFAULT_LIMITS        hello.config.limits defaults. The guest's Limits
                         dataclass fills from it (a key the hello leaves out
-                        keeps its default); the host's Worker.limits() starts
-                        from a copy and applies only env (HARNESS_*) and
-                        tenant overrides.
+                        keeps its default); the host's limits()
+                        (agent-api app/host/hello.py) starts from a copy and
+                        applies only env (HARNESS_*) and tenant overrides.
   SEGMENT_EVENTS        events per log segment file (seq 1..N in 000001.jsonl,
                         ...), guest buffer and host store alike. A constant,
                         not a knob: the host finds a seq's segment and counts

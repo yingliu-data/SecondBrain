@@ -74,7 +74,9 @@ class Projector:
     def __init__(self) -> None:
         self._names: dict[str, str] = {}        # call_id -> tool name
         self._host_results: dict[str, str] = {}
-        self._live: dict[str, str] = {}         # turn_id -> text sent for it (this task, in order)
+        # turn_id -> the last character of the text sent for it ("" for none;
+        # this task, in order): all the separator needs
+        self._live: dict[str, str] = {}
         self._compaction: set[str] = set()      # compaction turn_ids: their summary is never shown
 
     def begin_task(self) -> None:
@@ -97,8 +99,7 @@ class Projector:
             prev = next(reversed(self._live.values()), "")
             if prev and not prev[-1].isspace():
                 out.append(NEWLINE)
-            self._live[turn_id] = ""
-        self._live[turn_id] += text
+        self._live[turn_id] = (self._live.get(turn_id, "") + text)[-1:]
         return out + frames
 
     def _words(self, turn_id, text: str) -> list[str]:

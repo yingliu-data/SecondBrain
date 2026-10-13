@@ -21,10 +21,10 @@ from __future__ import annotations
 
 from protocol.canonical import canonical_json, is_int
 from protocol.events import OP_INPUT_REQUIRED, UNANSWERED
+from protocol.fold import TASK_INPUT_KINDS as INPUT_KINDS
 
 DOOM_LOOP_REPEATS = 3
 QUESTION_TOOL = "question"
-INPUT_KINDS = ("task", "follow_up", "steer")
 HOST_CLOCK_KINDS = ("host_hello", "host_heartbeat")   # clock events in host time, not the guest's
 RESUMED = "resumed"               # clock kind written first on every wake from a park (ends its stretch)
 SIDE_CALL_SIDES = ("host", "device")   # calls that wait for a side_result

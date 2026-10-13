@@ -10,7 +10,7 @@ from protocol.fold import fold, state_hash
 
 from app.host.sides import DeviceCalls
 from app.host.stream import DONE, tokens
-from app.host.worker import GuestError, Worker, Workers, strip_current_time
+from app.host.worker import Worker, Workers, strip_current_time
 from host_fakes import (FakeRegistry, FakeSandbox, FakeTenant, read_jsonl, session,  # noqa: F401
                         token_text, users_root, worker_kwargs)
 from eventlog_fakes import conversation
@@ -180,7 +180,6 @@ async def test_guest_death_fails_the_task_with_error_and_done(session):
         def start(self, session_dir):
             super().start(session_dir)
             g = self.guest
-            orig = g._on_input
 
             def die(msg):
                 g.emit("input", {"input_id": msg["body"]["input_id"], "kind": "task",

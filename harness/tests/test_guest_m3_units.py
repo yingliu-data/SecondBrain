@@ -19,13 +19,13 @@ from pathlib import Path
 import pytest
 
 from guest import bulk as gbulk
-from guest.coordinator import LOST_CONTENT, Coordinator
+from guest.coordinator import LOST_CONTENT
 from guest.main import mount_workspace, rebuild_eventlog
 from guest.transport import Transport, UnixConnector
 from protocol import bulk as pbulk
 from protocol.canonical import hash_value
 from protocol.events import validate_log
-from protocol.fold import State, replay, state_hash, verify_checkpoints
+from protocol.fold import replay, state_hash, verify_checkpoints
 from protocol.messages import Inbox, Outbox, ProtocolError, control_message, encode
 from protocol.ports import CONTROL, socket_name
 from tests.fakes.fake_host import FakeHost

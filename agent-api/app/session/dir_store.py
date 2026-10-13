@@ -20,7 +20,6 @@ finds them, agent-api logs them once at startup, and
 """
 from __future__ import annotations
 
-import json
 import logging
 import shutil
 from pathlib import Path
@@ -34,7 +33,7 @@ def read_identity(path: Path) -> dict[str, Any] | None:
     """{user, tenant, session_id, meta} of a session directory, from its
     session.json; None when it has none or it is unreadable."""
     try:
-        meta = json.loads((path / "session.json").read_text())
+        meta = SessionDir(path).read_meta()
     except (OSError, ValueError):
         return None
     if not isinstance(meta, dict):
@@ -80,7 +79,7 @@ class DirStore:
         if existing is not None:
             return existing
         p = self.canonical_path(user, tenant, session_id)
-        if (p / "session.json").exists():
+        if SessionDir(p).session_json.exists():
             # the canonical name is injective: only a hand-made directory
             # could hold another identity here
             raise ValueError(f"session directory {p} belongs to another session")

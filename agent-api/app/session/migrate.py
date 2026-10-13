@@ -66,7 +66,7 @@ import shutil
 import sqlite3
 from pathlib import Path
 
-from protocol.canonical import derive_id, derive_key_id, hash_value
+from protocol.canonical import derive_id, derive_key_id, hash_value, is_int
 from protocol.clock import now_iso
 from protocol.events import make_event
 from protocol.fold import checkpoint_body, replay
@@ -77,7 +77,7 @@ from app.config import SESSION_DB_PATH, SESSIONS_ROOT
 from app.host.state_sync import replace_run_dir
 from app.session.dir_store import DirStore
 from app.session.eventlog import parse_ts
-from app.session.ids import is_safe_id
+from app.session.ids import is_safe_id, session_key
 from app.session.session_dir import SessionDir
 
 LEGACY_MODEL = "legacy"
@@ -212,7 +212,7 @@ def _trace_tools(session: SessionDir) -> dict[str, list[dict]]:
         call["result"] = _text(detail.get("result"))
         call["result_ts"] = row.get("ts")
         d = detail.get("duration_ms", row.get("duration_ms"))
-        if isinstance(d, int) and not isinstance(d, bool) and d >= 0:
+        if is_int(d, 0):
             call["duration_ms"] = d
     return by_ticket
 
@@ -315,7 +315,7 @@ def build_events(meta: dict, history: list[tuple[int, dict]],
     log = _Log(session_id, user, tenant, first_ts or meta.get("created_at") or _EPOCH_TS)
     log.at_ts(log.ts)
     log.emit("session_start", {
-        "user": user, "tenant": tenant, "workflow_run_id": f"{user}/{tenant}/{session_id}",
+        "user": user, "tenant": tenant, "workflow_run_id": session_key(user, tenant, session_id),
         "config_hash": hash_value({"migrated": "history.jsonl"}),
         "system_hash": hash_value({"migrated": "history.jsonl"}),
         "tools": [{"name": n, "side": "host", "pin": None} for n in tool_names],

@@ -92,13 +92,16 @@ async def _drain(worker, sink, task: asyncio.Future | None = None):
     empty. The sink is detached at the end (or a client disconnect)."""
     try:
         while True:
-            try:
-                item = await asyncio.wait_for(sink.get(), timeout=HARNESS_KEEPALIVE_S)
-            except asyncio.TimeoutError:
-                if task is not None and task.done() and sink.empty():
-                    return
-                yield KEEPALIVE
-                continue
+            if not sink.empty():        # fast path: no wait_for task per queued item
+                item = sink.get_nowait()
+            else:
+                try:
+                    item = await asyncio.wait_for(sink.get(), timeout=HARNESS_KEEPALIVE_S)
+                except asyncio.TimeoutError:
+                    if task is not None and task.done() and sink.empty():
+                        return
+                    yield KEEPALIVE
+                    continue
             if item is None:
                 return
             yield item

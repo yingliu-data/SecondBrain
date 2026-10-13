@@ -386,7 +386,6 @@ def _brain(request: dict):
         done = sum(1 for m in request["messages"] if m.get("role") == "tool")
         return text(f"SUMMARY: goal: count lines; progress: {done} echoes done since the last "
                     f"summary; next: keep going.", usage=usage)
-    rounds = sum(1 for m in request["messages"] if m.get("role") == "assistant" and m.get("tool_calls"))
     if _brain.calls < ROUNDS:
         _brain.calls += 1
         return tool_calls([(f"call_{_brain.calls}", "bash", {"command": f"echo line {_brain.calls}"})],

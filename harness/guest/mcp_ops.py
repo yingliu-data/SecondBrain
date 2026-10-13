@@ -90,7 +90,7 @@ class McpOpsMixin:
             self.log(f"ops.cancel failed: {exc}", level="warning")
         self._finish_call(call_id, "timeout",
                           f"error: mcp call {name} timed out after {self.cfg.op_timeout_for(name, 'mcp'):g} s",
-                          duration_ms=max(0, self.clock.now_ms() - mcp["started_ms"]))
+                          duration_ms=self._since(mcp["started_ms"]))
 
     def _on_op_input(self, call_id: str, request: dict) -> None:
         """The gateway needs input: suspend the op and ask."""

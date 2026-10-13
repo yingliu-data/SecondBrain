@@ -425,7 +425,7 @@ def test_side_result_from_fake_host(link):
 
 def test_fake_host_callable_side_results(tmp_path):
     inbound = queue.Queue()
-    with FakeHost(tmp_path, HELLO, side_results=lambda call: {"content": call["name"], "ok": True}) as host:
+    with FakeHost(tmp_path, HELLO, side_results=lambda call: {"content": call["name"], "ok": True}):
         transport = Transport(UnixConnector(tmp_path), inbound, backoff_initial=0.02)
         transport.start()
         wait_item(inbound, "control", type="hello")

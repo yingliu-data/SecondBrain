@@ -1,6 +1,7 @@
 """The protocol, guest and bench packages import the standard library only
 (bench may also use the stdlib test doubles in tests/fakes)."""
-import ast, sys
+import ast
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]

@@ -24,7 +24,8 @@ records stay in order.
 
 Failure: a batch whose write or fsync fails is cut back to the size the
 file had before it (no torn line stays behind) and its futures get the
-error. With `group` (StateSync passes itself), the failure also poisons
+error (always an OSError: anything else is wrapped in DurableWriteError).
+With `group` (StateSync passes itself), the failure also poisons
 the group: every later record of that group fails at once, whatever its
 path, until reset(group); a log with a hole in its seqs is never written.
 
@@ -51,6 +52,15 @@ _FLAGS = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_CLOEXEC", 0)
 
 class PoisonedError(OSError):
     """An earlier record of the same group failed: this one is not written."""
+
+
+class DurableWriteError(OSError):
+    """A commit failed with something other than an OSError: its waiters get
+    this (StateSync catches OSError), "TypeName: message"."""
+
+    @classmethod
+    def wrap(cls, exc: BaseException) -> "DurableWriteError":
+        return cls(f"{type(exc).__name__}: {exc}")
 
 
 class _Shard:
@@ -108,11 +118,7 @@ class _Shard:
                     self._commit(path, recs)
                 except Exception as exc:    # never let the shard's thread die
                     logger.exception("durable commit to %s failed", path)
-                    e = OSError(f"{type(exc).__name__}: {exc}")
-                    for rec in recs:
-                        if rec[2] is not None:
-                            self._poison(rec[2], e)     # no later record makes a hole
-                        _resolve(rec[3], error=e)
+                    self._fail(recs, DurableWriteError.wrap(exc))
             for fut in barriers:
                 _resolve(fut, result=None)
 
@@ -139,7 +145,7 @@ class _Shard:
         except Exception as exc:            # not only OSError: never a torn batch left behind
             # an OSError for every waiter (poisoned() -> OSError, StateSync
             # catches OSError), whatever went wrong
-            e = exc if isinstance(exc, OSError) else OSError(f"{type(exc).__name__}: {exc}")
+            e = exc if isinstance(exc, OSError) else DurableWriteError.wrap(exc)
             logger.error("durable append to %s failed: %s", path, e)
             if fd is not None and size is not None:
                 try:
@@ -148,10 +154,7 @@ class _Shard:
                 except OSError:
                     pass
             self._close(path)
-            for rec in live:
-                if rec[2] is not None:
-                    self._poison(rec[2], e)
-                _resolve(rec[3], error=e)
+            self._fail(live, e)
             return
         ino = self._fds[path][1]
         for rec in live:
@@ -180,6 +183,15 @@ class _Shard:
         cached = self._fds.pop(path, None)
         if cached is not None:
             _close_fd(cached[0])
+
+    def _fail(self, recs: list, error: OSError) -> None:
+        """Every record of a failed commit gets `error`, and its group is
+        poisoned: no later record of it makes a hole. (A record already
+        resolved, e.g. refused as poisoned, keeps its own result.)"""
+        for rec in recs:
+            if rec[2] is not None:
+                self._poison(rec[2], error)
+            _resolve(rec[3], error=error)
 
     def _is_poisoned(self, group) -> bool:
         with self._poison_lock:

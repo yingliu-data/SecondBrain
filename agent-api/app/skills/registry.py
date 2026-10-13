@@ -1,5 +1,11 @@
-import importlib, pkgutil, json, logging
+import importlib
+import pkgutil
+import json
+import logging
 from pathlib import Path
+
+from protocol.fsio import atomic_write_json
+
 from .base import BaseSkill
 
 logger = logging.getLogger("skills")
@@ -27,7 +33,7 @@ class SkillRegistry:
         (mcp_*) are config-driven and never persisted here."""
         SKILLS_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
         state = {k: v for k, v in self._enabled.items() if not k.startswith("mcp_")}
-        SKILLS_STATE_FILE.write_text(json.dumps(state, indent=2))
+        atomic_write_json(SKILLS_STATE_FILE, state, durable=False, mode=0o644, indent=2)
 
     def _discover(self):
         """Auto-discover all skill modules under app/skills/."""

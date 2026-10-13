@@ -207,7 +207,22 @@ def _system_hash(system: str, schemas: list) -> str:
 
 def system_hash(cfg) -> str:
     """sha256 over the system text and the tool schemas: the fixed prefix."""
-    return _system_hash(system_block(cfg), tool_schemas(cfg))
+    return _fixed(cfg)[2]
+
+
+_fixed_cache: tuple | None = None   # (cfg, system text, tool schemas, system_hash)
+
+
+def _fixed(cfg) -> tuple:
+    """(system text, tool schemas, system_hash) of `cfg`, computed once per
+    config: the config is fixed for the session (nothing mutates it). One
+    entry, keyed by identity; it holds the cfg so its id cannot be reused."""
+    global _fixed_cache
+    cached = _fixed_cache
+    if cached is None or cached[0] is not cfg:
+        system, schemas = system_block(cfg), tool_schemas(cfg)
+        cached = _fixed_cache = (cfg, system, schemas, _system_hash(system, schemas))
+    return cached[1:]
 
 
 # ---------------------------------------------------------------- preamble
@@ -324,10 +339,9 @@ def _assemble(state, cfg, preambles: dict, tail: list, *, with_tools: bool, prea
               preamble_hash: str, preamble_input_id: str | None) -> Request:
     """[system] + the rendered committed prefix + `tail` (already rendered),
     with the filler tool messages, as a Request. The system text and the tool
-    schemas are computed once and give system_hash too; the canonical text of
+    schemas are computed once per cfg (_fixed) with system_hash; the canonical text of
     {messages, tools, params} gives both `chars` and `request_hash`."""
-    system = system_block(cfg)
-    schemas = tool_schemas(cfg)
+    system, schemas, shash = _fixed(cfg)
     known_calls = set(state.open_calls)
     prefix = [_render(it, state, preambles) for it in _prefix_items(state)]
     present = {m.get("tool_call_id") for m in prefix + tail if m.get("role") == "tool"}
@@ -341,7 +355,7 @@ def _assemble(state, cfg, preambles: dict, tail: list, *, with_tools: bool, prea
         messages=messages,
         tools=tools,
         params=params,
-        system_hash=_system_hash(system, schemas),
+        system_hash=shash,
         request_hash=sha256_hex(text),
         preamble_hash=preamble_hash,
         chars=len(text),
@@ -393,8 +407,9 @@ def build_request(state, cfg, clock_at_ms: int, *, attachments=None, preambles=N
         new_memory = state.session_memory
 
     # the staged suffix: the first user message gets this turn's preamble
+    items = _turn_items(state)
     first_input = None
-    for it in _turn_items(state):
+    for it in items:
         if it["message"].get("role") == "user":
             first_input = it["message"].get("input_id")
             break
@@ -404,7 +419,7 @@ def build_request(state, cfg, clock_at_ms: int, *, attachments=None, preambles=N
 
     suffix = []
     seen_user = False
-    for it in _turn_items(state):
+    for it in items:
         msg = it["message"]
         if msg.get("role") == "user" and not seen_user:
             seen_user = True

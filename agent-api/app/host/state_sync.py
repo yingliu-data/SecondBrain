@@ -92,10 +92,11 @@ import threading
 from collections import ChainMap
 from pathlib import Path
 
-from protocol.canonical import sha256_hex
+from protocol.canonical import is_int, sha256_hex
 from protocol.clock import now_iso
 from protocol.events import validate_event
 from protocol.fold import FoldError, State, apply, apply_valid, checkpoint_body, fold, replay
+from protocol.fsio import swap_dir
 from protocol.limits import SEGMENT_EVENTS
 from protocol.messages import encode
 from protocol.replay import (SessionIndex, host_segments, iter_segment, run_name, run_numbers,
@@ -136,15 +137,10 @@ def replace_run_dir(run_dir: Path, events: list[dict],
     reader sees the old run or the new one, never a part."""
     run_dir = Path(run_dir)
     fresh = run_dir.with_name(f".{run_dir.name}.new")
-    old = run_dir.with_name(f".{run_dir.name}.old")
-    for stale in (fresh, old):
-        if stale.exists():
-            shutil.rmtree(stale)
+    if fresh.exists():
+        shutil.rmtree(fresh)
     write_segments(fresh, events, segment_events)
-    if run_dir.exists():
-        os.rename(run_dir, old)
-    os.rename(fresh, run_dir)
-    shutil.rmtree(old, ignore_errors=True)
+    swap_dir(fresh, run_dir)
 
 
 def retool(events: list[dict], tools: list[dict]) -> list[dict]:
@@ -349,11 +345,16 @@ class StateSync:
         if not runs:
             return
         self.run = runs[-1]
+        try:
+            self._refold()
+        except FoldError as e:
+            raise StateSyncError(f"run {self.run} does not fold: {e}") from e
+
+    def _refold(self) -> None:
+        """The current run folded anew from disk (a FoldError propagates)."""
+        self.state, self._acked, self._made = State(), 0, None
         for ev in _read_run(self.run_dir, 0, self.segment_events):
-            try:
-                apply(self.state, ev)
-            except FoldError as e:
-                raise StateSyncError(f"run {self.run} does not fold: {e}") from e
+            apply(self.state, ev)
         self._acked = self.state.last_seq
 
     def begin_run(self) -> int:
@@ -420,7 +421,7 @@ class StateSync:
         the lost events is accepted again)."""
         with self._lock:
             seq = event.get("seq") if isinstance(event, dict) else None
-            if not isinstance(seq, int) or isinstance(seq, bool):
+            if not is_int(seq):
                 raise StateSyncError("event without an int seq")
             failed = self._writer.poisoned(self)
             if failed is not None:
@@ -460,10 +461,7 @@ class StateSync:
         never stored are gone from the state; the guest resends them."""
         self._writer.reset(self)
         run = self.run
-        self.state, self._acked, self._made = State(), 0, None
-        for ev in _read_run(self.run_dir, 0, self.segment_events):
-            apply(self.state, ev)
-        self._acked = self.state.last_seq
+        self._refold()
         logger.error("session %s run %s: event log write failed; refolded to seq %s",
                      self.session.root.name, run, self._acked)
 

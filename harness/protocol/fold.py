@@ -68,7 +68,7 @@ from protocol.events import (
 )
 
 PLACEHOLDER = "[pending]"
-# the input kinds that start a task when none runs (guest.coordinator.INPUT_KINDS)
+# the input kinds that start a task when none runs (guest.taskview imports it as INPUT_KINDS)
 TASK_INPUT_KINDS = ("task", "follow_up", "steer")
 
 
@@ -133,7 +133,13 @@ class State:
     def to_canonical(self) -> dict:
         """A plain dict (sets as sorted lists) hashable with canonical.hash_value.
         The index fields are left out (and never copied)."""
-        out = {f.name: copy.deepcopy(getattr(self, f.name))
+        return self._plain(copy.deepcopy)
+
+    def _plain(self, copy_value) -> dict:
+        """to_canonical with `copy_value` applied to each field; state_hash
+        passes the identity (canonical_json builds its own copy and never
+        mutates its input), so hashing does not deep-copy the state."""
+        out = {f.name: copy_value(getattr(self, f.name))
                for f in fields(self) if f.name not in _INDEX_FIELDS}
         committed = out.pop("committed")
         out["committed_prefix"] = [it["message"] for it in committed]
@@ -379,9 +385,8 @@ def _tool_result(state: State, event: dict) -> None:
     if after_placeholder:
         # the model already saw a placeholder: a NEW item, the prefix is untouched
         state.counters["placeholder_fills"] += 1
-        _stage(state, {"seq": seq, "origin": seq, "message": message})
-    else:
-        _stage(state, {"seq": seq, "origin": call["seq"], "message": message})
+    origin = seq if after_placeholder else call["seq"]
+    _stage(state, {"seq": seq, "origin": origin, "message": message})
 
 
 def _question(state: State, event: dict) -> None:
@@ -580,7 +585,7 @@ def fold(events, upto_seq=None, *, state: State | None = None) -> State:
 
 
 def state_hash(state: State) -> str:
-    return hash_value(state.to_canonical())
+    return hash_value(state._plain(lambda value: value))   # == hash_value(state.to_canonical())
 
 
 def checkpoint_body(events, prev: str | None = None, *, state: State | None = None) -> dict:
@@ -613,6 +618,7 @@ def _verify(ordered: list, last_only: bool = False) -> tuple[State, list[tuple[i
     problems: list[tuple[int, str]] = []
     checkpoints = [e for e in ordered if e.get("type") == "checkpoint"]
     hashed = checkpoints[-1:] if last_only else checkpoints
+    hashed_ids = {id(cp) for cp in hashed}   # the events themselves (alive in `checkpoints`)
     wanted = set()
     for cp in hashed:
         t = (cp.get("body") or {}).get("through_seq")
@@ -643,7 +649,7 @@ def _verify(ordered: list, last_only: bool = False) -> tuple[State, list[tuple[i
         if prev_hash is not None and body.get("prev_hash") != prev_hash:
             problems.append((seq, f"checkpoint.prev_hash {str(body.get('prev_hash'))[:12]}... "
                                   f"does not continue the chain (expected {prev_hash[:12]}...)"))
-        if cp in hashed:
+        if id(cp) in hashed_ids:
             got = hashes.get(t)
             if got is None:
                 problems.append((seq, f"checkpoint through_seq {t} could not be folded"))

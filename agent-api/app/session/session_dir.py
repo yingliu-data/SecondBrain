@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from protocol.clock import now_iso
-from protocol.fsio import atomic_write
+from protocol.fsio import atomic_write_json
 
 from app.session.eventlog import read_trace
 from app.session.state import transition
@@ -111,8 +111,7 @@ class SessionDir:
     def _write_meta(self, meta: dict[str, Any]) -> None:
         # durable=False: as before, session.json is renamed into place without
         # fsyncs (metadata the event log does not depend on); 0644 as before
-        atomic_write(self.session_json, json.dumps(meta, indent=2).encode(),
-                     durable=False, mode=0o644)
+        atomic_write_json(self.session_json, meta, durable=False, mode=0o644, indent=2)
 
     def set_state(self, new_state: str) -> None:
         meta = self.read_meta()

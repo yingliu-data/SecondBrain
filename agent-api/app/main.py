@@ -3,6 +3,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.skills.registry import SkillRegistry
 from app.auth import middleware
+from app.auth.guest import guest_manager
 from app.tenants import create_tenant_registry
 from app.routes import chat, tool_result, skills, health, sessions, guest
 from app.gateway import events as gateway_events
@@ -56,8 +57,6 @@ app.include_router(guest.router)
 app.include_router(gateway_events.router)   # POST GATEWAY_EVENTS_PATH (bearer INTERNAL_TOKEN)
 
 # Start guest session cleanup task on startup
-from app.auth.guest import guest_manager
-
 @app.on_event("startup")
 async def _start_guest_cleanup():
     guest_manager.start_cleanup()

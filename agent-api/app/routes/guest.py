@@ -8,11 +8,12 @@ limits (GuestSessionManager) and the wire shape the page consumes —
 `token`, `avatar_command`, `done` (and keepalive comments); the harness's
 other events (`seq`, `question`, `tool_call`, `error`) are not sent.
 """
-import hashlib
 import logging
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+
+from protocol.canonical import sha256_hex
 
 from app.auth.guest import MAX_INPUT_CHARS, guest_manager
 from app.host.stream import SSE_HEADERS
@@ -39,7 +40,7 @@ def harness_session_id(page_session_id: str) -> str:
     when it is safe, else a stable digest of it."""
     if is_safe_id(page_session_id):
         return page_session_id
-    return "g_" + hashlib.sha256(page_session_id.encode()).hexdigest()[:32]
+    return "g_" + sha256_hex(page_session_id)[:32]
 
 
 async def _close_session(page_session_id: str) -> None:

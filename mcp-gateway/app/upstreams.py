@@ -24,6 +24,7 @@ import time
 import httpx
 from mcp import ClientSession, types
 from mcp.client.streamable_http import streamable_http_client
+from protocol.mcp import bearer_header
 
 from app import ssrf
 from app.config import UpstreamConfig
@@ -52,7 +53,7 @@ def unwrap(e: BaseException) -> str:
 
 
 def _http_client(cfg: UpstreamConfig, read_timeout_s: float) -> httpx.AsyncClient:
-    headers = {"Authorization": f"Bearer {cfg.auth_token}"} if cfg.auth_token else None
+    headers = bearer_header(cfg.auth_token) or None
     # No redirects: a redirect would bypass the SSRF check on the configured URL.
     return httpx.AsyncClient(
         headers=headers, follow_redirects=False,

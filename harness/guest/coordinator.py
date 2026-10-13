@@ -43,14 +43,10 @@ from guest import hooks as default_hooks
 from guest.config import stream_enabled
 from guest.context import build_compaction_request, build_request, estimate_tokens, system_hash
 from guest.mcp_ops import McpOpsMixin
-from guest.park import (  # noqa: F401  (re-exported)
-    PARK_ACK_WAIT_S, PARK_QUESTION, PAUSED_ON_PARK, FatalProtocolError, ParkMixin,
-)
-from guest.questions import MAX_UNANSWERED, QuestionsMixin  # noqa: F401  (re-exported)
+from guest.park import FatalProtocolError, ParkMixin
+from guest.questions import QuestionsMixin
 from guest.restore import LOST_CONTENT, RestoreMixin  # noqa: F401  (re-exported)
-from guest.taskview import (  # noqa: F401  (re-exported)
-    DOOM_LOOP_REPEATS, HOST_CLOCK_KINDS, INPUT_KINDS, QUESTION_TOOL, RESUMED, TaskView,
-)
+from guest.taskview import DOOM_LOOP_REPEATS, INPUT_KINDS, QUESTION_TOOL, TaskView
 from guest.tools import validate_args
 
 MEMORY_KEYS = ("scope", "op", "slug", "sha256")   # side_result.memory, copied into memory events
@@ -95,6 +91,12 @@ def _parse_arguments(raw):
     if bad is not None:         # json.loads accepts NaN/Infinity; the log cannot hold them
         return {}, f"arguments are not valid JSON: {bad}"
     return parsed, None
+
+
+def _content_text(content) -> str:
+    """A result's content as tool-message text: a string as is, anything
+    else as JSON."""
+    return content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
 
 
 def _validate_args(name: str, side: str, args: dict) -> list[str]:
@@ -200,6 +202,10 @@ class Coordinator(QuestionsMixin, McpOpsMixin, ParkMixin, RestoreMixin):
         return derive_id(self.cfg.principal.user, self.cfg.principal.tenant,
                          self.cfg.session_id, self.state.last_seq + 1, kind)
 
+    def _since(self, ms: int) -> int:
+        """Guest-clock ms elapsed since `ms` (never negative)."""
+        return max(0, self.clock.now_ms() - ms)
+
     # ------------------------------------------------------------ timers
     def _arm(self, kind: str, token: str, delay_s: float) -> None:
         self._cancel(token)
@@ -300,10 +306,7 @@ class Coordinator(QuestionsMixin, McpOpsMixin, ParkMixin, RestoreMixin):
             self._on_side_result(body)
         elif mtype == "heartbeat":
             at = body.get("at")
-            if is_int(at):
-                self.emit("clock", {"kind": "host_heartbeat", "at": at})
-            else:
-                self.emit("clock", {"kind": "host_heartbeat", "at": self.clock.now_ms()})
+            self.emit("clock", {"kind": "host_heartbeat", "at": at if is_int(at) else self.clock.now_ms()})
         elif mtype == "abort":
             self._abort(str(body.get("reason", "abort")))
         elif mtype == "park":
@@ -362,11 +365,9 @@ class Coordinator(QuestionsMixin, McpOpsMixin, ParkMixin, RestoreMixin):
             return
         self._cancel(f"op:{call_id}")
         ok = bool(body.get("ok", True))
-        content = body.get("content", "")
-        content = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
-        duration = max(0, self.clock.now_ms() - pending["started_ms"])
+        content = _content_text(body.get("content", ""))
         self._finish_call(call_id, "done" if ok else "failed", content,
-                          memory=body.get("memory"), duration_ms=duration)
+                          memory=body.get("memory"), duration_ms=self._since(pending["started_ms"]))
 
     # ------------------------------------------------------------ inbound: others
     def _on_ack(self, seq: int) -> None:
@@ -412,10 +413,9 @@ class Coordinator(QuestionsMixin, McpOpsMixin, ParkMixin, RestoreMixin):
             pending = self.view.side_calls.get(call_id)
             if pending is None:
                 return
-            duration = max(0, self.clock.now_ms() - pending["started_ms"])
             self._finish_call(call_id, "timeout",
                               f"error: {pending['side']}-side call timed out after {pending['timeout_s']} s",
-                              duration_ms=duration)
+                              duration_ms=self._since(pending["started_ms"]))
         elif kind == "mcp_timeout":
             self._mcp_timeout(token.split(":", 1)[1])
 
@@ -427,8 +427,7 @@ class Coordinator(QuestionsMixin, McpOpsMixin, ParkMixin, RestoreMixin):
         state = result.get("state", "done" if result.get("ok") else "failed")
         if state not in ("done", "failed", "timeout", "killed", "lost"):
             state = "done" if result.get("ok") else "failed"
-        content = result.get("content", "")
-        content = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+        content = _content_text(result.get("content", ""))
         spill = result.get("spill")
         spill_ref = None
         if isinstance(spill, dict) and spill.get("path"):
@@ -438,7 +437,7 @@ class Coordinator(QuestionsMixin, McpOpsMixin, ParkMixin, RestoreMixin):
             spill_ref = path
         extra = {}
         duration = result.get("duration_ms")
-        if isinstance(duration, int) and not isinstance(duration, bool) and duration >= 0:
+        if is_int(duration, 0):
             extra["duration_ms"] = duration
         self._finish_call(call_id, state, content, spill_ref=spill_ref, **extra)
 
@@ -533,7 +532,7 @@ class Coordinator(QuestionsMixin, McpOpsMixin, ParkMixin, RestoreMixin):
         }
 
     def _begin_turn(self, kind: str, request, *, at: int, includes_through_seq: int | None = None,
-                    tokens_before: int | None = None) -> str:
+                    tokens_before: int | None = None) -> None:
         """clock{turn_clock, at} -> turn_start -> bookkeeping -> the provider
         call, for both turn types. includes_through_seq None = everything
         logged before the turn_start (a regular turn)."""
@@ -553,7 +552,6 @@ class Coordinator(QuestionsMixin, McpOpsMixin, ParkMixin, RestoreMixin):
         self.log(f"{kind} turn started", level="debug", turn_id=turn_id, final=self._final_turn,
                  estimate=self._corrected(self._turn_raw), tokens_before=tokens_before)
         self._launch(turn_id, request, deltas=kind == "regular")
-        return turn_id
 
     def _launch(self, turn_id: str, request, *, deltas: bool) -> None:
         on_delta = None
@@ -626,7 +624,7 @@ class Coordinator(QuestionsMixin, McpOpsMixin, ParkMixin, RestoreMixin):
             self._settle("done", text, reason="max_tools")
             return
         if view.pending_inputs:
-            self._wake("input", [], list(view.pending_inputs))
+            self._wake("input", [], view.pending_inputs)
             self._start_turn()
             return
         self._settle("done", text)
@@ -648,10 +646,11 @@ class Coordinator(QuestionsMixin, McpOpsMixin, ParkMixin, RestoreMixin):
             return
         reason = "grace" if self._grace_fired else "tool_result" if view.unseen else "input"
         self._cancel("grace")
-        self._wake(reason, list(view.unseen), list(view.pending_inputs))
+        self._wake(reason, view.unseen, view.pending_inputs)
         self._start_turn()
 
-    def _wake(self, reason: str, result_ids: list, input_ids: list) -> None:
+    def _wake(self, reason: str, result_ids, input_ids) -> None:
+        # copied: the event must not alias the TaskView lists, which keep growing
         self.emit("wake", {"reason": reason, "result_ids": list(result_ids), "input_ids": list(input_ids)})
 
     @staticmethod
@@ -724,8 +723,11 @@ class Coordinator(QuestionsMixin, McpOpsMixin, ParkMixin, RestoreMixin):
 
     def _estimate_after_compaction(self, body: dict) -> int:
         """The estimate of the next regular request, built on a copy of the
-        state with this compaction event folded in (the fold's own rule)."""
-        preview = copy.deepcopy(self.state)
+        state with this compaction event folded in (the fold's own rule).
+        A shallow copy suffices: fold._compaction rebinds committed,
+        staged_suffix and compacted_through (and apply_valid last_seq) rather
+        than mutating them, and build_request only reads the state."""
+        preview = copy.copy(self.state)
         try:
             apply(preview, make_event(self.cfg.session_id, preview.last_seq + 1,
                                       self.clock.now_iso(), "compaction", body))
@@ -745,13 +747,12 @@ class Coordinator(QuestionsMixin, McpOpsMixin, ParkMixin, RestoreMixin):
         return None
 
     def _run_tool_calls(self, turn_id: str, calls: list) -> None:
-        max_tools = self.limits.max_tools
         self._suppress_wake = True
         try:
             for tc in calls:
                 if self.settled is not None:    # e.g. a denied question escalated
                     break
-                self._run_tool_call(turn_id, tc, max_tools)
+                self._run_tool_call(turn_id, tc)
         finally:
             self._suppress_wake = False
         if self.settled is not None:
@@ -769,7 +770,7 @@ class Coordinator(QuestionsMixin, McpOpsMixin, ParkMixin, RestoreMixin):
         elif grace:
             self._arm("grace_expiry", "grace", float(grace))
 
-    def _run_tool_call(self, turn_id: str, tc: dict, max_tools) -> None:
+    def _run_tool_call(self, turn_id: str, tc: dict) -> None:
         fn = tc.get("function") or {}
         call_id = tc.get("id")
         name = fn.get("name")
@@ -786,6 +787,7 @@ class Coordinator(QuestionsMixin, McpOpsMixin, ParkMixin, RestoreMixin):
             self.emit("guard_decision", {"ref": call_id, "decision": "deny",
                                          "reason": "allowlist", "policy_id": "allowlist"})
             return
+        max_tools = self.limits.max_tools
         if max_tools and self._ops_this_task() >= max_tools:
             self._deny_call(turn_id, call_id, name, side, args, "limit", "limits",
                             f"error: max_tools ({max_tools}) reached; no more tool calls in this task")
@@ -895,7 +897,7 @@ class Coordinator(QuestionsMixin, McpOpsMixin, ParkMixin, RestoreMixin):
     def _after_round(self) -> None:
         """Every call of the round is terminal: wake and start the next turn."""
         self._cancel("grace")
-        self._wake("tool_result", list(self.view.turn_calls), list(self.view.pending_inputs))
+        self._wake("tool_result", self.view.turn_calls, self.view.pending_inputs)
         self._start_turn()
 
     # ------------------------------------------------------------ end of task

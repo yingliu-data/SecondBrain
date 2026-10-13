@@ -10,6 +10,9 @@ opened with O_PATH), which always fits.
                             Firecracker's own "_PORT" suffixes)
   fits_sun_path(path)       the absolute form fits
   connect_unix(path, timeout)  a connected AF_UNIX stream socket
+  shutdown_close(sock)      shutdown(SHUT_RDWR) then close, OSError ignored:
+                            wakes any thread blocked on the socket (any
+                            family: vsock too)
 
 The host's bind half is agent-api's app/host/uds.py; the guest's test
 connector (guest.transport.UnixConnector) uses connect_unix.
@@ -25,6 +28,17 @@ UNIX_PATH_MAX = 100
 
 def fits_sun_path(path) -> bool:
     return len(os.fsencode(os.fspath(path))) <= UNIX_PATH_MAX
+
+
+def shutdown_close(sock: socket.socket) -> None:
+    try:
+        sock.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+    try:
+        sock.close()
+    except OSError:
+        pass
 
 
 def via_dirfd(path, fn):

@@ -1,7 +1,6 @@
 """stream.py produces the (retired) legacy loop's SSE strings byte for byte."""
 import json
 
-import pytest
 
 from app.host.stream import DONE, KEEPALIVE, Projector, project, sse, tokens
 from host_fakes import HASH, token_text

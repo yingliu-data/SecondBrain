@@ -38,13 +38,13 @@ router = APIRouter()
 def record_gateway_event(payload: dict, *, sessions) -> bool:
     """Append one gateway event; False when the session directory is absent."""
     user, tenant, session_id = (payload[k] for k in IDENTITY)
-    session_dir = sessions.path_for(user, tenant, session_id)
-    if sessions.get(user, tenant, session_id) is None:
+    session_dir = sessions.get(user, tenant, session_id)
+    if session_dir is None:
         logger.info("gateway event for unknown session %s/%s/%s dropped (%s)",
                     user, tenant, session_id, payload.get("op"))
         return False
     body = {k: v for k, v in payload.items() if k not in IDENTITY}
-    host_log(session_dir / "events").append_durable(session_id, "gateway", body)
+    host_log(session_dir.events).append_durable(session_id, "gateway", body)
     return True
 
 

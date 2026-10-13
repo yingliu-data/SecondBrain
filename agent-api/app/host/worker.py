@@ -20,6 +20,7 @@ from typing import Callable
 
 from flows.activities import WALL_CLOCK_GRACE_S
 from protocol.clock import now_ms
+from protocol.fold import TASK_INPUT_KINDS
 from protocol.messages import Outbox, ProtocolError, ack, control_message
 from protocol.version import HARNESS_VERSION
 
@@ -36,8 +37,8 @@ from app.host.gateway_forwarder import GatewayForwarder, GatewayRelay
 from app.host.hello import session_config, strip_current_time  # noqa: F401 (re-exported)
 from app.host.llm_proxy import LLMProxy
 from app.host.outcomes import (  # noqa: F401 (re-exported: routes, activities, tests)
-    DIRECT, SETTLE_OUTCOMES, WORKFLOW, GuestError, answer_input_id, end_error, new_input_id,
-    settle_outcome, task_error, task_ok, task_outcome, ticket_id_for)
+    DIRECT, WORKFLOW, GuestError, answer_input_id, end_error, new_input_id, settle_outcome,
+    task_ok, task_outcome, ticket_id_for)
 from app.host.sandbox import Sandbox
 from app.host.settings import WorkerSettings
 from app.host.sides import DEVICE_CALLS, DeviceCalls, Sides
@@ -61,6 +62,8 @@ LINK_DROP_WAIT_S = 2.0
 EVENT_BATCH = 256
 # how long close() (and the shutdown) waits for queued log records to be fsynced
 CLOSE_FLUSH_TIMEOUT_S = 5.0
+# a parked session's resume info, relative to its directory (VMLifecycle)
+PARKED_FILE = "vm/parked.json"
 
 
 def make_sandbox() -> Sandbox:
@@ -116,7 +119,7 @@ class Worker(VMLifecycle):
         self._loop: asyncio.AbstractEventLoop | None = None
         self._inbound: asyncio.Queue | None = None
         self._pump: asyncio.Task | None = None
-        self._channel: ControlChannel | None = None
+        self._channel: ControlChannel | None = None   # the link: None = down (_set_channel)
         self._outbox: Outbox | None = None
         self._guest_run = 0          # increments on every sandbox start
         self._stop_accept = threading.Event()
@@ -142,7 +145,6 @@ class Worker(VMLifecycle):
         self.answer_wait_s = self.answer_wait_for(DIRECT)
         # wait primitives: every change below _pulse()s; _until(predicate) waits
         self._changed = asyncio.Event()             # replaced (and set) on every change
-        self._link_up = False                       # a control channel is up
         self._control_gen = 0                       # the :5000 listener of this guest run
         self._parked_seen = False                   # the asked-for `parked` was acked
         # none | booting | running | parking | parked; the session snapshot
@@ -151,7 +153,7 @@ class Worker(VMLifecycle):
         # {input_id, question_id}: a field of the parked state (vm_state clears it)
         self._question_park: dict | None = None
         self.snapshot_dir = session.root / "vm" / "snapshot"
-        self.parked_file = session.root / "vm" / "parked.json"
+        self.parked_file = session.root / PARKED_FILE
         self._vm_lock = asyncio.Lock()
         self._deferred: list[tuple[str, dict]] = []  # controls held while parked
         self._wake_task: asyncio.Task | None = None
@@ -574,11 +576,6 @@ class Worker(VMLifecycle):
     def attachments(self, text: str) -> list[dict]:
         return hello_mod.attachments(self.tenant, self.session, self.user, text)
 
-    def limits(self) -> dict:
-        return hello_mod.limits(self.settings, self.tenant,
-                                wall_clock_s=self.default_wall_clock_s(),
-                                answer_wait_s=self.answer_wait_s)
-
     def answer_wait_for(self, driver: str | None) -> int:
         return hello_mod.answer_wait_for(self.tenant, driver)
 
@@ -759,11 +756,7 @@ class Worker(VMLifecycle):
                 return None
         else:
             task = self.start_task({"input_id": input_id, "text": "", "driver": DIRECT})
-
-        def _finish(t: asyncio.Task) -> None:
-            outcome = task_outcome(t)
-            self.finish_input(input_id, end_error(t, outcome), outcome=outcome, driver=DIRECT)
-        task.add_done_callback(_finish)
+        self._finish_on_done(input_id, task)
         return await self._drive(input_id, task)
 
     def _adopt_open_device_calls(self) -> None:
@@ -802,6 +795,7 @@ class Worker(VMLifecycle):
         if task is not None and not task.done():
             if self.current_input_id == input_id and (self.vm_state == "parked"
                                                       or self._guest_ready()):
+                task_input = await self._with_attachments(task_input)
                 self.send_control(*self._task_message(task_input))
             return await asyncio.shield(task)
         restored = self._restored_driver(input_id)
@@ -816,13 +810,17 @@ class Worker(VMLifecycle):
         if body is not None:
             return self._settled_again(input_id, body)
         task = self.start_task(task_input)
+        self._finish_on_done(input_id, task)
+        return await self._drive(input_id, task)
 
+    def _finish_on_done(self, input_id: str, task: asyncio.Task) -> None:
+        """The direct path's finish_input of `input_id` when `task` ends;
+        added before the waiters' callbacks: the streams end before act()
+        returns."""
         def _finish(t: asyncio.Task) -> None:
             outcome = task_outcome(t)
             self.finish_input(input_id, end_error(t, outcome), outcome=outcome, driver=DIRECT)
-        # before the waiters' callbacks: the streams end before act() returns
         task.add_done_callback(_finish)
-        return await self._drive(input_id, task)
 
     def _restored_driver(self, input_id: str | None = None) -> asyncio.Task | None:
         """The running driver of a restored question park (of `input_id`, if
@@ -906,15 +904,21 @@ class Worker(VMLifecycle):
             finally:
                 self._slot.release()
 
+    async def _with_attachments(self, task_input: dict) -> dict:
+        """`task_input` with its attachments: the memory recall when it names
+        none (it reads files: off the loop)."""
+        if task_input.get("attachments") is not None:
+            return task_input
+        return {**task_input, "attachments": await asyncio.to_thread(
+            self.attachments, task_input.get("text", ""))}
+
     def _task_message(self, task_input: dict) -> tuple[str, dict]:
+        """The `task` control of `task_input` (_with_attachments first)."""
         kind = task_input.get("kind", "task")
-        if kind not in ("task", "follow_up", "steer"):
+        if kind not in TASK_INPUT_KINDS:
             kind = "task"
-        attachments = task_input.get("attachments")
-        if attachments is None:
-            attachments = self.attachments(task_input.get("text", ""))
         return kind, {"input_id": task_input["input_id"], "text": task_input.get("text", ""),
-                      "attachments": attachments,
+                      "attachments": task_input.get("attachments") or [],
                       "wall_clock_s": self.wall_clock_for(task_input)}
 
     def _settled_again(self, input_id: str, body: dict) -> dict:
@@ -933,6 +937,7 @@ class Worker(VMLifecycle):
         try:
             await self._settle_orphan(input_id, task_input.get("driver"))
             await self.ensure_ready(input_id, task_input.get("driver"))
+            task_input = await self._with_attachments(task_input)
             self.projector.begin_task()         # before any delta can arrive
             self.send_control(*self._task_message(task_input))
             try:
@@ -1092,8 +1097,7 @@ class Worker(VMLifecycle):
                 return
             if self._channel is not None and self._channel is not ch:
                 self._channel.close()
-            self._channel = ch
-            self._set_link(True)
+            self._set_channel(ch)
             # the host answers with its ack of seq, then resends
             # everything the guest has not acked (its handshake ack arrives as a
             # normal ack; the guest's inbox drops what it already delivered).
@@ -1104,8 +1108,7 @@ class Worker(VMLifecycle):
             return
         if ch is not self._channel:
             return
-        self._channel = None
-        self._set_link(False)
+        self._set_channel(None)
         if self.vm_state == "parked" or (self.vm_state == "parking" and self._parked_seen):
             return                      # the parked guest closed its sockets on purpose
         # off the pump: a reconnect (link up) must get through meanwhile
@@ -1178,10 +1181,7 @@ class Worker(VMLifecycle):
             if ev.get("session_id") != self.session_id:
                 error = StateSyncError(f"event for foreign session {ev.get('session_id')!r}")
                 break
-            if ev.get("type") == "parked" and ev.get("seq") == self.sync.state.last_seq + 1:
-                # before the ack: once it is acked the guest closes and idle-waits,
-                # and must find no listener (sandbox finding)
-                self._close_guest_ports()
+            self._before_ack(ev)
             try:
                 fut = self.sync.submit(ev)
             except StateSyncError as e:
@@ -1205,14 +1205,23 @@ class Worker(VMLifecycle):
         # durable = host ack after append; a refused event acks nothing new
         self._send_raw(ack(self.session_id, ack_seq=self.sync.last_seq))
         for ev in durable:
-            if ev["type"] == "memory":
-                await asyncio.to_thread(self.sync.project, ev)
-            self._after_event(ev)
+            await self._after_event(ev)
         if error is not None:
             raise error
 
-    def _after_event(self, ev: dict) -> None:
-        """What a stored guest event sets off in the host."""
+    def _before_ack(self, ev: dict) -> None:
+        """What a guest event sets off before it is submitted (so before its
+        ack; not yet validated): a `parked` that is next in seq closes the
+        guest ports - once it is acked the guest closes and idle-waits, and
+        must find no listener (sandbox finding)."""
+        if ev.get("type") == "parked" and ev.get("seq") == self.sync.state.last_seq + 1:
+            self._close_guest_ports()
+
+    async def _after_event(self, ev: dict) -> None:
+        """What a stored (acked) guest event sets off in the host, in order:
+        a `memory` event's projection (off the loop) first."""
+        if ev["type"] == "memory":
+            await asyncio.to_thread(self.sync.project, ev)
         self.last_active = time.monotonic()
         self._emit_many(self.projector.project(ev))
         etype, body = ev["type"], ev["body"]
@@ -1314,12 +1323,10 @@ class Worker(VMLifecycle):
                 await self._pump
             except (asyncio.CancelledError, Exception):
                 pass
-        if self.proxy is not None:
-            await asyncio.to_thread(self.proxy.stop)
-        if self.bulk is not None:
-            await asyncio.to_thread(self.bulk.stop)
-        if self.gateway is not None:
-            await asyncio.to_thread(self.gateway.stop)
+        # the proxy, bulk and gateway servers stop independently: side by side
+        await asyncio.gather(*(asyncio.to_thread(server.stop)
+                               for server in (self.proxy, self.bulk, self.gateway)
+                               if server is not None))
         if self.gateway_relay is not None:
             self.gateway_relay.close()
         if self.endpoints is not None:
@@ -1427,13 +1434,13 @@ class Workers:
         session.json identity (DirStore.list_for_tenant). Blocking I/O."""
         out = []
         for meta in self.sessions.list_for_tenant(tenant.user, tenant.name,
-                                                  require="vm/parked.json"):
+                                                  require=PARKED_FILE):
             sid = meta.get("session_id")
             if not sid:
                 continue
             if want is not None:
                 try:
-                    info = json.loads((meta["root"] / "vm" / "parked.json").read_text())
+                    info = json.loads((meta["root"] / PARKED_FILE).read_text())
                     if not want(info):
                         continue
                 except (OSError, ValueError):
@@ -1452,21 +1459,20 @@ class Workers:
         user and tenant, opened where they are: never a directory of another
         tenant, never a new one. The scan and the builds run off the loop."""
         sids = await asyncio.to_thread(self._parked_infos, tenant, want)
-        loaded = []
-        for sid in sids:
-            if self._live(session_key(tenant.user, tenant.name, sid)) is None:
-                loaded.append(await self.open(tenant, sid, registry))
-        return loaded
+        # concurrently: each opens its own key (open() shares one per key)
+        return list(await asyncio.gather(*(
+            self.open(tenant, sid, registry) for sid in sids
+            if self._live(session_key(tenant.user, tenant.name, sid)) is None)))
 
     async def load_question_parks(self, tenants, registry) -> list[Worker]:
         """At startup: a Worker for every session parked on a question of
         the direct path, so its answer wait goes on (a restored driver,
         Worker._drive_restored) without waiting for a request to load it."""
-        loaded = []
-        for tenant in tenants:
-            loaded += await self.load_parked(tenant, registry, want=lambda info: bool(
-                info.get("question")) and info.get("driver") == DIRECT)
-        return loaded
+        def want(info: dict) -> bool:
+            return bool(info.get("question")) and info.get("driver") == DIRECT
+        per_tenant = await asyncio.gather(*(self.load_parked(tenant, registry, want=want)
+                                            for tenant in tenants))
+        return [w for loaded in per_tenant for w in loaded]
 
     # ------------------------------------------------------------ eviction
     def _ensure_reaper(self) -> None:
@@ -1500,6 +1506,8 @@ class Workers:
                 gone.append((key, w))
         for key, w in gone:
             w.sync.host_event("workflow", {"kind": "evicted", "vm_state": w.vm_state})
+            # awaited directly (not gathered): close() marks the Worker closed
+            # before its first yield, so no evicted Worker is ever seen open
             await w.close("evict")
         return [k for k, _ in gone]
 

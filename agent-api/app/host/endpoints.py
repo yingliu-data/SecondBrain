@@ -41,6 +41,7 @@ from pathlib import Path
 
 from protocol.messages import ProtocolError, encode, parse
 from protocol.ports import CONTROL, SOCKET_PREFIX, socket_name
+from protocol.uds import shutdown_close
 
 from app.host.uds import bind_unix
 
@@ -273,14 +274,7 @@ class ControlChannel:
             return
         self._closed.set()
         self._out.put(None)
-        try:
-            self.sock.shutdown(socket.SHUT_RDWR)
-        except OSError:
-            pass
-        try:
-            self.sock.close()
-        except OSError:
-            pass
+        shutdown_close(self.sock)
 
     @property
     def closed(self) -> bool:

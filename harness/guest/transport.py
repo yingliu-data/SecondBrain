@@ -63,7 +63,7 @@ from typing import Protocol
 from protocol import messages
 from protocol.messages import ProtocolError
 from protocol.ports import CONTROL, socket_name
-from protocol.uds import connect_unix
+from protocol.uds import connect_unix, shutdown_close
 
 log = logging.getLogger("guest.transport")
 
@@ -123,18 +123,6 @@ class VsockConnector:
         return f"VsockConnector(cid={self.cid})"
 
 
-def _shutdown(sock: socket.socket) -> None:
-    """Wake any thread blocked on this socket, then close it."""
-    try:
-        sock.shutdown(socket.SHUT_RDWR)
-    except OSError:
-        pass
-    try:
-        sock.close()
-    except OSError:
-        pass
-
-
 # ---------------------------------------------------------------- transport
 
 
@@ -189,7 +177,7 @@ class Transport:
         self._stop.set()
         sock = self._sock
         if sock is not None:
-            _shutdown(sock)
+            shutdown_close(sock)
         self._wq.put(None)
         for t in (self._link_thread, self._writer_thread):
             if t is not None and t is not threading.current_thread():
@@ -223,7 +211,7 @@ class Transport:
             self._awake.clear()
         sock = self._sock
         if sock is not None:
-            _shutdown(sock)
+            shutdown_close(sock)
 
     def park_on_ack(self, seq: int) -> None:
         """park() once the host acks `seq`, done by the link thread on the
@@ -326,7 +314,7 @@ class Transport:
             finally:
                 self._sock = None
                 was_up = self._link_down()
-                _shutdown(sock)
+                shutdown_close(sock)
             if was_up and not self._stop.is_set():
                 self.inbound.put(("link", "down"))
             if self._idle:
@@ -369,7 +357,7 @@ class Transport:
                     handshaking = False
                     self._link_up(sock, peer_ack=n)
                 elif self._apply_ack(n):
-                    _shutdown(sock)     # park_on_ack: nothing more is read here
+                    shutdown_close(sock)     # park_on_ack: nothing more is read here
                     return
             elif kind == "control":
                 self._on_control(msg)
@@ -489,5 +477,5 @@ class Transport:
             return True
         except OSError as exc:
             log.debug("write on control link failed: %s", exc)
-            _shutdown(sock)     # wakes the reader; the link thread reconnects
+            shutdown_close(sock)     # wakes the reader; the link thread reconnects
             return False
