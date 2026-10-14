@@ -19,6 +19,7 @@ on:
   push:
     branches:
       - main
+      - staging                                   # integration branch: PRs land here before main
   workflow_call:
     inputs:
       suites:
