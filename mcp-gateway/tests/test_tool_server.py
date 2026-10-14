@@ -144,7 +144,7 @@ async def test_new_session_pins_fresh_definitions_after_ttl(upstream, harness):
     async with harness(make_config(upstream.url)) as gw:
         assert (await gw.call("fake__echo", {"text": "a"}))["isError"] is False
         upstream.change_echo()
-        gw.gateway.upstreams["fake"]._fetched_at = 0.0   # the TTL has passed
+        gw.gateway.upstreams["fake"]._fetched_at = float("-inf")   # the TTL has passed (0.0 is not: a fresh CI runner's monotonic clock can be < the TTL)
         other = {**IDENT, "X-SB-Session": "sess_after_ttl"}
         pinned = json.loads(text_of(await gw.call("describe_tool", {"name": "fake__echo"}, ident=other)))
         current = (await gw.gateway.upstreams["fake"].refresh())["echo"][1]   # what upstream serves now
