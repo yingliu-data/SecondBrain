@@ -2,10 +2,11 @@ import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.skills.registry import SkillRegistry
-from app.agent.llm import LLMProvider
 from app.auth import middleware
+from app.auth.guest import guest_manager
 from app.tenants import create_tenant_registry
 from app.routes import chat, tool_result, skills, health, sessions, guest
+from app.gateway import events as gateway_events
 
 # ── Logging ──────────────────────────────────────────────────
 logging.basicConfig(
@@ -25,49 +26,25 @@ app = FastAPI()
 tenant_registry = create_tenant_registry()
 middleware.set_tenant_registry(tenant_registry)
 
-# CORS — guest avatar origins plus every tenant's registered origins.
-# The Origin header never grants access by itself: tenant identity always
-# comes from the per-tenant API key (Bearer + HMAC).
-GUEST_ORIGINS = [
-    "https://robot.yingliu.site",
-    "http://localhost:5173",
-    "http://localhost:4173",
-]
+# CORS — the guest avatar profile's origins plus every tenant's registered
+# origins. Outside the guest route (auth: origin, avatar_control only) the
+# Origin header never grants access: tenant identity always comes from the
+# per-tenant API key (Bearer + HMAC).
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=sorted(set(GUEST_ORIGINS) | set(tenant_registry.all_origins())),
+    allow_origins=tenant_registry.all_origins(),
     allow_methods=["POST", "GET", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization", "X-Timestamp", "X-Signature"],
 )
 
-# Initialize core components
+# Host skills (the harness's host side). MCP tools are the mcp-gateway's:
+# the guest calls it over :5011 (tenants.json `mcp_servers` is ignored here).
 registry = SkillRegistry()
-llm = LLMProvider()
-
-# Give skills access to LLM (for plan_movement decomposition)
-registry.set_llm_provider(llm)
-
-# Register one proxy skill per configured MCP server. Tool lists are fetched
-# in the background after startup — a down server never blocks boot.
-from app.mcp.proxy_skill import MCPProxySkill
-from app.mcp.ssrf import validate_mcp_url
-
-mcp_proxies: list[MCPProxySkill] = []
-for _cfg in tenant_registry.mcp_server_configs().values():
-    try:
-        validate_mcp_url(_cfg)
-    except ValueError as e:
-        logging.getLogger("mcp").error(f"Skipping MCP server: {e}")
-        continue
-    _proxy = MCPProxySkill(_cfg)
-    registry.register(_proxy)
-    mcp_proxies.append(_proxy)
 
 # Inject dependencies into routes
-chat.set_dependencies(registry, llm)
-guest.set_dependencies(registry, llm)
+chat.set_registry(registry)
+guest.set_tenant(tenant_registry.guest())
 skills.set_registry(registry)
-health.set_llm(llm)
 sessions.set_sessions(chat.sessions)
 
 # Mount routers (all under /api/v1/ for versioning, except /health)
@@ -77,17 +54,61 @@ app.include_router(skills.router)
 app.include_router(health.router)
 app.include_router(sessions.router)
 app.include_router(guest.router)
+app.include_router(gateway_events.router)   # POST GATEWAY_EVENTS_PATH (bearer INTERNAL_TOKEN)
 
 # Start guest session cleanup task on startup
-from app.auth.guest import guest_manager
-
 @app.on_event("startup")
 async def _start_guest_cleanup():
     guest_manager.start_cleanup()
 
 
 @app.on_event("startup")
-async def _start_mcp_refresh():
+async def _warn_legacy_layout():
+    # Old-layout session directories ({user}/{tenant}_{session_id}) are
+    # ignored; one WARNING names them (nothing is deleted automatically).
     import asyncio
-    for proxy in mcp_proxies:
-        asyncio.create_task(proxy.start_background_refresh())
+    from app.session.dir_store import warn_legacy_layout
+    try:
+        await asyncio.to_thread(warn_legacy_layout, chat.sessions.root,
+                                logging.getLogger("startup"))
+    except Exception:  # noqa: BLE001 - never block startup
+        logging.getLogger("startup").exception("scanning for old-layout sessions failed")
+
+
+@app.on_event("startup")
+async def _resume_question_parks():
+    # Sessions parked on a question of the direct path before a restart:
+    # their answer wait goes on (vm/parked.json holds its deadline).
+    try:
+        await chat.workers.load_question_parks(tenant_registry.all_tenants(), registry)
+    except Exception:  # noqa: BLE001 - never block startup
+        logging.getLogger("startup").exception("restoring question parks failed")
+
+
+@app.on_event("startup")
+async def _start_temporal():
+    # TEMPORAL_ADDRESS set -> every input goes through the session workflow:
+    # its worker runs on this loop with the real activities (a supervisor
+    # reconnects / restarts it), and the tenants' schedules are ensured, in
+    # the background: startup never waits for Temporal; /chat answers 503
+    # (Retry-After) while it is not ready. Unset -> the direct path only.
+    from app.host import temporal
+    from app.host.activities import HostActivities
+    acts = HostActivities(chat.workers, tenant_registry, registry)
+    temporal.start_in_background(acts.activities(), tenant_registry.tenants_doc())
+
+
+@app.on_event("shutdown")
+async def _stop_temporal():
+    from app.host import temporal
+    await temporal.stop()
+
+
+@app.on_event("shutdown")
+async def _stop_harness_workers():
+    # Park every running guest (HARNESS_SHUTDOWN_PARK_S: a restart restores
+    # it and adopts its open device calls), then stop every session's
+    # sandbox, LLM proxy and Unix-socket listeners.
+    await chat.workers.shutdown()
+    from app.gateway.client import aclose_clients
+    await aclose_clients()

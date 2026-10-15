@@ -1,0 +1,45 @@
+# Guest rootfs for the harness microVM (harness/docs/IMAGE.md).
+# Built by harness/image/build.sh: docker build -> docker export -> mkfs.ext4 -d.
+# The image is never run as a container; it is a filesystem.
+ARG ROOTFS_BASE_IMAGE=python:3.12-slim-bookworm
+FROM ${ROOTFS_BASE_IMAGE}
+
+# Toolchain the guest-side tools rely on: bash (bash tool), git, coreutils, grep,
+# findutils; util-linux's mount/mountpoint for the init script. No network tools,
+# no package managers at runtime, no Python packages (standard library only).
+RUN set -eux; \
+    apt-get update; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        bash coreutils util-linux mount procps git grep findutils sed gawk \
+        ca-certificates less file xz-utils zip unzip; \
+    apt-get clean; \
+    rm -rf /var/lib/apt/lists/* /var/cache/apt/* /usr/share/doc /usr/share/man; \
+    ln -sf /usr/local/bin/python3 /usr/bin/python3; \
+    mkdir -p /opt/harness /workspace /var/harness /run /tmp; \
+    chmod 1777 /tmp; \
+    echo harness > /etc/hostname; \
+    git config --system user.name harness; git config --system user.email harness@localhost; \
+    git config --system safe.directory '*'; git config --system init.defaultBranch main
+
+# Bytecode for the standard library: the official python image ships none and
+# the rootfs is read-only (PYTHONDONTWRITEBYTECODE=1), so without this every
+# stdlib import after a restore compiles from source. Unchecked-hash pycs: no
+# mtimes in them, no source check at import.
+RUN python3 -m compileall -q -j0 --invalidation-mode unchecked-hash \
+        -x '/(test|tests|idlelib|tkinter|turtledemo|ensurepip|lib2to3|pydoc_data|__phello__)/' \
+        "$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["stdlib"])')"
+
+COPY harness-init /sbin/harness-init
+COPY out/guest.pyz /opt/harness/guest.pyz
+# build.sh guest_image_version: harness-init passes it as --image-version
+COPY out/GUEST_IMAGE_VERSION /opt/harness/IMAGE_VERSION
+COPY pyz_pack.py /tmp/pyz_pack.py
+# Recompile guest.pyz's .pyc with the guest's own python3 (same magic number
+# whatever Python built out/guest.pyz), then check it imports from bytecode.
+RUN python3 /tmp/pyz_pack.py recompile /opt/harness/guest.pyz \
+    && rm /tmp/pyz_pack.py \
+    && chmod 0755 /sbin/harness-init /opt/harness/guest.pyz \
+    && python3 -I -c "import sys; sys.path.insert(0, '/opt/harness/guest.pyz'); import guest.main, protocol; guest.main.preload(); assert guest.main.__file__.endswith('.pyc'), guest.main.__file__; print('guest.pyz imports ok (bytecode)')"
+
+# Documentation only: the VM is started by the sandbox manager with init=/sbin/harness-init.
+CMD ["/sbin/harness-init"]

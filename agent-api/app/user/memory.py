@@ -25,6 +25,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from protocol.fsio import atomic_write
+
 _VALID_SLUG = re.compile(r"^[a-z0-9_\-]{1,64}$")
 _FM_RE = re.compile(r"\A---\n(.*?)\n---\n(.*)\Z", re.S)
 _VALID_TYPES = {"user", "feedback", "project", "reference"}
@@ -76,7 +78,8 @@ class MemoryStore:
             f"description: {desc_clean}\n"
             f"type: {type}\n---\n\n"
         )
-        path.write_text(header + body.strip() + "\n", encoding="utf-8")
+        atomic_write(path, (header + body.strip() + "\n").encode("utf-8"),
+                     durable=False, mode=0o644)
         self._rewrite_index()
         return MemoryRecord(slug, name_clean, desc_clean, type, body, path)
 
@@ -134,10 +137,7 @@ class MemoryStore:
     def _rewrite_index(self) -> None:
         entries = self.list()
         if not entries:
-            try:
-                self.index.unlink()
-            except FileNotFoundError:
-                pass
+            self.index.unlink(missing_ok=True)
             return
         lines = [
             f"- [{r.name}]({r.slug}.md) — {r.description}"
@@ -145,4 +145,5 @@ class MemoryStore:
             else f"- [{r.name}]({r.slug}.md)"
             for r in entries
         ]
-        self.index.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        atomic_write(self.index, ("\n".join(lines) + "\n").encode("utf-8"),
+                     durable=False, mode=0o644)

@@ -5,11 +5,17 @@ from contextvars import ContextVar
 # and user without racing on shared singleton state. Set by routes/chat.py.
 _current_session: ContextVar = ContextVar("current_session", default=None)
 _current_user_id: ContextVar = ContextVar("current_user_id", default="")
+# The tenant and the session id the request runs under: the gateway skill
+# stamps them as identity headers.
+_current_tenant: ContextVar = ContextVar("current_tenant", default="")
+_current_session_id: ContextVar = ContextVar("current_session_id", default="")
 
 
-def set_current_context(session, user_id: str):
+def set_current_context(session, user_id: str, tenant: str = "", session_id: str = ""):
     _current_session.set(session)
     _current_user_id.set(user_id)
+    _current_tenant.set(tenant)
+    _current_session_id.set(session_id)
 
 
 def get_current_session():
@@ -18,6 +24,22 @@ def get_current_session():
 
 def get_current_user_id() -> str:
     return _current_user_id.get()
+
+
+def get_current_tenant() -> str:
+    return _current_tenant.get()
+
+
+def get_current_session_id() -> str:
+    """The session id set with the context, else the session dir's own."""
+    sid = _current_session_id.get()
+    if not sid:
+        session = _current_session.get()
+        try:
+            sid = session.read_meta().get("session_id", "") if session is not None else ""
+        except (AttributeError, OSError, ValueError):
+            sid = ""
+    return sid
 
 
 class BaseSkill(ABC):
@@ -50,27 +72,20 @@ class BaseSkill(ABC):
 
     @property
     def keywords(self) -> list[str]:
-        """Trigger words for keyword-based tool discovery (Stage 1).
-        Override to list words that indicate this skill is relevant.
-        Used by SkillRegistry.get_tools_for_query() for fast pre-filtering."""
+        """Words that indicate this skill is relevant, listed by GET /skills
+        (the query prefilter that used them retired with the legacy loop)."""
         return []
 
     @property
     def always_available(self) -> bool:
-        """If True, this skill's tools are always included in the LLM context
-        regardless of query matching. Use sparingly — only for skills that
-        could be relevant to any query (e.g., web_search)."""
+        """Listed by GET /skills (the legacy loop always offered such a
+        skill's tools; the harness offers every visible skill's)."""
         return False
 
     @abstractmethod
     def get_tool_definitions(self) -> list[dict]:
         """Return OpenAI-compatible tool definitions for this skill.
         These get passed to llama-server in the tools parameter."""
-
-    def set_llm(self, llm):
-        """Optional: give this skill access to the LLM provider.
-        Override in skills that need to make secondary LLM calls."""
-        pass
 
     async def execute(self, tool_name: str, arguments: dict) -> str:
         """Execute a server-side tool. Only called for server skills.

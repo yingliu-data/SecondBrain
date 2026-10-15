@@ -1,0 +1,91 @@
+#!/bin/bash
+# /sbin/harness-init -- PID 1 inside the guest microVM (harness/docs/IMAGE.md).
+#
+# Boot args (set by the sandbox manager): console=ttyS0 reboot=k panic=1 pci=off
+# init=/sbin/harness-init ; Firecracker appends root=/dev/vda ro.
+#
+# Jobs: mount the pseudo filesystems, run the guest harness, and on exit or on
+# the host's SendCtrlAltDel (SIGINT here) sync the workspace and reboot, which
+# makes Firecracker exit. No network, no clock source: the guest learns the
+# time from `hello.at`.
+#
+# Init does NOT mount /dev/vdb. The guest starts
+# in `--idle-wait vsock` (polling connect to CID 2:5000, silently) -- the point
+# the BASE snapshot is taken at -- and mounts /dev/vdb on /workspace itself
+# (`--mount-workspace /dev/vdb`) once a host listener answers. A cold boot and
+# a restore from the base snapshot run the same path, and the base snapshot
+# never holds a mounted workspace, so it fits every session's workspace.img.
+
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export HOME=/root LANG=C.UTF-8 PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+
+log() { echo "harness-init: $*"; }
+
+mnt() {  # mnt TYPE SOURCE TARGET [OPTS]
+    mountpoint -q "$3" 2>/dev/null && return 0
+    mkdir -p "$3"
+    if [ -n "$4" ]; then mount -t "$1" -o "$4" "$2" "$3"; else mount -t "$1" "$2" "$3"; fi \
+        || log "mount $3 failed"
+}
+
+mnt proc     proc     /proc
+mnt sysfs    sysfs    /sys
+mnt devtmpfs devtmpfs /dev          # usually already mounted by the kernel (DEVTMPFS_MOUNT)
+mnt devpts   devpts   /dev/pts      gid=5,mode=620,ptmxmode=666
+mnt tmpfs    tmpfs    /dev/shm      mode=1777
+mnt tmpfs    tmpfs    /run          mode=755
+mnt tmpfs    tmpfs    /tmp          mode=1777
+mnt tmpfs    tmpfs    /var/harness  mode=755    # the guest's log buffer (rootfs is ro)
+mnt tmpfs    tmpfs    /root         mode=700    # git config, bash history
+
+echo harness > /proc/sys/kernel/hostname
+# Soft Ctrl-Alt-Del: the kernel sends SIGINT to PID 1 instead of rebooting at once.
+echo 0 > /proc/sys/kernel/ctrl-alt-del
+
+# The per-session workspace drive (sandbox manager: PUT /drives/workspace) is
+# mounted by the guest after idle-wait. Without a /dev/vdb (a hand-run boot)
+# /workspace is a tmpfs and the guest is not asked to mount anything.
+MOUNT_ARGS=(--mount-workspace /dev/vdb)
+if [ ! -b /dev/vdb ]; then
+    log "no /dev/vdb; /workspace is a tmpfs for this boot"
+    mnt tmpfs tmpfs /workspace mode=755
+    MOUNT_ARGS=()
+fi
+
+GUEST_PID=
+finish() {
+    trap '' INT TERM
+    if [ -n "$GUEST_PID" ] && kill -0 "$GUEST_PID" 2>/dev/null; then
+        kill -TERM "$GUEST_PID" 2>/dev/null
+        for _ in 1 2 3 4 5 6 7 8 9 10; do
+            kill -0 "$GUEST_PID" 2>/dev/null || break
+            sleep 0.2
+        done
+        kill -KILL "$GUEST_PID" 2>/dev/null
+    fi
+    sync
+    umount /workspace 2>/dev/null || umount -l /workspace 2>/dev/null
+    sync
+    log "halting"
+    # reboot(LINUX_REBOOT_CMD_RESTART): with reboot=k the kernel pulses the
+    # keyboard controller and Firecracker exits. sysrq is the fallback.
+    python3 -c 'import ctypes; ctypes.CDLL(None, use_errno=True).reboot(0x01234567)' 2>/dev/null
+    echo b > /proc/sysrq-trigger 2>/dev/null
+    sleep 5
+    exit 0
+}
+trap finish INT TERM
+
+# The image identity build.sh baked in (session_start.image_version).
+IMAGE_VERSION="$(cat /opt/harness/IMAGE_VERSION 2>/dev/null || true)"
+IMAGE_VERSION="${IMAGE_VERSION:-unknown}"
+
+log "starting guest harness $IMAGE_VERSION (idle-wait, then vsock -> CID 2)"
+python3 /opt/harness/guest.pyz --connect vsock --idle-wait vsock "${MOUNT_ARGS[@]}" \
+    --log-dir /var/harness --workspace /workspace --image-version "$IMAGE_VERSION" &
+GUEST_PID=$!
+wait "$GUEST_PID"
+rc=$?
+log "guest exited with $rc"
+GUEST_PID=
+finish

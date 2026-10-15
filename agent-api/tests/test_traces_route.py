@@ -1,7 +1,12 @@
+"""Trace endpoints: rows built from the session's event
+log (every run), tenant scoping, since_minutes / limit; a migrated legacy
+session is covered the same way."""
 import hashlib
 import hmac
 import json
+import os
 import time
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi import FastAPI
@@ -10,65 +15,10 @@ from fastapi.testclient import TestClient
 from app.auth import middleware
 from app.routes import sessions as sessions_route
 from app.session.dir_store import DirStore
+from app.session.migrate import migrate_events
 from app.tenants import TenantRegistry
-
-
-# ── Agent-loop trace emission ─────────────────────────────────
-
-class ToolLLM:
-    """First call returns a tool call, second call returns final text."""
-    def __init__(self):
-        self.calls = 0
-
-    async def chat_completion(self, messages, tools=None, max_tokens=None,
-                              chat_template_kwargs=None):
-        self.calls += 1
-        if self.calls == 1:
-            return {"choices": [{"finish_reason": "tool_calls", "message": {
-                "content": None,
-                "tool_calls": [{"id": "tc1", "function": {
-                    "name": "fake_tool", "arguments": '{"x": 1}'}}],
-            }}]}
-        return {"choices": [{"finish_reason": "stop",
-                             "message": {"content": "done"}}]}
-
-
-class ToolRegistry:
-    def get_tools_for_query(self, query, allowed=None):
-        return [{"type": "function", "function": {"name": "fake_tool",
-                                                  "description": "", "parameters": {}}}]
-
-    def get_server_tool_names(self, allowed=None):
-        return {"fake_tool"}
-
-    def get_device_tool_names(self, allowed=None):
-        return set()
-
-    async def execute_server_tool(self, name, args, allowed=None):
-        return "tool output"
-
-
-@pytest.mark.asyncio
-async def test_loop_emits_trace_events():
-    from app.agent.loop import run_agent_loop
-    events = []
-
-    def trace(event, detail=None, duration_ms=None):
-        events.append((event, detail, duration_ms))
-
-    async for _ in run_agent_loop("go", [], ToolRegistry(), ToolLLM(), trace=trace):
-        pass
-
-    names = [e[0] for e in events]
-    assert names == ["tool_call", "tool_result", "assistant_response"]
-    call = events[0][1]
-    assert call["name"] == "fake_tool" and call["arguments"] == {"x": 1}
-    result_event = events[1]
-    assert result_event[1]["result"] == "tool output"
-    assert isinstance(result_event[2], int)  # duration_ms measured
-
-
-# ── Trace endpoints: tenant scoping ───────────────────────────
+from eventlog_fakes import LogBuilder, store
+from app.session import migrate
 
 TWO_TENANT_DOC = {
     "tenants": [
@@ -76,6 +26,10 @@ TWO_TENANT_DOC = {
         {"name": "wcc-analytic", "user": "wcc", "api_key": "key-analytic"},
     ]
 }
+
+
+def _iso(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def signed_get(client, path, key):
@@ -86,35 +40,114 @@ def signed_get(client, path, key):
 
 
 @pytest.fixture
-def client(tmp_path):
+def dir_store(tmp_path):
     doc_path = tmp_path / "tenants.json"
     doc_path.write_text(json.dumps(TWO_TENANT_DOC))
     middleware.set_tenant_registry(TenantRegistry(doc_path, "env-key"))
+    store_ = DirStore(tmp_path / "sessions")
+    sessions_route.set_sessions(store_)
+    return store_
 
-    store = DirStore(tmp_path / "sessions")
-    session = store.get_or_create("wcc", "wcc-event", "s1")
-    session.append_trace("tool_call", {"name": "wcc-events__draft_event"})
-    session.append_trace("tool_result", {"name": "wcc-events__draft_event",
-                                         "duration_ms": 42})
-    sessions_route.set_sessions(store)
 
+@pytest.fixture
+def client(dir_store):
+    now = _iso(datetime.now(timezone.utc))
+    session = dir_store.get_or_create("wcc", "wcc-event", "s1")
+    store(session, LogBuilder(ts=now, user="wcc", tenant="wcc-event")
+          .start().tool_task("in_1", "draft it", "drafted").events)
     app = FastAPI()
     app.include_router(sessions_route.router)
     return TestClient(app)
 
 
+TOOL_TASK_ROWS = ["turn_start", "llm_response", "tool_call", "op_state", "tool_result",
+                  "turn_start", "assistant_response", "settle"]
+
+
 def test_session_traces_visible_to_owner(client):
     r = signed_get(client, "/api/v1/sessions/s1/traces", "key-event")
     assert r.status_code == 200
+    rows = r.json()["traces"]
+    assert [t["event"] for t in rows] == TOOL_TASK_ROWS
+    call = next(t for t in rows if t["event"] == "tool_call")
+    assert call["detail"] == {"name": "wcc-events__draft_event", "arguments": {"title": "x"},
+                              "call_id": "c1", "side": "host"}
+    result = next(t for t in rows if t["event"] == "tool_result")
+    assert result["detail"]["result"] == "drafted" and result["duration_ms"] == 42
+    assert result["detail"]["name"] == "wcc-events__draft_event"
+    assert all(set(t) <= {"ts", "event", "detail", "duration_ms"} for t in rows)
+
+
+def test_session_traces_limit_and_since(client):
+    r = signed_get(client, "/api/v1/sessions/s1/traces?limit=2", "key-event")
+    assert [t["event"] for t in r.json()["traces"]] == ["assistant_response", "settle"]
+    r = signed_get(client, "/api/v1/sessions/s1/traces?since_minutes=5", "key-event")
+    assert len(r.json()["traces"]) == len(TOOL_TASK_ROWS)
+
+
+def test_traces_span_every_run(client, dir_store):
+    session = dir_store.get("wcc", "wcc-event", "s1")
+    store(session, LogBuilder(ts=_iso(datetime.now(timezone.utc)), user="wcc", tenant="wcc-event")
+          .start().text_task("in_2", "again", "ok").events, new_run=True)
+    r = signed_get(client, "/api/v1/sessions/s1/traces", "key-event")
     events = [t["event"] for t in r.json()["traces"]]
-    assert events == ["tool_call", "tool_result"]
+    assert events == TOOL_TASK_ROWS + ["turn_start", "assistant_response", "settle"]
 
 
-def test_traces_recent_answers_last_minutes(client):
+def test_traces_recent_answers_last_minutes(client, dir_store):
+    old = _iso(datetime.now(timezone.utc) - timedelta(hours=2))
+    stale = dir_store.get_or_create("wcc", "wcc-event", "s0")
+    store(stale, LogBuilder(session_id="s0", ts=old, user="wcc", tenant="wcc-event")
+          .start().text_task("in_0", "long ago", "yes").events)
     r = signed_get(client, "/api/v1/sessions/traces/recent?since_minutes=2", "key-event")
     assert r.status_code == 200
     traces = r.json()["traces"]
-    assert traces and all(t["session_id"] == "s1" for t in traces)
+    assert [t["event"] for t in traces] == TOOL_TASK_ROWS
+    assert all(t["session_id"] == "s1" for t in traces)
+    r = signed_get(client, "/api/v1/sessions/traces/recent?since_minutes=600&limit=3",
+                   "key-event")
+    traces = r.json()["traces"]
+    assert len(traces) == 3 and traces[-1]["session_id"] == "s1"
+    r = signed_get(client, "/api/v1/sessions/traces/recent?since_minutes=600", "key-event")
+    assert [t["session_id"] for t in r.json()["traces"]][:3] == ["s0", "s0", "s0"]
+
+
+def _age(session, hours: float) -> None:
+    """Every segment of the session's runs last written `hours` ago."""
+    t = time.time() - hours * 3600
+    for seg in session.events.glob("r*/*.jsonl"):
+        os.utime(seg, (t, t))
+
+
+def test_traces_recent_skips_sessions_last_written_before_the_cutoff(client, dir_store):
+    """A run whose segments were last written before the cutoff is not read
+    (its rows could not be newer), whatever its events' ts say."""
+    quiet = dir_store.get_or_create("wcc", "wcc-event", "s2")
+    store(quiet, LogBuilder(session_id="s2", ts=_iso(datetime.now(timezone.utc)), user="wcc",
+                            tenant="wcc-event").start().text_task("in_q", "hi", "yo").events)
+    _age(quiet, 2)
+    r = signed_get(client, "/api/v1/sessions/traces/recent?since_minutes=2", "key-event")
+    assert {t["session_id"] for t in r.json()["traces"]} == {"s1"}
+
+
+@pytest.mark.no_log_verify("the old run is corrupted on purpose")
+def test_session_traces_read_newest_runs_first(client, dir_store):
+    """/{id}/traces stops at `limit` rows or at `since`: an older run beyond
+    them is never read (here: a corrupted one)."""
+    session = dir_store.get("wcc", "wcc-event", "s1")
+    store(session, LogBuilder(ts=_iso(datetime.now(timezone.utc)), user="wcc", tenant="wcc-event")
+          .start().text_task("in_2", "again", "ok").events, new_run=True)
+    first = sorted(session.events.glob("r*"))[0]
+    with (first / "000001.jsonl").open("a") as f:
+        f.write("not json\n")
+    _age(session, 2)
+    for seg in sorted(session.events.glob("r*"))[-1].glob("*.jsonl"):
+        os.utime(seg)                                   # the newest run: written now
+    r = signed_get(client, "/api/v1/sessions/s1/traces?limit=3", "key-event")
+    assert [t["event"] for t in r.json()["traces"]] == ["turn_start", "assistant_response",
+                                                       "settle"]
+    r = signed_get(client, "/api/v1/sessions/s1/traces?since_minutes=5&limit=50", "key-event")
+    assert len(r.json()["traces"]) == 3
 
 
 def test_sibling_tenant_cannot_see_traces(client):
@@ -130,3 +163,31 @@ def test_sibling_tenant_cannot_see_traces(client):
 def test_list_sessions_scoped(client):
     r = signed_get(client, "/api/v1/sessions", "key-event")
     assert [s["session_id"] for s in r.json()["sessions"]] == ["s1"]
+
+
+def test_migrated_session_traces(client, dir_store):
+    """A legacy session converted by migrate --events: its traces come from
+    the migrated run like any harness session's."""
+    legacy = dir_store.get_or_create("wcc", "wcc-event", "old")
+    t0 = datetime.now(timezone.utc) - timedelta(minutes=1)
+    rows = [{"ts": _iso(t0), "role": "user", "content": "draft an event", "ticket_id": "tk_a"},
+            {"ts": _iso(t0 + timedelta(seconds=5)), "role": "assistant",
+             "content": "Drafted.", "ticket_id": "tk_a"}]
+    (legacy.root / migrate.HISTORY_FILE).write_text("".join(json.dumps(r) + "\n" for r in rows))
+    (legacy.root / migrate.TRACE_FILE).write_text("".join(json.dumps(r) + "\n" for r in [
+        {"ts": _iso(t0 + timedelta(seconds=1)), "event": "tool_call", "ticket_id": "tk_a",
+         "detail": {"name": "wcc-events__draft_event", "arguments": {"title": "x"}}},
+        {"ts": _iso(t0 + timedelta(seconds=2)), "event": "tool_result", "ticket_id": "tk_a",
+         "detail": {"name": "wcc-events__draft_event", "result": "ok", "duration_ms": 7}}]))
+    assert migrate_events(dir_store.root, quiet=True)["stats"] == {"migrated": 1}
+    r = signed_get(client, "/api/v1/sessions/old/traces", "key-event")
+    traces = r.json()["traces"]
+    assert [t["event"] for t in traces] == TOOL_TASK_ROWS
+    result = next(t for t in traces if t["event"] == "tool_result")
+    assert result["duration_ms"] == 7 and result["detail"]["result"] == "ok"
+    # ts are the legacy rows' timestamps
+    call = next(t for t in traces if t["event"] == "tool_call")
+    assert call["ts"] == _iso(t0 + timedelta(seconds=1))
+    assert traces[-1]["ts"] == rows[1]["ts"]
+    r = signed_get(client, "/api/v1/sessions/traces/recent?since_minutes=5", "key-event")
+    assert {t["session_id"] for t in r.json()["traces"]} == {"s1", "old"}

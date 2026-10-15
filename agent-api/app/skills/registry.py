@@ -1,5 +1,11 @@
-import importlib, pkgutil, json, logging
+import importlib
+import pkgutil
+import json
+import logging
 from pathlib import Path
+
+from protocol.fsio import atomic_write_json
+
 from .base import BaseSkill
 
 logger = logging.getLogger("skills")
@@ -27,7 +33,7 @@ class SkillRegistry:
         (mcp_*) are config-driven and never persisted here."""
         SKILLS_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
         state = {k: v for k, v in self._enabled.items() if not k.startswith("mcp_")}
-        SKILLS_STATE_FILE.write_text(json.dumps(state, indent=2))
+        atomic_write_json(SKILLS_STATE_FILE, state, durable=False, mode=0o644, indent=2)
 
     def _discover(self):
         """Auto-discover all skill modules under app/skills/."""
@@ -49,11 +55,6 @@ class SkillRegistry:
             except Exception as e:
                 logger.error(f"Failed to load skill '{modname}': {e}")
         self._save_state()
-
-    def set_llm_provider(self, llm):
-        """Pass LLM provider to skills that need secondary LLM calls."""
-        for skill in self._skills.values():
-            skill.set_llm(llm)
 
     def _visible(self, name: str, allowed: set[str] | None) -> bool:
         """A skill is visible if enabled and within the caller's allowed set
@@ -101,41 +102,13 @@ class SkillRegistry:
         return True
 
     def get_active_tool_definitions(self, allowed: set[str] | None = None) -> list[dict]:
-        """Return tool definitions for ALL enabled skills (fallback path).
-        Prefer get_tools_for_query() to filter by relevance."""
+        """Tool definitions of every visible skill (the harness offers them all:
+        the keyword prefilter retired with the legacy loop)."""
         defs = []
         for name, skill in self._skills.items():
             if self._visible(name, allowed):
                 defs.extend(skill.get_tool_definitions())
         return defs
-
-    def get_tools_for_query(self, query: str, allowed: set[str] | None = None) -> list[dict]:
-        """Return tool definitions relevant to a user query.
-
-        Stage 1 (keyword pre-filter):
-        - Check each skill's keywords against the lowercased query
-        - Always include skills with always_available=True
-        - If keyword matches found → return matched + always-available tools
-        - If no matches → fall back to all enabled tools
-        """
-        query_lower = query.lower()
-        matched = []
-        always_on = []
-
-        for name, skill in self._skills.items():
-            if not self._visible(name, allowed):
-                continue
-            if skill.always_available:
-                always_on.extend(skill.get_tool_definitions())
-            elif any(kw in query_lower for kw in skill.keywords):
-                matched.extend(skill.get_tool_definitions())
-
-        if matched:
-            logger.info(f"Tool filter: {len(matched)} matched + {len(always_on)} always-on")
-            return matched + always_on
-
-        # No keyword hits — fall back to all visible tools
-        return self.get_active_tool_definitions(allowed)
 
     def get_server_tool_names(self, allowed: set[str] | None = None) -> set[str]:
         """Names of all tools that execute on the server."""

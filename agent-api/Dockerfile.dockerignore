@@ -1,0 +1,23 @@
+# BuildKit reads <Dockerfile>.dockerignore for a root-context build: send
+# only what the agent-api image needs (the frozen workspace lock needs every
+# member's pyproject.toml).
+*
+!pyproject.toml
+!uv.lock
+!harness/pyproject.toml
+!harness/protocol
+!harness/guest
+!harness/image/versions.env
+!flows/pyproject.toml
+!flows/flows
+!agent-api/pyproject.toml
+!agent-api/app
+!mcp-gateway/pyproject.toml
+flows/flows/tests
+# ...but the stub activities: `python -m flows.worker` (docs/FLOWS.md 6.5) imports them
+!flows/flows/tests/__init__.py
+!flows/flows/tests/stubs.py
+**/__pycache__
+**/*.pyc
+**/.venv
+**/.pytest_cache

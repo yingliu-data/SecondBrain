@@ -1,9 +1,18 @@
-"""Guest session management — unauthenticated, rate-limited, skill-restricted."""
+"""Guest avatar page — unauthenticated, rate-limited, skill-restricted.
+
+guest_profile(): the guest tenant:
+`auth: origin`, `local_skills: ["avatar_control"]`, no guest built-ins, one
+tool round (max_tools 2, then a final turn without tools), never parks on a
+question. It runs on the same harness engine as every tenant (routes/guest.py).
+GuestSessionManager: the page's limits (session TTL, messages per session,
+sessions per IP per hour); history lives in the harness session itself.
+"""
 
 import asyncio
 import logging
 import time
 from collections import defaultdict
+from typing import Awaitable, Callable
 
 logger = logging.getLogger("guest")
 
@@ -15,8 +24,9 @@ MAX_MESSAGES = 10
 MAX_SESSIONS_PER_IP_PER_HOUR = 3
 # Input character limit
 MAX_INPUT_CHARS = 200
-# LLM output token cap
-MAX_OUTPUT_TOKENS = 200
+# Tool calls per task: the old guest loop's one tool round (then a final
+# answer turn without tools)
+MAX_TOOLS = 2
 
 GUEST_SYSTEM_PROMPT = """You control a 3D humanoid avatar. You MUST call a tool for every movement request.
 
@@ -57,15 +67,26 @@ ALLOWED_ORIGINS = {
 }
 
 
+def guest_profile():
+    """The synthesized guest tenant (TenantRegistry adds it unless
+    tenants.json has an `auth: "origin"` entry named guest)."""
+    from protocol.allowlist import GUEST_BUILTINS
+
+    from app.tenants.models import Tenant
+    return Tenant(name="guest", auth="origin", origins=sorted(ALLOWED_ORIGINS),
+                  system_prompt=GUEST_SYSTEM_PROMPT, local_skills=["avatar_control"],
+                  exclude_builtins=list(GUEST_BUILTINS), max_tools=MAX_TOOLS,
+                  answer_wait_s=0)
+
+
 class GuestSession:
-    __slots__ = ("session_id", "ip", "created_at", "message_count", "history")
+    __slots__ = ("session_id", "ip", "created_at", "message_count")
 
     def __init__(self, session_id: str, ip: str):
         self.session_id = session_id
         self.ip = ip
         self.created_at = time.time()
         self.message_count = 0
-        self.history: list[dict] = []
 
     @property
     def expired(self) -> bool:
@@ -82,6 +103,8 @@ class GuestSessionManager:
         # Track session creation times per IP: ip -> [timestamps]
         self._ip_sessions: dict[str, list[float]] = defaultdict(list)
         self._cleanup_task: asyncio.Task | None = None
+        # an expired session is dropped; this closes its harness Worker (routes/guest.py)
+        self.on_expire: Callable[[str], Awaitable[None]] | None = None
 
     def start_cleanup(self):
         if self._cleanup_task is None:
@@ -90,17 +113,24 @@ class GuestSessionManager:
     async def _cleanup_loop(self):
         while True:
             await asyncio.sleep(30)
-            now = time.time()
-            expired = [sid for sid, s in self._sessions.items()
-                       if now - s.created_at > SESSION_TTL + 60]
-            for sid in expired:
-                del self._sessions[sid]
-            # Prune IP history older than 1 hour
-            cutoff = now - 3600
-            for ip in list(self._ip_sessions):
-                self._ip_sessions[ip] = [t for t in self._ip_sessions[ip] if t > cutoff]
-                if not self._ip_sessions[ip]:
-                    del self._ip_sessions[ip]
+            await self.cleanup()
+
+    async def cleanup(self, now: float | None = None):
+        """Drop sessions past their TTL (plus a minute) and prune the
+        per-IP history."""
+        now = time.time() if now is None else now
+        expired = [sid for sid, s in self._sessions.items()
+                   if now - s.created_at > SESSION_TTL + 60]
+        for sid in expired:
+            del self._sessions[sid]
+            if self.on_expire is not None:
+                await self.on_expire(sid)
+        # Prune IP history older than 1 hour
+        cutoff = now - 3600
+        for ip in list(self._ip_sessions):
+            self._ip_sessions[ip] = [t for t in self._ip_sessions[ip] if t > cutoff]
+            if not self._ip_sessions[ip]:
+                del self._ip_sessions[ip]
 
     def get_or_create(self, session_id: str, ip: str) -> tuple[GuestSession | None, str]:
         """Return (session, error_message). If error, session is None."""

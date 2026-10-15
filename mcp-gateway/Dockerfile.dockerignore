@@ -1,0 +1,15 @@
+# BuildKit reads <Dockerfile>.dockerignore for a root-context build: send
+# only what the gateway image needs (the frozen workspace lock needs every
+# member's pyproject.toml).
+*
+!pyproject.toml
+!uv.lock
+!harness/pyproject.toml
+!harness/protocol
+!flows/pyproject.toml
+!agent-api/pyproject.toml
+!mcp-gateway/pyproject.toml
+!mcp-gateway/app
+**/__pycache__
+**/*.pyc
+**/.venv

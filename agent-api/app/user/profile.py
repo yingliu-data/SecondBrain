@@ -10,20 +10,20 @@ Storage layout::
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from protocol.fsio import atomic_write, atomic_write_json
+
 from app.config import USERS_ROOT
+from app.session.ids import is_safe_id
 
 # Profile sits in the system prompt on every turn — keep it cheap.
 _PROMPT_MAX_CHARS = 1200
 
-_SAFE_USER_RE = re.compile(r"^[A-Za-z0-9_\-]{1,64}$")
-
-
 def _user_dir(user_id: str) -> Path:
-    if not _SAFE_USER_RE.match(user_id):
+    # is_safe_id: fullmatch (the old `^...$` regex accepted a trailing newline)
+    if not is_safe_id(user_id):
         raise ValueError(f"user_id fails safe-path validation: {user_id!r}")
     return Path(USERS_ROOT) / user_id
 
@@ -65,10 +65,8 @@ class UserProfile:
         base.mkdir(parents=True, exist_ok=True)
         structured = asdict(self)
         extras = structured.pop("extras_md", "") or ""
-        (base / "profile.json").write_text(
-            json.dumps(structured, indent=2), encoding="utf-8"
-        )
-        (base / "profile.md").write_text(extras, encoding="utf-8")
+        atomic_write_json(base / "profile.json", structured, durable=False, mode=0o644, indent=2)
+        atomic_write(base / "profile.md", extras.encode("utf-8"), durable=False, mode=0o644)
 
     def to_prompt_block(self, max_chars: int = _PROMPT_MAX_CHARS) -> str:
         lines: list[str] = []

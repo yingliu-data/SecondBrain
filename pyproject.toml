@@ -1,0 +1,20 @@
+# Virtual uv workspace root (no [project]): one lock (uv.lock), one .venv.
+#   uv sync --all-packages              # every member + every dev group
+#   cd harness && uv run pytest         # likewise flows/, agent-api/, mcp-gateway/
+# Each suite runs as its own pytest process: agent-api and mcp-gateway both
+# have a top-level `app` package. Images: `uv sync --package agent-api` /
+# `--package mcp-gateway` (see each member's Dockerfile).
+[tool.uv.workspace]
+members = ["harness", "flows", "agent-api", "mcp-gateway"]
+
+# Lint (CI's lint job: `uvx ruff@0.14.0 check .`). No `ruff format`: the code
+# keeps its hand-aligned style. Tests import pytest fixtures and take them as
+# arguments (F811) and keep short `a; b` setup lines (E702).
+[tool.ruff]
+target-version = "py312"
+
+[tool.ruff.lint]
+ignore = ["E741"]                   # `l` for a line is fine here
+
+[tool.ruff.lint.per-file-ignores]
+"**/tests/**" = ["F811", "E702"]

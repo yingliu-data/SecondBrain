@@ -1,0 +1,5 @@
+*
+!out/guest.pyz
+!out/GUEST_IMAGE_VERSION
+!harness-init
+!pyz_pack.py

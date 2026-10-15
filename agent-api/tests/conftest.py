@@ -2,6 +2,11 @@ import os
 
 # Must be set before any app.* import — config.py reads it at import time.
 os.environ.setdefault("API_SECRET_KEY", "test-default-key")
+# No gateway unless a test points a Worker / skill at a fake one.
+os.environ.setdefault("MCP_GATEWAY_URL", "")
+# The guest's provider retry backoff (guest.main reads it; LocalSandbox
+# guests inherit the environment): 1 s, 2 s, 4 s in production.
+os.environ.setdefault("HARNESS_LLM_BACKOFF_S", "0.01")
 
 import json
 
@@ -44,3 +49,9 @@ def tenants_file(tmp_path):
 @pytest.fixture
 def tenant_registry(tenants_file):
     return TenantRegistry(tenants_file, "test-default-key")
+
+
+# CI log verification: the `logverify` plugin (harness/logverify.py, shared
+# with the harness suite) verifies every event log a test wrote under its
+# tmp_path after the test; `@pytest.mark.no_log_verify("why")` opts out.
+pytest_plugins = ["logverify"]

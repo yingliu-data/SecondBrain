@@ -1,15 +1,15 @@
 """Session/ticket identifier generation and path-safe key validation."""
 from __future__ import annotations
 
-import re
 import uuid
 from datetime import datetime, timezone
 
-_SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_\-]{1,64}$")
+# one rule for user/session ids on both sides of the gateway (protocol.mcp)
+from protocol.mcp import is_safe_id
+from flows.activities import SessionRef
 
-
-def is_safe_id(value: str) -> bool:
-    return bool(_SAFE_ID_RE.match(value))
+__all__ = ["SessionRef", "is_safe_id", "make_session_id",
+           "session_dir_name", "session_key", "session_ref"]
 
 
 def make_session_id() -> str:
@@ -19,18 +19,24 @@ def make_session_id() -> str:
     return f"sess_{ts}_{uuid.uuid4().hex[:4]}"
 
 
-def make_ticket_id() -> str:
-    return "tk_" + uuid.uuid4().hex[:8]
+def session_key(user: str, tenant: str, session_id: str) -> str:
+    """The in-process key of one session (the Worker registry): injective,
+    `/` occurs in none of the safe ids. Ownership checks never parse it:
+    they compare the session's (user, tenant) exactly (SessionRef)."""
+    return f"{user}/{tenant}/{session_id}"
 
 
-def safe_key(user_id: str, session_id: str) -> str:
-    """Compose a filesystem-safe directory name from user_id + session_id.
+def session_ref(user: str, tenant: str, session_id: str) -> SessionRef:
+    """The identity of one session: (user, tenant, session_id)."""
+    return SessionRef(user=user, tenant=tenant, session_id=session_id)
 
-    Both components must match ``^[A-Za-z0-9_\\-]{1,64}$``. The filesystem key
-    is the literal ``f"{user_id}_{session_id}"``.
-    """
-    if not _SAFE_ID_RE.match(user_id):
-        raise ValueError(f"user_id fails safe-path validation: {user_id!r}")
-    if not _SAFE_ID_RE.match(session_id):
+
+def session_dir_name(tenant: str, session_id: str) -> str:
+    """A session's directory name under its user: ``{tenant}.{session_id}``.
+    Injective: both halves must be safe ids, which never contain ``.``."""
+    if not is_safe_id(tenant):
+        raise ValueError(f"tenant fails safe-path validation: {tenant!r}")
+    if not is_safe_id(session_id):
         raise ValueError(f"session_id fails safe-path validation: {session_id!r}")
-    return f"{user_id}_{session_id}"
+    return f"{tenant}.{session_id}"
+

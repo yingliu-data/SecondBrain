@@ -10,6 +10,8 @@ import json
 import logging
 from pathlib import Path
 
+from protocol.canonical import sha256_hex
+
 from app.config import USERS_ROOT
 from app.skills.base import BaseSkill, get_current_session, get_current_user_id
 from app.user.memory import MemoryStore
@@ -142,9 +144,14 @@ class RememberSkill(BaseSkill):
             return f"Error: missing required field {e}"
         except ValueError as e:
             return f"Error: {e}"
+        # sha256 of the stripped body text (docs/GUEST.md: one memory
+        # hash definition everywhere, sha256_hex(body.strip())); the harness
+        # records it in the `memory` event
+        digest = sha256_hex(rec.body.strip())
         logger.info(f"remember scope={scope} slug={rec.slug} type={rec.type}")
         return json.dumps(
-            {"status": "ok", "scope": scope, "slug": rec.slug, "type": rec.type}
+            {"status": "ok", "scope": scope, "slug": rec.slug, "type": rec.type,
+             "sha256": digest}
         )
 
     def _handle_forget(self, args: dict) -> str:
@@ -159,5 +166,6 @@ class RememberSkill(BaseSkill):
         ok = store.remove(slug)
         logger.info(f"forget scope={scope} slug={slug} ok={ok}")
         return json.dumps(
-            {"status": "ok" if ok else "not_found", "scope": scope, "slug": slug}
+            {"status": "ok" if ok else "not_found", "scope": scope, "slug": slug,
+             "sha256": ""}
         )
