@@ -114,3 +114,83 @@ The iOS app lives in the separate [IndexApp](https://github.com/yingliu-data/Ind
 ## Development
 
 See [PLAN.md](PLAN.md) for the full build guide and `.claude/PROJECT_STRUCTURE.md` for detailed file-level documentation.
+
+### End-to-end test in dev (`scripts/test-branch.sh`)
+
+Runs any branch next to prod on the server and exposes it to the IndexApp on
+your phone, so a branch can be tested end to end before it is merged. Prod
+(`secondbrain-agent-api`, `secondbrain.yingliu.site`, its data and keys) is
+never touched.
+
+```sh
+scripts/test-branch.sh <branch> [tenants.json]              # guest harness as a subprocess
+scripts/test-branch-firecracker.sh <branch> [tenants.json]  # guest harness in Firecracker microVMs
+scripts/test-branch.sh --down                               # remove leftover test containers
+```
+
+What a run does:
+
+1. Checks out `origin/<branch>` in a separate worktree, `../SecondBrain-test`.
+2. Builds the branch's agent-api image (`secondbrain-agent-api:test`) and, if the
+   branch has `mcp-gateway/`, the gateway image.
+3. Prepares a test data dir, `~/data/SecondBrain-test/agent-api/data`:
+   `tenants.json` is the given file (default: prod's
+   `~/data/SecondBrain/agent-api/data/tenants.json`), copied fresh on every run.
+4. Starts a test MCP gateway (`secondbrain-test-agent-api-mcp-gateway`). Its
+   `gateway.json` is generated from the test `tenants.json`, and each tenant gets
+   only its own upstreams. The `default` tenant gets no MCP. It reaches wcc-mcp
+   over `agent-net` and prints whether each upstream is reachable.
+5. Starts agent-api (`secondbrain-test-agent-api`) on `127.0.0.1:8001`, sharing
+   prod's LLM (`secondbrain-llm`). There is no Temporal, so it uses the direct
+   path.
+6. Runs a smoke test: one signed chat as the `default` tenant. It prints the
+   reply, the tenant's tools by side, and, with Firecracker, the VM restore time.
+7. Opens a Cloudflare quick tunnel and checks `/health` through it. It prints a
+   `https://….trycloudflare.com` URL, then follows the logs. Ctrl-C stops
+   everything.
+
+`test-branch-firecracker.sh` first builds the guest VM image
+(`harness/image`: `make image && make check`) and the base snapshot
+(`base_snapshot build-base`, in a one-off container of the branch image), into
+`~/data/SecondBrain-test/vm`. Both steps are skipped when they are up to date.
+It then runs `test-branch.sh` with `SANDBOX=firecracker`.
+
+**On the phone** (IndexApp → Settings), press Return after each field; a field
+is saved only on Return:
+
+- **Server URL**: the printed trycloudflare URL. It changes on every run.
+- **API Key**: the test `default` tenant's key, from
+  `cat ~/data/SecondBrain-test/default.key`. The key is generated once and is not
+  prod's `API_SECRET_KEY`. A tenant `api_key` from the tenants file works too.
+- **Test Connection** checks `/health` only. Send a message to check the key.
+- Afterwards, set the Server URL back to `https://secondbrain.yingliu.site` and
+  the API Key back to your prod key.
+
+**Prerequisites** (the server): the prod compose stack up (networks
+`secondbrain_tunnel_network` and `secondbrain_llm_internal`, the `secondbrain-llm`
+container), the `agent-net` network with `wcc-mcp` for MCP, `cloudflared`, and,
+for Firecracker, `/dev/kvm`.
+
+**Options** (environment variables):
+
+| Variable | Effect |
+|---|---|
+| `PORT=8001` | host port of the test agent-api |
+| `FRESH=1` | wipe the test sessions before starting |
+| `GATEWAY=0` | no mcp-gateway, so no MCP tools |
+| `SMOKE=0` / `SMOKE_MSG="..."` | skip the smoke test / change its message, e.g. `"Use search_tools to find the WCC events tools"` |
+| `NO_TUNNEL=1` | stop after the smoke test (a local check, no public URL) |
+| `API_SECRET_KEY=...` | the default tenant's key, instead of `default.key` |
+| `NAME=... DATA=...` | container name / data dir, to run a second test server alongside |
+| `REBUILD_IMAGE=1` | (Firecracker) force a new guest image and base snapshot |
+
+**Where to look:** the agent-api logs stream in the terminal; for the gateway
+run `docker logs -f secondbrain-test-agent-api-mcp-gateway`; on the phone, use
+Settings → Debug Logs. Each session is a directory
+`~/data/SecondBrain-test/agent-api/data/sessions/{user}/{tenant}.{session}/`.
+`events/r*/000001.jsonl` holds the guest events (`turn_start`, `tool_call`,
+`tool_result`, `settle`), `events/host-*.jsonl` the host events (`vm`,
+`gateway`, `usage`), and with Firecracker `vm/console.log` the guest console.
+
+Not covered: the Temporal session workflow, and parking a session after
+`HARNESS_SESSION_IDLE_S`.
