@@ -116,10 +116,10 @@ With agent-api stopped: back up, list them, then delete them.
 docker compose stop agent-api
 tar -C agent-api/data -czf sessions-backup-$(date +%F).tgz sessions
 docker compose run --rm --no-deps agent-api python -m app.session.migrate --purge-legacy-layout --dry-run data/sessions
-#     would delete wcc/wcc-event_sess_2026-05-01_101500_ab12 (48211 bytes)
+#     would delete default/default_sess_2026-05-01_101500_ab12 (48211 bytes)
 #   Done (dry run): 1 old-layout directory, 48211 bytes
 docker compose run --rm --no-deps agent-api python -m app.session.migrate --purge-legacy-layout data/sessions
-#     delete wcc/wcc-event_sess_2026-05-01_101500_ab12 (48211 bytes)
+#     delete default/default_sess_2026-05-01_101500_ab12 (48211 bytes)
 #   Done: 1 old-layout directory, 48211 bytes deleted
 ```
 
@@ -133,7 +133,7 @@ and a `session.json` are deleted; new-layout sessions and anything without a
 ```sh
 docker compose exec agent-api python -m app.session.migrate --events --dry-run data/sessions
 #     default/default.abc: would_migrate {"exchanges": 12, "replies": 12, "tool_calls": 3, "unanswered": 0, "skipped_rows": 0, "events": 97}
-#     wcc-event/wcc-event.x1: failed {"problems": ["seq 14: ..."], ...}
+#     default/default.x1: failed {"problems": ["seq 14: ..."], ...}
 #   Done (dry run): {'would_migrate': 40, 'skipped_existing': 170, 'skipped_empty': 4}
 ```
 
@@ -283,8 +283,8 @@ jq -r '.tenants[] | [.name, (.engine // "-"), ((.mcp_servers // []) | join(","))
 docker compose restart mcp-gateway agent-api
 docker compose logs agent-api | grep -E '\[tenants\]'
 #   ... [tenants] WARNING: tenant default: `engine: harness` ignored (every tenant runs the harness engine)
-#   ... [tenants] WARNING: tenant wcc-event: `mcp_servers: ['wcc-events']` ignored (the mcp-gateway's gateway.json owns MCP access)
-#   ... [tenants] INFO: Tenants loaded: ['default', 'wcc-event', 'wcc-mentorship', 'wcc-analytic', 'guest']
+#   ... [tenants] WARNING: tenant default: `mcp_servers: ['wcc-events']` ignored (the mcp-gateway's gateway.json owns MCP access)
+#   ... [tenants] INFO: Tenants loaded: ['default', 'guest']
 docker compose ps agent-api                                 # running, not restarting
 ```
 

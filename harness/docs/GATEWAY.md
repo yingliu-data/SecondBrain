@@ -102,9 +102,10 @@ the route paths are `protocol.mcp.INTERNAL_TOOLS_PATH` and
 
 ```json
 {"upstreams": {"wcc-events": {"url": "...", "auth_token": "...", "timeout_s": 300,
-                              "tool_defs_ttl_s": 300, "allow_private": false}},
- "tenants": {"wcc-event": {"upstreams": ["wcc-events"], "allow": ["*"], "deny": [],
-                           "promoted": ["wcc-events__draft_event"], "max_concurrent": 2}},
+                              "tool_defs_ttl_s": 300, "allow_private": false},
+               "wcc-mentorship": {"url": "..."}, "wcc-analytic": {"url": "..."}},
+ "tenants": {"default": {"upstreams": ["wcc-events", "wcc-mentorship", "wcc-analytic"],
+                         "allow": ["*"], "deny": [], "promoted": [], "max_concurrent": 2}},
  "input_expires_s": 3600}
 ```
 
@@ -115,7 +116,7 @@ session (default 2). `timeout_s` is an upstream call's total budget,
 `tool_defs_ttl_s` how long its tools/list is cached. `input_expires_s`
 (optional, default 3600) caps how long an input-required call is held.
 
-### Migrating the WCC config
+### Migrating the MCP config
 
 ```bash
 cd mcp-gateway

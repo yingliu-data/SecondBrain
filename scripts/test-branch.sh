@@ -254,7 +254,7 @@ for t in tools:
         t.get("name") if isinstance(t, dict) else t)
 print(f"    tenant default: {len(tools)} tools ("
       + ", ".join(f"{k} {len(v)}" for k, v in sorted(sides.items())) + ")")
-print(f"    mcp: {', '.join(sorted(sides.get('mcp', []))) or 'none (as intended: no MCP for default)'}")
+print(f"    mcp: {', '.join(sorted(sides.get('mcp', []))) or 'none'}")
 for v in vm:
     print(f"    vm: {v.get('sandbox')} {v.get('op')} from {v.get('source')} "
           f"in {v.get('ms')} ms (ready {v.get('ready_ms')} ms)")
