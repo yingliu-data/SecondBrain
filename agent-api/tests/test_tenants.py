@@ -91,6 +91,20 @@ def test_engine_key_accepted_and_ignored_with_a_warning(tmp_path, caplog):
     assert sum("ignored" in r.getMessage() for r in caplog.records) == 2
 
 
+def test_retired_wcc_tenants_are_skipped_with_a_warning(tmp_path, caplog):
+    doc = {"tenants": [{"name": "wcc-event", "api_key": "old-wcc-key"},
+                       {"name": "wcc-mentorship", "api_key": "m"},
+                       {"name": "wcc-analytic", "api_key": "a", "max_tools": "many"}]}
+    with caplog.at_level("WARNING", logger="tenants"):
+        reg = TenantRegistry(_write(tmp_path, doc), "k")
+    assert {t.name for t in reg.all_tenants()} == {"default", "guest"}
+    assert reg.get_by_api_key("old-wcc-key") is None
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 3
+    for name, msg in zip(("wcc-event", "wcc-mentorship", "wcc-analytic"), warnings):
+        assert name in msg and "refused" in msg
+
+
 def test_guest_profile_is_synthesized_and_never_matched_by_key(tmp_path):
     from protocol.allowlist import GUEST_BUILTINS
     from app.auth.guest import ALLOWED_ORIGINS
