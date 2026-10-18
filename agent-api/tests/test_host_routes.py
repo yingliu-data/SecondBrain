@@ -70,8 +70,7 @@ def test_example_tenants_all_load_without_an_engine(tmp_path):
     default = reg.get_by_api_key("env-key")
     assert default.is_default
     assert sum(1 for t in reg.all_tenants() if t.name == "default") == 1
-    wcc = next(t for t in reg.all_tenants() if t.name == "wcc-event")
-    assert wcc.allowed_skill_names() == {"web_search"}
+    assert {t.name for t in reg.all_tenants()} == {"default", "guest"}
 
 
 def test_non_dir_session_backend_is_a_startup_error(monkeypatch):
