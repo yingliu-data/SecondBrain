@@ -138,7 +138,7 @@ What a run does:
    `~/data/SecondBrain/agent-api/data/tenants.json`), copied fresh on every run.
 4. Starts a test MCP gateway (`secondbrain-test-agent-api-mcp-gateway`). Its
    `gateway.json` is generated from the test `tenants.json`, and each tenant gets
-   only its own upstreams. The `default` tenant gets no MCP. It reaches wcc-mcp
+   only its own upstreams. The `default` tenant gets every upstream. It reaches wcc-mcp
    over `agent-net` and prints whether each upstream is reachable.
 5. Starts agent-api (`secondbrain-test-agent-api`) on `127.0.0.1:8001`, sharing
    prod's LLM (`secondbrain-llm`). There is no Temporal, so it uses the direct

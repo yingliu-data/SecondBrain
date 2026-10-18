@@ -10,7 +10,7 @@
 #   - it gets its own data dir: tenants.json = the given file (default: prod's), copied
 #     fresh every run; skills.json seeded once from prod
 #   - it shares the prod LLM (secondbrain-llm)
-#   - the default tenant (every local skill, the global prompt, no MCP) uses a
+#   - the default tenant (every local skill, the global prompt, every MCP upstream) uses a
 #     test-only API_SECRET_KEY, generated once into $KEY_FILE (never prod's)
 #   - branches with mcp-gateway/ also get a test gateway (secondbrain-test-agent-api-mcp-gateway),
 #     configured from the test tenants.json, reaching wcc-mcp over agent-net
@@ -146,17 +146,10 @@ GW_URL=""
 if [[ "${GATEWAY:-1}" == 1 ]]; then
   docker network inspect "$NET_MCP" >/dev/null 2>&1 || die "docker network $NET_MCP missing (wcc-mcp's network)"
   # gateway.json from the test tenants.json (the branch's own migrate_config).
-  # migrate_config grants the default tenant every upstream; drop it: only the
-  # wcc tenants get MCP, each its own upstream. A tenant missing from
-  # gateway.json is default-denied.
+  # migrate_config grants the default tenant every upstream.
   mkdir -p "$GW_DATA"
   docker run --rm -v "$DATA/tenants.json:/in/tenants.json:ro" -e API_SECRET_KEY="$API_SECRET_KEY" \
-    "$GW_IMAGE" python -m app.migrate_config /in/tenants.json \
-  | python3 -c '
-import json, sys
-g = json.load(sys.stdin)
-g["tenants"].pop("default", None)
-json.dump(g, sys.stdout, indent=2)' >"$GW_DATA/gateway.json.new"
+    "$GW_IMAGE" python -m app.migrate_config /in/tenants.json >"$GW_DATA/gateway.json.new"
   chmod 600 "$GW_DATA/gateway.json.new"; mv "$GW_DATA/gateway.json.new" "$GW_DATA/gateway.json"
 
   log "Starting $GW (MCP access: $(python3 -c 'import json,sys; t=json.load(open(sys.argv[1]))["tenants"]; print(", ".join(f"{k} -> {"+".join(v["upstreams"])}" for k,v in t.items()) or "none")' "$GW_DATA/gateway.json"))"
