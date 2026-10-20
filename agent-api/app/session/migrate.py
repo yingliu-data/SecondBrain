@@ -16,7 +16,7 @@
      python -m app.session.migrate [--db data/conversations.db] [--root data/sessions]
 
    "abc"           (un-namespaced) → user "default", tenant "default"
-   "wcc-event:abc" (namespaced)    → tenant "wcc-event" under its configured user
+   "phone:abc" (namespaced)        → tenant "phone" under its configured user
                                      (resolved via tenants.json; fallback: user = tenant)
    Each conversation's user/assistant messages become the event log run
    `events/r0000` exactly as step 2 builds one (line L = the Lth of those

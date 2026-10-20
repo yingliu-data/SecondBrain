@@ -13,7 +13,7 @@ each section below links to the one that owns the topic.
 ## 1. The big picture
 
 ```text
- iPhone app · avatar page · WCC clients
+ iPhone app · avatar page
         │  HTTPS + SSE  (Cloudflare tunnel)
         ▼
  ┌────────────────────────── agent-api (FastAPI, one container) ──────────────────────────┐

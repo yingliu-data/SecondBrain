@@ -9,6 +9,7 @@ from .models import Tenant
 logger = logging.getLogger("tenants")
 
 GUEST_TENANT = "guest"
+RETIRED_TENANTS = {"wcc-event", "wcc-mentorship", "wcc-analytic"}
 
 
 class TenantRegistry:
@@ -47,6 +48,11 @@ class TenantRegistry:
 
         names, keys = set(), set()
         for entry in data.get("tenants", []):
+            if entry.get("name") in RETIRED_TENANTS:
+                logger.warning(f"tenant {entry['name']!r} is retired (issue #49) and skipped: "
+                               "its API key is refused. The default tenant has every MCP "
+                               "server. Remove the entry from tenants.json.")
+                continue
             tenant = Tenant(**entry)
             if (tenant.auth == "origin") != (tenant.name == GUEST_TENANT):
                 raise ValueError(f"tenant {tenant.name!r}: auth: origin is for the "

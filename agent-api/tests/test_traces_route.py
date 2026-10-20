@@ -22,8 +22,8 @@ from app.session import migrate
 
 TWO_TENANT_DOC = {
     "tenants": [
-        {"name": "wcc-event", "user": "wcc", "api_key": "key-event"},
-        {"name": "wcc-analytic", "user": "wcc", "api_key": "key-analytic"},
+        {"name": "team-events", "user": "wcc", "api_key": "key-event"},
+        {"name": "team-analytic", "user": "wcc", "api_key": "key-analytic"},
     ]
 }
 
@@ -52,8 +52,8 @@ def dir_store(tmp_path):
 @pytest.fixture
 def client(dir_store):
     now = _iso(datetime.now(timezone.utc))
-    session = dir_store.get_or_create("wcc", "wcc-event", "s1")
-    store(session, LogBuilder(ts=now, user="wcc", tenant="wcc-event")
+    session = dir_store.get_or_create("wcc", "team-events", "s1")
+    store(session, LogBuilder(ts=now, user="wcc", tenant="team-events")
           .start().tool_task("in_1", "draft it", "drafted").events)
     app = FastAPI()
     app.include_router(sessions_route.router)
@@ -86,8 +86,8 @@ def test_session_traces_limit_and_since(client):
 
 
 def test_traces_span_every_run(client, dir_store):
-    session = dir_store.get("wcc", "wcc-event", "s1")
-    store(session, LogBuilder(ts=_iso(datetime.now(timezone.utc)), user="wcc", tenant="wcc-event")
+    session = dir_store.get("wcc", "team-events", "s1")
+    store(session, LogBuilder(ts=_iso(datetime.now(timezone.utc)), user="wcc", tenant="team-events")
           .start().text_task("in_2", "again", "ok").events, new_run=True)
     r = signed_get(client, "/api/v1/sessions/s1/traces", "key-event")
     events = [t["event"] for t in r.json()["traces"]]
@@ -96,8 +96,8 @@ def test_traces_span_every_run(client, dir_store):
 
 def test_traces_recent_answers_last_minutes(client, dir_store):
     old = _iso(datetime.now(timezone.utc) - timedelta(hours=2))
-    stale = dir_store.get_or_create("wcc", "wcc-event", "s0")
-    store(stale, LogBuilder(session_id="s0", ts=old, user="wcc", tenant="wcc-event")
+    stale = dir_store.get_or_create("wcc", "team-events", "s0")
+    store(stale, LogBuilder(session_id="s0", ts=old, user="wcc", tenant="team-events")
           .start().text_task("in_0", "long ago", "yes").events)
     r = signed_get(client, "/api/v1/sessions/traces/recent?since_minutes=2", "key-event")
     assert r.status_code == 200
@@ -122,9 +122,9 @@ def _age(session, hours: float) -> None:
 def test_traces_recent_skips_sessions_last_written_before_the_cutoff(client, dir_store):
     """A run whose segments were last written before the cutoff is not read
     (its rows could not be newer), whatever its events' ts say."""
-    quiet = dir_store.get_or_create("wcc", "wcc-event", "s2")
+    quiet = dir_store.get_or_create("wcc", "team-events", "s2")
     store(quiet, LogBuilder(session_id="s2", ts=_iso(datetime.now(timezone.utc)), user="wcc",
-                            tenant="wcc-event").start().text_task("in_q", "hi", "yo").events)
+                            tenant="team-events").start().text_task("in_q", "hi", "yo").events)
     _age(quiet, 2)
     r = signed_get(client, "/api/v1/sessions/traces/recent?since_minutes=2", "key-event")
     assert {t["session_id"] for t in r.json()["traces"]} == {"s1"}
@@ -134,8 +134,8 @@ def test_traces_recent_skips_sessions_last_written_before_the_cutoff(client, dir
 def test_session_traces_read_newest_runs_first(client, dir_store):
     """/{id}/traces stops at `limit` rows or at `since`: an older run beyond
     them is never read (here: a corrupted one)."""
-    session = dir_store.get("wcc", "wcc-event", "s1")
-    store(session, LogBuilder(ts=_iso(datetime.now(timezone.utc)), user="wcc", tenant="wcc-event")
+    session = dir_store.get("wcc", "team-events", "s1")
+    store(session, LogBuilder(ts=_iso(datetime.now(timezone.utc)), user="wcc", tenant="team-events")
           .start().text_task("in_2", "again", "ok").events, new_run=True)
     first = sorted(session.events.glob("r*"))[0]
     with (first / "000001.jsonl").open("a") as f:
@@ -168,7 +168,7 @@ def test_list_sessions_scoped(client):
 def test_migrated_session_traces(client, dir_store):
     """A legacy session converted by migrate --events: its traces come from
     the migrated run like any harness session's."""
-    legacy = dir_store.get_or_create("wcc", "wcc-event", "old")
+    legacy = dir_store.get_or_create("wcc", "team-events", "old")
     t0 = datetime.now(timezone.utc) - timedelta(minutes=1)
     rows = [{"ts": _iso(t0), "role": "user", "content": "draft an event", "ticket_id": "tk_a"},
             {"ts": _iso(t0 + timedelta(seconds=5)), "role": "assistant",

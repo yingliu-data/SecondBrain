@@ -22,10 +22,7 @@
     }
   },
   "tenants": {
-    "default": {"upstreams": ["wcc-events", "wcc-mentorship", "wcc-analytic"], "allow": ["*"], "deny": [], "promoted": [], "max_concurrent": 2},
-    "wcc-event": {"upstreams": ["wcc-events"], "allow": ["*"], "deny": [], "promoted": ["wcc-events__draft_event"], "max_concurrent": 2},
-    "wcc-mentorship": {"upstreams": ["wcc-mentorship"], "allow": ["*"], "deny": [], "promoted": [], "max_concurrent": 2},
-    "wcc-analytic": {"upstreams": ["wcc-analytic"], "allow": ["*"], "deny": [], "promoted": [], "max_concurrent": 2}
+    "default": {"upstreams": ["wcc-events", "wcc-mentorship", "wcc-analytic"], "allow": ["*"], "deny": [], "promoted": [], "max_concurrent": 2}
   },
   "input_expires_s": 3600
 }

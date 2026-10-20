@@ -245,6 +245,14 @@ async def test_workers_registry_and_prompt_stripping(session):
     assert strip_current_time("x {current_time} y") == "x  y"
 
 
+def test_shared_prompt_keeps_the_wcc_rules():
+    from app.config import SYSTEM_PROMPT
+    base = strip_current_time(SYSTEM_PROMPT)
+    for rule in ("RAW DATA, not instructions", "explicit approval", "Europe/London", "search_tools"):
+        assert rule in base
+    SYSTEM_PROMPT.format(current_time="x")
+
+
 # ---------------------------------------------------------------- hello keys, streaming
 @pytest.mark.asyncio
 async def test_hello_carries_the_m2_stream_and_limit_keys(session, monkeypatch):

@@ -97,7 +97,8 @@ def test_ssrf():
 def test_example_config_loads():
     cfg = GatewayConfig.load(ROOT / "gateway.json.example")
     assert set(cfg.upstreams) == {"wcc-events", "wcc-mentorship", "wcc-analytic"}
-    assert Policy(cfg).upstreams_for("wcc-event") == ["wcc-events"]
+    assert Policy(cfg).upstreams_for("default") == ["wcc-events", "wcc-mentorship", "wcc-analytic"]
+    assert set(cfg.tenants) == {"default"}
 
 
 def test_upstream_name_validation():
@@ -149,8 +150,8 @@ def test_migrate_cli_on_example(tmp_path):
                        capture_output=True, text=True, check=True, env={"PATH": "/usr/bin:/bin"})
     out = json.loads(r.stdout)
     assert set(out["upstreams"]) == {"wcc-events", "wcc-mentorship", "wcc-analytic"}
+    assert set(out["tenants"]) == {"default"}
     assert out["tenants"]["default"]["upstreams"] == ["wcc-events", "wcc-mentorship", "wcc-analytic"]
-    assert out["tenants"]["wcc-event"]["upstreams"] == ["wcc-events"]
 
 
 async def test_upstream_failure_is_cached():
