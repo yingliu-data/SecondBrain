@@ -2,6 +2,7 @@
 /models/
 agent-api/data/
 .claude/
+.agent/
 
 # ── Python ───────────────────────────────────────────────
 # Byte-compiled / optimized / DLL files
