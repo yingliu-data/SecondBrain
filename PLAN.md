@@ -124,7 +124,7 @@ agent-api/app/
   host/
     worker.py               Temporal activities: prepare_vm, run_task (heartbeating), park_vm, deliver
     vsock_server.py         one UDS per port per session; session identity from the endpoint
-    llm_proxy.py            :5010 → vLLM; stream pass-through; budgets; usage events
+    llm_proxy.py            :5010 → the LLM vendor; stream pass-through; budgets; usage events
     gateway_forwarder.py    :5011 → mcp-gateway (HTTP); tenant and session asserted by the forwarder
     state_sync.py           acks after append; checkpoints; bulk → session dir; projections
     sandbox/firecracker.py  boot, snapshot, restore, destroy over the Firecracker API; sandbox/local.py = guest as a subprocess, tests only
@@ -441,7 +441,7 @@ Per tenant before `engine: harness` is set for it: existing tests green under bo
 
 ## 18. Fit to the v4.1 diagram
 
-Coloured boxes map as in draft 5 §16, with the restored parts: Zone 0 → the microVM and `harness/guest/`; Zone 1 → `agent-api/app/host/`; vsock control channel → section 4; LLM egress proxy → `llm_proxy.py` (:5010, no key injection here); gateway forwarder → `gateway_forwarder.py` (:5011); MCP gateway (tool server, upstreams, policy, pins) → section 9; Step Functions stub → Temporal, section 10; actor worker → `worker.py` (act(), heartbeat, artefacts; no git); sandbox manager → `sandbox/firecracker.py` with park/idle snapshots; state sync → `state_sync.py` and the session dir; S3 → `local_dir` sink for the event log, spill and workspace, and the local `data/users/` and session `memory/` files for memory (D23); no bucket anywhere.
+Coloured boxes map as in draft 5 §16, with the restored parts: Zone 0 → the microVM and `harness/guest/`; Zone 1 → `agent-api/app/host/`; vsock control channel → section 4; LLM egress proxy → `llm_proxy.py` (:5010; a remote vendor's key from its env var, none for vLLM); gateway forwarder → `gateway_forwarder.py` (:5011); MCP gateway (tool server, upstreams, policy, pins) → section 9; Step Functions stub → Temporal, section 10; actor worker → `worker.py` (act(), heartbeat, artefacts; no git); sandbox manager → `sandbox/firecracker.py` with park/idle snapshots; state sync → `state_sync.py` and the session dir; S3 → `local_dir` sink for the event log, spill and workspace, and the local `data/users/` and session `memory/` files for memory (D23); no bucket anywhere.
 
 Grey boxes: ⑦ in-VM guard → D5; reviewer stratum → D9; audit/review UI → D10. Orange (secret injection), bind_check, token broker, DLP, launcher → OpenShell (section 11).
 

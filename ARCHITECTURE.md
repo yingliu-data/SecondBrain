@@ -130,7 +130,7 @@ prefix ([ASYNC-TOOLS.md](harness/docs/ASYNC-TOOLS.md)).
 | `hello.py` · `settings.py` · `outcomes.py` | hello assembly · `WorkerSettings` · settle/ticket helpers |
 | `state_sync.py` · `durable.py` | the canonical event log and host log · one process-wide group-commit writer (ack only after fsync) |
 | `endpoints.py` · `uds.py` · `bulk_server.py` | per-session vsock listeners · long-path Unix sockets · `:5001` server |
-| `llm_proxy.py` · `gateway_forwarder.py` · `http_clients.py` | `:5010` → vLLM (budgets, usage) · `:5011` → mcp-gateway (identity headers, held calls) · shared HTTP clients |
+| `llm_proxy.py` · `gateway_forwarder.py` · `http_clients.py` | `:5010` → the LLM vendor (key, path and body rules; budgets, usage) · `:5011` → mcp-gateway (identity headers, held calls) · shared HTTP clients |
 | `sides.py` · `adopted.py` | host and device tool execution · device calls adopted after a restart |
 | `admission.py` | the concurrency cap shared by both drivers |
 | `activities.py` · `temporal.py` | Temporal activity bodies · Temporal connection supervisor |
@@ -194,6 +194,7 @@ Old `{tenant}_{session_id}` folders are ignored (a startup warning names them);
 |---|---|
 | `agent-api/data/tenants.json` | tenants, API keys, prompts, local skills, limits (`wall_clock_s`, `answer_wait_s`, `async_tools`, …), schedules |
 | `mcp-gateway/data/gateway.json` | upstream MCP servers and per-tenant tool policy |
+| `agent-api/data/config.json` | the LLM vendor (`llm`: vendor, model, url, the key's env var name) and any setting below by its env name (`settings`); an env var wins |
 | environment (`agent-api/app/config.py`) | `HARNESS_*` defaults, `TEMPORAL_ADDRESS`, `MCP_GATEWAY_URL`, `INTERNAL_TOKEN`, sandbox paths |
 | `hello` | the per-run snapshot of all of the above that the guest sees |
 

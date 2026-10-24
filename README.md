@@ -39,7 +39,7 @@ Pose Spatial Studio              SecondBrain (Server)
 
 | Layer | Technology |
 |---|---|
-| LLM Inference | vLLM (CUDA), Qwen3-14B-AWQ |
+| LLM Inference | vLLM (CUDA), Qwen3-14B-AWQ by default; or OpenAI, Anthropic or Gemini, chosen in `agent-api/data/config.json` |
 | Backend | Python 3.12, FastAPI, Uvicorn, SSE-Starlette |
 | iOS Client | Swift, SwiftUI, SwiftData, WhisperKit (STT), ElevenLabs (TTS) |
 | Auth | HMAC-SHA256 + Bearer token + Timestamp verification |
@@ -114,6 +114,41 @@ The iOS app lives in the separate [IndexApp](https://github.com/yingliu-data/Ind
 ## Development
 
 See [PLAN.md](PLAN.md) for the full build guide and `.claude/PROJECT_STRUCTURE.md` for detailed file-level documentation.
+
+### Local chat (`app.cli`)
+
+Chat with the agent harness in the terminal: the real agent loop on the local
+sandbox (the guest as a subprocess; no VM, no Temporal).
+
+```sh
+mkdir -p agent-api/data
+cp agent-api/config.json.example agent-api/data/config.json   # set llm.vendor, llm.model, llm.url
+export OPENAI_API_KEY=...                                      # the chosen vendor's key
+uv sync --all-packages
+cd agent-api && uv run python -m app.cli [--session NAME] [--config PATH]
+```
+
+| `llm.vendor` | Key env var (`llm.api_key_env`) | Default `llm.url` |
+|---|---|---|
+| `vllm` (default) | none | `http://secondbrain-llm:8080` (on your machine, e.g. `http://localhost:8080`) |
+| `openai` | `OPENAI_API_KEY` | `https://api.openai.com` |
+| `anthropic` | `ANTHROPIC_API_KEY` | `https://api.anthropic.com` |
+| `gemini` | `GEMINI_API_KEY` | `https://generativelanguage.googleapis.com` |
+
+- The file never holds a key: `llm.api_key_env` names the env var that does.
+  `llm.model` is required for every vendor but `vllm`.
+- `settings` takes any other setting of `agent-api/app/config.py` by its env
+  name. An env var wins over the file (`LLM_VENDOR`, `LLM_MODEL`, `LLM_URL`,
+  `LLM_API_KEY_ENV` for the `llm` block).
+- The vendor applies to the whole server (the guest's LLM proxy and the avatar
+  planner). With no file the server runs on local vLLM as before. Compose does
+  not pass the key vars into the container, so the server itself stays on vLLM.
+- A missing file, an unknown vendor or an unset key var stops the CLI with exit
+  code 2 and one line that names it.
+- The CLI prints the vendor, model and URL, then `session: <id>` (resume it with
+  `--session <id>`). Tool calls show as `[tool]` lines and errors as `error:`
+  lines. A question takes the next line as its answer (a number picks an
+  option). End of input or Ctrl-C parks and stops every guest.
 
 ### End-to-end test in dev (`scripts/test-branch.sh`)
 
