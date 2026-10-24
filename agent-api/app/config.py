@@ -41,11 +41,21 @@ _FILE = load_config_file(CONFIG_FILE)
 _SETTINGS = _FILE.get("settings", {})
 
 
-def _setting(name: str, default):
-    """The env var `name`, else the file's settings[name], else `default`."""
-    if name in os.environ:
-        return os.environ[name]
-    return _SETTINGS.get(name, default)
+_ASKED: set[str] = set()     # every setting name read below: any other name in the file is refused
+
+
+def _setting(name: str, default, cast=None):
+    """The env var `name`, else the file's settings[name], else `default`,
+    through `cast` when given. ValueError names a value that does not convert."""
+    _ASKED.add(name)
+    field = name if name in os.environ else f"settings.{name}"
+    value = os.environ[name] if name in os.environ else _SETTINGS.get(name, default)
+    if cast is None:
+        return value
+    try:
+        return cast(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{field}: {value!r} is not a valid {cast.__name__}") from None
 
 
 def _flag(name: str, default: bool) -> bool:
@@ -53,6 +63,8 @@ def _flag(name: str, default: bool) -> bool:
     value = _setting(name, default)
     if isinstance(value, bool):
         return value
+    if not isinstance(value, str):
+        raise ValueError(f"settings.{name}: {value!r} is not true or false")
     return value.lower() in ("1", "true", "yes")
 
 
@@ -78,6 +90,8 @@ def llm_config(block: dict) -> tuple[str, str, str, str]:
     vendor = os.environ.get("LLM_VENDOR", block.get("vendor", "vllm"))
     if vendor not in VENDORS:
         raise ValueError(f"llm.vendor: unknown vendor {vendor!r}, expected one of {', '.join(VENDORS)}")
+    if vendor != block.get("vendor", "vllm"):
+        block = {}      # LLM_VENDOR changed the vendor: the file's model, url and key env are another vendor's
     model = os.environ.get("LLM_MODEL", block.get("model", "qwen3-14b" if vendor == "vllm" else ""))
     if not model:
         raise ValueError(f"llm.model: required for vendor {vendor!r}")
@@ -90,9 +104,9 @@ def llm_config(block: dict) -> tuple[str, str, str, str]:
 
 LLM_VENDOR, LLM_MODEL, LLM_URL, LLM_API_KEY_ENV = llm_config(_FILE.get("llm", {}))
 
-LLM_TIMEOUT = int(_setting("LLM_TIMEOUT", 120))         # seconds
-LLM_MAX_TOKENS = int(_setting("LLM_MAX_TOKENS", DEFAULT_LIMITS["max_tokens"]))
-LLM_TEMPERATURE = float(_setting("LLM_TEMPERATURE", 0.7))
+LLM_TIMEOUT = _setting("LLM_TIMEOUT", 120, int)         # seconds
+LLM_MAX_TOKENS = _setting("LLM_MAX_TOKENS", DEFAULT_LIMITS["max_tokens"], int)
+LLM_TEMPERATURE = _setting("LLM_TEMPERATURE", 0.7, float)
 
 # Qwen3 thinking during agent-loop turns. With realistic tool sets (10+ real
 # schemas) thinking mode reliably describes tools instead of calling them,
@@ -114,14 +128,14 @@ MCP_GATEWAY_URL = _setting("MCP_GATEWAY_URL", "http://mcp-gateway:8090").rstrip(
 INTERNAL_TOKEN = os.environ.get("INTERNAL_TOKEN", "")
 # Worker -> GET /internal/tools at session start: short, a down gateway must
 # not hold the hello up (the session starts without MCP tools).
-MCP_GATEWAY_TOOLS_TIMEOUT_S = float(_setting("MCP_GATEWAY_TOOLS_TIMEOUT_S", 5))
+MCP_GATEWAY_TOOLS_TIMEOUT_S = _setting("MCP_GATEWAY_TOOLS_TIMEOUT_S", 5, float)
 # Forwarder read timeout: above the longest upstream timeout_s
 # (calls run up to 45 min).
-MCP_GATEWAY_CALL_TIMEOUT_S = float(_setting("MCP_GATEWAY_CALL_TIMEOUT_S", 3600))
-MAX_INPUT = int(_setting("MAX_INPUT_LENGTH", 4096))
-MAX_TOOLS = int(_setting("MAX_TOOL_CALLS_PER_TURN", DEFAULT_LIMITS["max_tools"]))
+MCP_GATEWAY_CALL_TIMEOUT_S = _setting("MCP_GATEWAY_CALL_TIMEOUT_S", 3600, float)
+MAX_INPUT = _setting("MAX_INPUT_LENGTH", 4096, int)
+MAX_TOOLS = _setting("MAX_TOOL_CALLS_PER_TURN", DEFAULT_LIMITS["max_tools"], int)
 # seconds for a device tool's response (limits.op_timeout_s.device)
-TOOL_TIMEOUT = int(_setting("TOOL_TIMEOUT", DEFAULT_LIMITS["op_timeout_s"]["device"]))
+TOOL_TIMEOUT = _setting("TOOL_TIMEOUT", DEFAULT_LIMITS["op_timeout_s"]["device"], int)
 
 # ── Session Store (swap backend without touching agent code) ──
 # The harness engine runs on "dir" only; anything else is a startup error
@@ -172,54 +186,54 @@ HARNESS_GUEST_ROOT = _setting(
 )
 HARNESS_SANDBOX = _setting("HARNESS_SANDBOX", "local")       # "local" | "firecracker"
 HARNESS_PORTS = dict(PORTS)          # fixed (protocol.ports); "gateway" = the MCP forwarder
-HARNESS_HELLO_TIMEOUT_S = int(_setting("HARNESS_HELLO_TIMEOUT_S", HELLO_TIMEOUT_S))   # guest connect
+HARNESS_HELLO_TIMEOUT_S = _setting("HARNESS_HELLO_TIMEOUT_S", HELLO_TIMEOUT_S, int)   # guest connect
 # host → guest heartbeat; also run_task's Temporal heartbeat (the
 # workflow's heartbeat timeout is 120 s; an abort reaches the activity on one)
-HARNESS_HEARTBEAT_S = int(_setting("HARNESS_HEARTBEAT_S", 60))
-HARNESS_KEEPALIVE_S = int(_setting("HARNESS_KEEPALIVE_S", 15))            # SSE comment
+HARNESS_HEARTBEAT_S = _setting("HARNESS_HEARTBEAT_S", 60, int)
+HARNESS_KEEPALIVE_S = _setting("HARNESS_KEEPALIVE_S", 15, int)            # SSE comment
 # A task's wall clock when its tenant sets no `wall_clock_s` (the tenant's
 # value wins; both paths read it through SessionConfig, worker.session_config).
 # It travels in the `task` message; the guest settles `timeout` at it.
-HARNESS_WALL_CLOCK_S = int(_setting("HARNESS_WALL_CLOCK_S", DEFAULT_LIMITS["wall_clock_s"]))
+HARNESS_WALL_CLOCK_S = _setting("HARNESS_WALL_CLOCK_S", DEFAULT_LIMITS["wall_clock_s"], int)
 # Running tasks across all sessions (both paths; a task parked on a question
 # holds none). Tasks over the cap wait for a slot.
-HARNESS_MAX_CONCURRENT_TASKS = int(_setting("HARNESS_MAX_CONCURRENT_TASKS", 5))
+HARNESS_MAX_CONCURRENT_TASKS = _setting("HARNESS_MAX_CONCURRENT_TASKS", 5, int)
 # Workflow path: how long a task may wait to start (Temporal's task queue, a
 # slot of the cap above) before run_task times out. Its Temporal timeouts are
 # wall_clock_s + WALL_CLOCK_GRACE_S + this (flows.activities.run_task_timeout_s),
 # a safety net: the task's own time limit counts from when it took its slot.
-HARNESS_MAX_QUEUE_WAIT_S = int(_setting("HARNESS_MAX_QUEUE_WAIT_S", MAX_QUEUE_WAIT_S))
+HARNESS_MAX_QUEUE_WAIT_S = _setting("HARNESS_MAX_QUEUE_WAIT_S", MAX_QUEUE_WAIT_S, int)
 # hello.config.async_tools when the tenant sets no `async_tools`
 HARNESS_ASYNC_TOOLS = _flag("HARNESS_ASYNC_TOOLS", False)
-HARNESS_MAX_TURNS = int(_setting("HARNESS_MAX_TURNS", DEFAULT_LIMITS["max_turns"]))
-HARNESS_QUESTION_TIMEOUT_S = int(_setting("HARNESS_QUESTION_TIMEOUT_S", QUESTION_TIMEOUT_S))
-HARNESS_HOST_TOOL_TIMEOUT_S = int(_setting("HARNESS_HOST_TOOL_TIMEOUT_S",
-                                          DEFAULT_LIMITS["op_timeout_s"]["host"]))
-HARNESS_SPILL_THRESHOLD = int(_setting("HARNESS_SPILL_THRESHOLD", DEFAULT_LIMITS["spill_threshold"]))
+HARNESS_MAX_TURNS = _setting("HARNESS_MAX_TURNS", DEFAULT_LIMITS["max_turns"], int)
+HARNESS_QUESTION_TIMEOUT_S = _setting("HARNESS_QUESTION_TIMEOUT_S", QUESTION_TIMEOUT_S, int)
+HARNESS_HOST_TOOL_TIMEOUT_S = _setting("HARNESS_HOST_TOOL_TIMEOUT_S",
+                                      DEFAULT_LIMITS["op_timeout_s"]["host"], int)
+HARNESS_SPILL_THRESHOLD = _setting("HARNESS_SPILL_THRESHOLD", DEFAULT_LIMITS["spill_threshold"], int)
 # Events per segment file: protocol.limits.SEGMENT_EVENTS, a constant (not a
 # knob: the store finds a seq's segment by it). The guest outlives a settle
 # (one long-lived guest per session, one log run); the idle timer parks it.
 # Snapshots, park and resume
-HARNESS_SESSION_IDLE_S = float(_setting("HARNESS_SESSION_IDLE_S", 1800))  # idle -> park + snapshot + destroy
+HARNESS_SESSION_IDLE_S = _setting("HARNESS_SESSION_IDLE_S", 1800, float)  # idle -> park + snapshot + destroy
 # An idle Worker (no task, VM none or parked, no adopted device call, no
 # question park, no attached stream) is dropped from memory after this long
 # (its threads and folded state released); the next request rebuilds it from
 # disk. 0 = never.
-HARNESS_WORKER_EVICT_S = float(_setting("HARNESS_WORKER_EVICT_S", 300))
-HARNESS_PARK_GRACE_S = float(_setting("HARNESS_PARK_GRACE_S", DEFAULT_LIMITS["park_grace_s"]))  # hello limit park_grace_s
-HARNESS_PARK_TIMEOUT_S = float(_setting("HARNESS_PARK_TIMEOUT_S", 60))    # park sent -> acked `parked` (> park_grace_s)
-HARNESS_MAX_RESUMES = int(_setting("HARNESS_MAX_RESUMES", 1))             # death resumes per task
+HARNESS_WORKER_EVICT_S = _setting("HARNESS_WORKER_EVICT_S", 300, float)
+HARNESS_PARK_GRACE_S = _setting("HARNESS_PARK_GRACE_S", DEFAULT_LIMITS["park_grace_s"], float)  # hello limit park_grace_s
+HARNESS_PARK_TIMEOUT_S = _setting("HARNESS_PARK_TIMEOUT_S", 60, float)    # park sent -> acked `parked` (> park_grace_s)
+HARNESS_MAX_RESUMES = _setting("HARNESS_MAX_RESUMES", 1, int)             # death resumes per task
 # Graceful shutdown parks every running guest (snapshot; a restart adopts its
 # open device calls) waiting this long for each `parked`; a guest that does
 # not park in time is destroyed (a retry resumes it from the log). 0 = destroy.
 # Keep the container's stop grace period above it (+ the snapshot time).
-HARNESS_SHUTDOWN_PARK_S = float(_setting("HARNESS_SHUTDOWN_PARK_S", 8))
-HARNESS_BULK_MAX_BYTES = int(_setting("HARNESS_BULK_MAX_BYTES", 64 * 1024 * 1024))  # one :5001 put
-HARNESS_TOKEN_BUDGET = int(_setting("HARNESS_TOKEN_BUDGET", 0))        # total_tokens per session; 0 = unlimited
+HARNESS_SHUTDOWN_PARK_S = _setting("HARNESS_SHUTDOWN_PARK_S", 8, float)
+HARNESS_BULK_MAX_BYTES = _setting("HARNESS_BULK_MAX_BYTES", 64 * 1024 * 1024, int)  # one :5001 put
+HARNESS_TOKEN_BUDGET = _setting("HARNESS_TOKEN_BUDGET", 0, int)        # total_tokens per session; 0 = unlimited
 # Context window the guest plans against (compaction trigger: estimate > window - reserve).
-HARNESS_CONTEXT_WINDOW_TOKENS = int(_setting("HARNESS_CONTEXT_WINDOW_TOKENS",
-                                            DEFAULT_LIMITS["context_window_tokens"]))
-HARNESS_RESERVE_TOKENS = int(_setting("HARNESS_RESERVE_TOKENS", DEFAULT_LIMITS["reserve_tokens"]))
+HARNESS_CONTEXT_WINDOW_TOKENS = _setting("HARNESS_CONTEXT_WINDOW_TOKENS",
+                                        DEFAULT_LIMITS["context_window_tokens"], int)
+HARNESS_RESERVE_TOKENS = _setting("HARNESS_RESERVE_TOKENS", DEFAULT_LIMITS["reserve_tokens"], int)
 
 # ── Temporal ──
 # Configuration, not liveness: set -> every input goes through the session
@@ -227,12 +241,16 @@ HARNESS_RESERVE_TOKENS = int(_setting("HARNESS_RESERVE_TOKENS", DEFAULT_LIMITS["
 # connecting or down, POST /chat waits TEMPORAL_READY_WAIT_S, then answers
 # 503 + Retry-After. Unset -> the direct path (Worker.act) only.
 TEMPORAL_ADDRESS = _setting("TEMPORAL_ADDRESS", "")
-TEMPORAL_READY_WAIT_S = float(_setting("TEMPORAL_READY_WAIT_S", 5))
-TEMPORAL_RETRY_AFTER_S = int(_setting("TEMPORAL_RETRY_AFTER_S", 5))
-TEMPORAL_RECONNECT_S = float(_setting("TEMPORAL_RECONNECT_S", 5))   # connect / worker restart backoff
+TEMPORAL_READY_WAIT_S = _setting("TEMPORAL_READY_WAIT_S", 5, float)
+TEMPORAL_RETRY_AFTER_S = _setting("TEMPORAL_RETRY_AFTER_S", 5, int)
+TEMPORAL_RECONNECT_S = _setting("TEMPORAL_RECONNECT_S", 5, float)   # connect / worker restart backoff
 TEMPORAL_NAMESPACE = _setting("TEMPORAL_NAMESPACE", DEFAULT_NAMESPACE)
 TEMPORAL_TASK_QUEUE = _setting("TEMPORAL_TASK_QUEUE", TASK_QUEUE)
-TEMPORAL_CONNECT_TIMEOUT_S = float(_setting("TEMPORAL_CONNECT_TIMEOUT_S", 10))
+TEMPORAL_CONNECT_TIMEOUT_S = _setting("TEMPORAL_CONNECT_TIMEOUT_S", 10, float)
 # abort sent to the guest -> how long to wait for its settle (run_task
 # cancellation, deliver of escalated/aborted)
-HARNESS_ABORT_WAIT_S = float(_setting("HARNESS_ABORT_WAIT_S", 30))
+HARNESS_ABORT_WAIT_S = _setting("HARNESS_ABORT_WAIT_S", 30, float)
+
+_unknown = sorted(set(_SETTINGS) - _ASKED)
+if _unknown:
+    raise ValueError(f"{CONFIG_FILE}: settings.{_unknown[0]}: not a setting of app/config.py")

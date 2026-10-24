@@ -77,7 +77,7 @@ async def _ask(question: dict, lines: asyncio.Queue, out) -> str | None:
         lines.put_nowait(None)          # chat_loop still sees the end of input
         return None
     answer = line.strip()
-    return options[int(answer) - 1] if answer.isdigit() and 0 < int(answer) <= len(options) else answer
+    return options[int(answer) - 1] if answer.isascii() and answer.isdigit() and 0 < int(answer) <= len(options) else answer
 
 
 async def run_turn(tenant, session_id: str, text: str, lines: asyncio.Queue, out,

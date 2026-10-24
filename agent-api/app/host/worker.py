@@ -1230,7 +1230,10 @@ class Worker(VMLifecycle):
         self.last_active = time.monotonic()
         self._emit_many(self.projector.project(ev))
         if self.on_event is not None:
-            self.on_event(ev)
+            try:
+                self.on_event(ev)
+            except Exception:   # the hook never breaks the engine
+                logger.exception("session %s: on_event failed", self.session_key)
         etype, body = ev["type"], ev["body"]
         if etype == "session_start":
             self._check_harness_version(body.get("harness_version"))

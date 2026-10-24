@@ -75,6 +75,29 @@ def test_env_overrides_file(tmp_path, monkeypatch):
     assert _import_config(path, HARNESS_MAX_TURNS="7")["max_turns"] == 7
 
 
+def test_env_vendor_drops_the_file_s_vendor_fields(monkeypatch):
+    """Review of feat/52, request 1: LLM_VENDOR that changes the vendor drops the
+    file's url, model and key env, so the key never goes to the file's vLLM host."""
+    template = load_config_file(str(AGENT_API / "config.json.example"))
+    monkeypatch.setenv("LLM_VENDOR", "openai")
+    monkeypatch.setenv("LLM_MODEL", "gpt-x")
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    assert llm_config(template["llm"]) == ("openai", "gpt-x", "https://api.openai.com", "OPENAI_API_KEY")
+
+
+@pytest.mark.parametrize("settings, field", [
+    ({"HARNESS_MAX_TURN": 3}, "settings.HARNESS_MAX_TURN"),
+    ({"HARNESS_MAX_TURNS": "abc"}, "settings.HARNESS_MAX_TURNS"),
+    ({"LLM_STREAM": 1}, "settings.LLM_STREAM"),
+])
+def test_bad_setting_names_field(tmp_path, settings, field):
+    """Review of feat/52, request 2: an unknown setting name, or a value that does
+    not convert, stops the import with an error naming settings.<name>."""
+    with pytest.raises(subprocess.CalledProcessError) as e:
+        _import_config(_write(tmp_path, {"settings": settings}))
+    assert f"{field}:" in e.value.stderr
+
+
 @pytest.mark.parametrize("doc, field", [
     ({"llm": {"vendor": "openai", "api_key": "sk-x"}}, "llm.api_key"),
     ({"settings": {"API_SECRET_KEY": "x"}}, "settings.API_SECRET_KEY"),
