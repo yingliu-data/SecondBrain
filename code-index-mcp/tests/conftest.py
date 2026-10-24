@@ -130,6 +130,12 @@ def write_repo(root: Path) -> Path:
     return root
 
 
+@pytest.fixture(autouse=True)
+def index_home(tmp_path: Path, monkeypatch) -> Path:
+    monkeypatch.setenv("CODE_INDEX_HOME", str(tmp_path / "index"))
+    return tmp_path / "index"
+
+
 @pytest.fixture
 def repo(tmp_path: Path) -> Path:
     return write_repo(tmp_path / "repo")
