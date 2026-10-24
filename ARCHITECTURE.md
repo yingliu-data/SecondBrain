@@ -48,6 +48,10 @@ The four are members of **one uv workspace** (root `pyproject.toml`, one
 `uv.lock`). `harness/protocol` is shared by the guest, agent-api and the
 gateway; `flows` is used only by agent-api.
 
+[code-index-mcp/](code-index-mcp/) is not a member: it is a standalone uv
+project with its own `uv.lock`, an MCP server for Python code search that runs
+on the host and is an upstream of mcp-gateway (see its README).
+
 ## 2. Hard rules (the design depends on them)
 
 1. **The guest is plain standard-library Python** and imports nothing from the
