@@ -16,6 +16,8 @@ from dataclasses import dataclass, field, fields
 class WorkerSettings:
     # the guest run
     llm_url: str = ""
+    llm_vendor: str = "vllm"
+    llm_api_key_env: str = ""       # the env var's name, never the key
     ports: dict = field(default_factory=dict)
     hello_timeout_s: float = 30.0
     heartbeat_s: float = 15.0
@@ -49,7 +51,8 @@ class WorkerSettings:
     def from_config(cls, **over) -> "WorkerSettings":
         from app import config as c
         values = dict(
-            llm_url=c.LLM_URL, ports=dict(c.HARNESS_PORTS),
+            llm_url=c.LLM_URL, llm_vendor=c.LLM_VENDOR, llm_api_key_env=c.LLM_API_KEY_ENV,
+            ports=dict(c.HARNESS_PORTS),
             hello_timeout_s=c.HARNESS_HELLO_TIMEOUT_S, heartbeat_s=c.HARNESS_HEARTBEAT_S,
             wall_clock_s=c.HARNESS_WALL_CLOCK_S, session_idle_s=c.HARNESS_SESSION_IDLE_S,
             park_timeout_s=c.HARNESS_PARK_TIMEOUT_S, max_resumes=c.HARNESS_MAX_RESUMES,

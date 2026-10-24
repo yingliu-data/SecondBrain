@@ -661,7 +661,9 @@ class Worker(VMLifecycle):
             self.endpoints = Endpoints(self.session.root, listen)
             self.proxy = LLMProxy(self.endpoints.listener(self.ports["llm"]),
                                   self.settings.llm_url, self.sync.host_event,
-                                  token_budget=self.settings.token_budget)
+                                  token_budget=self.settings.token_budget,
+                                  vendor=self.settings.llm_vendor,
+                                  api_key_env=self.settings.llm_api_key_env)
             self.proxy.start()
             if self.vm_state == "parked":
                 self._close_guest_ports()       # a restarted worker: listen at the wake

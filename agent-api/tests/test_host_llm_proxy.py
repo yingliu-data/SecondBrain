@@ -1,12 +1,15 @@
 """LLMProxy on the :5010 Unix socket forwards to a fake upstream over TCP."""
+import asyncio
 import json
 
 import httpx
 import pytest
 from protocol.sse import iter_sse_data
 
+from app.config import VENDORS
 from app.host.endpoints import Endpoints
 from app.host.llm_proxy import LLMProxy
+from app.skills.avatar_control.planner_llm import PlannerLLM
 from host_fakes import FakeUpstreamLLM
 
 
@@ -218,3 +221,58 @@ def test_proxies_of_one_upstream_share_one_client_that_outlives_them(tmp_path):
         a.close()
         b.close()
         upstream.stop()
+
+
+# ---------------------------------------------------------------- vendors
+GUEST_BODY = {"model": "m", "messages": [], "max_tokens": 5, "chat_template_kwargs": {"enable_thinking": False}}
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("vendor", list(VENDORS))
+def test_vendor_request_shape(tmp_path, monkeypatch, vendor, stream):
+    """Plan feat/52 step 2 (issue #52: each vendor answers a chat turn, streamed and
+    whole): the path, auth header and body that reach the upstream; the key is in
+    no usage event."""
+    key_env = VENDORS[vendor].key_env
+    if key_env:
+        monkeypatch.setenv(key_env, "sk-secret")
+    upstream = FakeUpstreamLLM([{"content": "hi"}]).start()
+    ep = Endpoints(tmp_path, [5010])
+    usage: list = []
+    p = LLMProxy(ep.listener(5010), upstream.url, lambda t, b: usage.append(b), timeout_s=5,
+                 vendor=vendor, api_key_env=key_env).start()
+    try:
+        with httpx.Client(transport=httpx.HTTPTransport(uds=str(ep.path(5010))),
+                          base_url="http://llm") as client:
+            r = client.post("/v1/chat/completions", json={**GUEST_BODY, "stream": stream})
+    finally:
+        p.stop()
+        ep.close()
+        upstream.stop()
+    assert r.status_code == 200 and "hi" in r.text
+    assert upstream.paths == [VENDORS[vendor].chat_path]
+    assert upstream.headers[0].get("authorization") == ("Bearer sk-secret" if key_env else None)
+    expected = {**GUEST_BODY, "stream": stream}
+    if vendor != "vllm":
+        del expected["chat_template_kwargs"]
+    if vendor == "openai":
+        expected["max_completion_tokens"] = expected.pop("max_tokens")
+    assert upstream.requests == [expected]
+    assert usage[0]["total_tokens"] == 108 and "sk-secret" not in json.dumps(usage)
+
+
+def test_planner_uses_vendor(monkeypatch):
+    """Plan feat/52 step 2: the avatar planner, the only other LLM caller, takes the
+    vendor's path, key and body rules."""
+    monkeypatch.setenv("GEMINI_API_KEY", "sk-secret")
+    upstream = FakeUpstreamLLM([{"content": "plan"}]).start()
+    try:
+        planner = PlannerLLM(upstream.url, timeout_s=5, vendor="gemini", api_key_env="GEMINI_API_KEY")
+        resp = asyncio.run(planner.chat_completion([], max_tokens=5,
+                                                   chat_template_kwargs={"enable_thinking": False}))
+    finally:
+        upstream.stop()
+    assert resp["choices"][0]["message"]["content"] == "plan"
+    assert upstream.paths == ["/v1beta/openai/chat/completions"]
+    assert upstream.headers[0]["authorization"] == "Bearer sk-secret"
+    assert upstream.requests[0]["max_tokens"] == 5 and "chat_template_kwargs" not in upstream.requests[0]

@@ -3,7 +3,7 @@
 endpoints.py   per-session Unix-socket listeners for the vsock ports; Firecracker's
                host-side vsock sockets ({uds}_{port}) and the test double are the same code
 worker.py      act(): start sandbox, accept :5000, hello + task, relay events, sides, settle
-llm_proxy.py   :5010 -> vLLM (LLM_URL); usage; budgets later
+llm_proxy.py   :5010 -> the LLM vendor (LLM_URL); usage; budgets later
 sides.py       host skills via SkillRegistry; device relay via SSE + /tool-result
 sanitize.py    the after_tool rewrite of host/device results
 gateway_forwarder.py  :5011 -> mcp-gateway (POST /mcp only), identity headers, held calls

@@ -57,7 +57,6 @@ services:
     container_name: secondbrain-agent-api
     restart: unless-stopped
     environment:
-      - LLM_URL=http://secondbrain-llm:8080
       - API_SECRET_KEY=${API_SECRET_KEY}
       - LOG_LEVEL=warning
       - MAX_TOOL_CALLS_PER_TURN=10

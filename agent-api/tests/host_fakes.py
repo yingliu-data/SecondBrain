@@ -576,7 +576,8 @@ class FakeUpstreamLLM:
     fragments, a finish_reason chunk, a usage-only chunk, `[DONE]`. `keepalive=True` puts a `: keep-alive` comment before each
     chunk; `cut_after=n` closes the connection after n data chunks (no
     finish_reason, no [DONE]). `streamed` keeps the SSE text sent per streamed
-    call, for verbatim checks."""
+    call, for verbatim checks; `paths` and `headers` (lower-case names) each
+    request's path and headers."""
 
     def __init__(self, responses, status=200):
         self.responses = list(responses)
@@ -585,6 +586,8 @@ class FakeUpstreamLLM:
         self.keepalive = False
         self.cut_after: int | None = None
         self.requests: list[dict] = []
+        self.paths: list[str] = []
+        self.headers: list[dict] = []
         self.streamed: list[str] = []
         self.n = 0
         outer = self
@@ -599,6 +602,8 @@ class FakeUpstreamLLM:
                 length = int(self.headers.get("Content-Length") or 0)
                 req = json.loads(self.rfile.read(length) or b"{}")
                 outer.requests.append(req)
+                outer.paths.append(self.path)
+                outer.headers.append({k.lower(): v for k, v in self.headers.items()})
                 if outer.status != 200:
                     body = json.dumps(outer.error_body if outer.error_body is not None
                                       else {"error": "nope"}).encode()
