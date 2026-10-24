@@ -79,7 +79,41 @@ def test_syntax_error_skipped(repo):
     errors = {s["file"]: s["error"] for s in graph["skipped"]}
     assert errors.keys() == {"broken.py", "binary.py", "deep.py", "nested.py"}
     assert errors["broken.py"].startswith("SyntaxError")
-    assert errors["binary.py"].startswith("UnicodeDecodeError")
+    assert errors["binary.py"].startswith("SyntaxError: invalid or missing encoding")
     assert errors["deep.py"].startswith("RecursionError")
     assert errors["nested.py"].startswith("MemoryError")
     assert "broken.py" not in graph["nodes"] and "main.py" in graph["nodes"]
+
+
+def test_bom_and_coding_cookie(repo):
+    """A file with a UTF-8 BOM or a latin-1 coding cookie is parsed, not skipped."""
+    (repo / "bom.py").write_bytes(b"\xef\xbb\xbfdef with_bom():\n    pass\n")
+    (repo / "latin.py").write_bytes(b"# -*- coding: latin-1 -*-\ndef with_cookie():\n    return '\xe9'\n")
+    graph = build_graph(repo)
+    assert {"bom.py", "latin.py"}.isdisjoint(s["file"] for s in graph["skipped"])
+    assert graph["nodes"]["bom.py:with_bom"]["code"] == "def with_bom():\n    pass"
+    assert graph["nodes"]["latin.py:with_cookie"]["code"] == "def with_cookie():\n    return '\xe9'"
+
+
+def test_defs_under_if_try_with(repo):
+    """Definitions under a module-level or class-level if, try or with get a node and edges."""
+    (repo / "guarded.py").write_text(
+        "if True:\n    def in_if():\n        pass\nelse:\n    def in_else():\n        pass\n"
+        "try:\n    from pkg.utils import Base\nexcept ImportError:\n    class Base:\n        pass\n"
+        "with open('x') as f:\n    class InWith(Base):\n        try:\n            def method(self):\n"
+        "                in_if()\n        finally:\n            pass\n")
+    graph = build_graph(repo)
+    assert {"in_if", "in_else", "Base", "InWith", "InWith.method"} <= {
+        nid.split(":")[1] for nid in graph["nodes"] if nid.startswith("guarded.py:")}
+    assert targets(graph, "inherits", "guarded.py:InWith") == {"guarded.py:Base"}
+    assert targets(graph, "invokes", "guarded.py:InWith.method") == {"guarded.py:in_if"}
+
+
+def test_repeated_name_keeps_every_definition(repo):
+    """A property setter after its getter widens the one node to hold both."""
+    (repo / "prop.py").write_text(
+        "class P:\n    @property\n    def x(self):\n        return 1\n\n"
+        "    @x.setter\n    def x(self, value):\n        pass\n")
+    node = build_graph(repo)["nodes"]["prop.py:P.x"]
+    assert (node["start"], node["end"]) == (2, 8)
+    assert node["code"].startswith("    @property") and node["code"].endswith("        pass")

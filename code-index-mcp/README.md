@@ -7,7 +7,7 @@ uv project with its own `uv.lock`, not a member of the root workspace.
 
 Tools: `build_index(repo_path)`, `search_entities(repo_path, query, entity_type, detail)`,
 `traverse_graph(repo_path, entity_id, edge_types)`, `get_entity_code(repo_path, entity_id)`.
-`repo_path` is a path on the host. The index is saved per repo under
+`repo_path` is an absolute path on the host. The index is saved per repo under
 `$CODE_INDEX_HOME` (default `~/.cache/secondbrain/code-index`) and stays as built
 until `build_index` runs again.
 

@@ -83,7 +83,7 @@ def build_index(repo_path: str) -> dict:
 
 
 def load_index(repo_path: str) -> CodeIndex:
-    folder = index_dir(Path(repo_path).expanduser().resolve())
+    folder = index_dir(_repo(repo_path))
     if not folder.is_dir():
         raise CodeIndexError("not indexed, run build_index first")
     try:
@@ -95,8 +95,15 @@ def load_index(repo_path: str) -> CodeIndex:
         raise CodeIndexError("index damaged, rebuild it: run build_index again") from e
 
 
+def _repo(repo_path: str) -> Path:
+    repo = Path(repo_path).expanduser()
+    if not repo.is_absolute():
+        raise CodeIndexError(f"repo path must be absolute: {repo_path}")
+    return repo.resolve()
+
+
 def _check_repo(repo_path: str) -> Path:
-    repo = Path(repo_path).expanduser().resolve()
+    repo = _repo(repo_path)
     if not repo.exists():
         raise CodeIndexError(f"repo path does not exist: {repo}")
     if not repo.is_dir():

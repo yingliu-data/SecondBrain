@@ -1,6 +1,6 @@
 """MCP server `code-index`: build, search and walk the code graph of a Python repo.
 
-Every tool takes the repo path, a path on this server's host. The index is
+Every tool takes the repo path, an absolute path on this server's host. The index is
 read from disk on each call, so it stays as built until `build_index` runs
 again. Run: `python -m code_index.server [--host H] [--port P]`; the server is
 at /mcp, and when CODE_INDEX_TOKEN is set it asks for `Authorization: Bearer

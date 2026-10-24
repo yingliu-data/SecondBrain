@@ -5,7 +5,7 @@ import threading
 import bm25s
 import pytest
 
-from code_index.index import TOP_K, build_index, is_test_file, load_index
+from code_index.index import TOP_K, CodeIndexError, build_index, is_test_file, load_index
 
 UTILS = "pkg/utils.py"
 
@@ -97,3 +97,11 @@ def test_test_files_excluded(index):
     assert full_id in index.nodes
     paths = ("test/a.py", "a/tests/b.py", "test_a.py", "a/b_test.py", "testing.py", "a/contest.py")
     assert [is_test_file(p) for p in paths] == [True] * 4 + [False] * 2
+
+
+def test_relative_repo_path_rejected(repo, monkeypatch):
+    """A relative repo path is refused, not read against the server's working directory."""
+    monkeypatch.chdir(repo)
+    for call in (build_index, load_index):
+        with pytest.raises(CodeIndexError, match="absolute"):
+            call(".")

@@ -15,13 +15,16 @@ the repo) makes none. The graph is plain dicts, so it saves as JSON.
 from __future__ import annotations
 
 import ast
+import io
 import os
 import posixpath
 import re
+import tokenize
 from pathlib import Path
 
 EDGE_TYPES = ("contains", "imports", "invokes", "inherits")
 DEFS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+BLOCKS = (ast.If, ast.Try, ast.TryStar, ast.ExceptHandler, ast.With, ast.AsyncWith)
 SKIP_DIRS = {"site-packages", "node_modules"}
 
 
@@ -34,7 +37,8 @@ def build_graph(repo: Path) -> dict:
     for path in _py_files(repo):
         rel = path.relative_to(repo).as_posix()
         try:
-            text = path.read_bytes().decode("utf-8")
+            data = path.read_bytes()
+            text = data.decode(tokenize.detect_encoding(io.BytesIO(data).readline)[0])
             trees[rel] = ast.parse(text, filename=rel)
         except (OSError, SyntaxError, ValueError, RecursionError, MemoryError) as e:
             graph["skipped"].append({"file": rel, "error": f"{type(e).__name__}: {e}"})
@@ -82,17 +86,28 @@ def _add_file(graph: dict, rel: str, text: str, tree: ast.Module) -> None:
     _add_defs(graph, rel, tree.body, lines)
 
 
-def _add_defs(graph: dict, parent: str, body: list[ast.stmt], lines: list[str]) -> None:
-    """Classes and functions defined directly in `body`, and the members of each class."""
-    file = graph["nodes"][parent]["file"]
+def _defs_in(body):
+    """The classes and functions in `body`, also those under an if, try or with block."""
     for stmt in body:
-        if not isinstance(stmt, DEFS):
-            continue
+        if isinstance(stmt, DEFS):
+            yield stmt
+        elif isinstance(stmt, BLOCKS):
+            yield from _defs_in(ast.iter_child_nodes(stmt))
+
+
+def _add_defs(graph: dict, parent: str, body: list[ast.stmt], lines: list[str]) -> None:
+    """Classes and functions defined in `body`, and the members of each class. A repeat
+    of a name, such as a property setter, widens the node to hold every definition."""
+    file = graph["nodes"][parent]["file"]
+    for stmt in _defs_in(body):
         nid = _child_id(parent, stmt.name)
         kind = "class" if isinstance(stmt, ast.ClassDef) else "function"
         start = min([stmt.lineno, *(d.lineno for d in stmt.decorator_list)])
-        code = "\n".join(lines[start - 1:stmt.end_lineno])
-        graph["nodes"][nid] = _node(kind, stmt.name, file, start, stmt.end_lineno, code)
+        end = stmt.end_lineno
+        if old := graph["nodes"].get(nid):
+            start, end = min(start, old["start"]), max(end, old["end"])
+        code = "\n".join(lines[start - 1:end])
+        graph["nodes"][nid] = _node(kind, stmt.name, file, start, end, code)
         graph["edges"]["contains"].add((parent, nid))
         if kind == "class":
             _add_defs(graph, nid, stmt.body, lines)
@@ -172,9 +187,7 @@ class _FileEdges:
 
     def _defs(self, parent: str, body: list[ast.stmt]) -> None:
         cls = parent if ":" in parent else None
-        for stmt in body:
-            if not isinstance(stmt, DEFS):
-                continue
+        for stmt in _defs_in(body):
             nid = _child_id(parent, stmt.name)
             if isinstance(stmt, ast.ClassDef):
                 for base in stmt.bases:
