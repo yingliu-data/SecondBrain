@@ -147,8 +147,9 @@ def repo(tmp_path: Path) -> Path:
 
 
 class FakeStore(Store):
-    """`Store` on mongomock, which has no Atlas Search: the three search methods
-    become substring matches, and `vector` raises `vector_error` when a test sets it."""
+    """`Store` on mongomock, which has no Atlas Search: `keyword_names` matches a word of
+    the names as `lucene.simple` does, the two chunk searches become substring matches,
+    and `vector` raises `vector_error` when a test sets it."""
 
     vector_error: Exception | None = None
 
@@ -156,9 +157,9 @@ class FakeStore(Store):
         pass
 
     def keyword_names(self, query, match, limit=10):
-        def names_of(doc):
-            return [*doc["names"], *doc["heading_path"], doc["stem"]]
-        return self._substring(self.nodes, query, names_of, match, limit)
+        words = set(_words(query))
+        found = [doc for doc in self.nodes.find(match) if words & set(_words(" ".join([*doc["names"], *doc["heading_path"], doc["stem"]])))]
+        return found[:limit]
 
     def keyword_text(self, query, match, limit=10):
         return self._substring(self.chunks, query, lambda doc: [doc["text"]], match, limit)
@@ -172,6 +173,11 @@ class FakeStore(Store):
         pattern = re.compile(re.escape(query), re.IGNORECASE)
         found = [doc for doc in collection.find(match) if any(pattern.search(t) for t in texts_of(doc))]
         return found[:limit]
+
+
+def _words(text: str) -> list[str]:
+    """The tokens of `lucene.simple`: runs of letters, lower-cased."""
+    return re.findall(r"[^\W\d_]+", text.lower())
 
 
 @pytest.fixture

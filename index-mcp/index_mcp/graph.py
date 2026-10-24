@@ -86,7 +86,7 @@ def _node(kind: str, title: str, path: str, qualified: str | None = None,
     """The fields of `store.node` for one node. `names` are lower-cased for layer 2;
     a test file's entities get none, so the name layers skip them."""
     if qualified is None:
-        names = [title] if kind == "file" else []
+        names = [title.lower()] if kind == "file" else []
     else:
         names = [title.lower(), qualified.lower()]
     return {"type": kind, "title": title, "path": path,

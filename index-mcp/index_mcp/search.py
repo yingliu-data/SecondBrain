@@ -194,7 +194,8 @@ def _ends(edge: dict, frontier: set[str], direction: str) -> tuple[str, str]:
 def retrieve(store: Store, ids: list[str], *, detail: str = "full", context_lines: int = 0,
              page: int = 1) -> list[dict]:
     """The text of each ID (a version ID, or a logical ID for its latest version) with its line
-    range, `PAGE_LINES` lines a page, and the newest version's ID for a superseded node."""
+    range when the text is contiguous, `PAGE_LINES` lines a page, and the newest version's ID
+    for a superseded node."""
     out = []
     for node_id in ids:
         node = (store.nodes.find_one({"_id": node_id})
@@ -205,7 +206,7 @@ def retrieve(store: Store, ids: list[str], *, detail: str = "full", context_line
         item = render(node, detail)
         if detail == "full":
             lines, first = _with_context(store, node, context_lines)
-            item.update(_page(lines, first, page))
+            item.update(_page(lines, first if _contiguous(node) else None, page))
         if node["superseded_by"]:
             item["newest"] = store.nodes.find_one({"nid": node["nid"]}, sort=[("version", -1)])["_id"]
         out.append(item)
@@ -215,28 +216,35 @@ def retrieve(store: Store, ids: list[str], *, detail: str = "full", context_line
 def _with_context(store: Store, node: dict, context_lines: int) -> tuple[list[str], int]:
     """The node's lines and its first line number, widened by `context_lines` on each side
     from the node that contains it when that node's text is contiguous (a class is; a file
-    node holds only its module-level lines, so a top-level entity gets no context)."""
+    node is not, so a top-level entity gets no context)."""
     lines, first = node["text"].split("\n"), node["start_line"] or 1
     if not context_lines:
         return lines, first
     edge = store.edges.find_one({"type": "contains", "dst": node["nid"], "active": True})
     parent = edge and store.nodes.find_one({"nid": edge["src"], "is_latest": True})
-    if not parent or parent["start_line"] is None:
+    if not parent or parent["start_line"] is None or not _contiguous(parent):
         return lines, first
     parent_lines = parent["text"].split("\n")
-    if len(parent_lines) != parent["end_line"] - parent["start_line"] + 1:
-        return lines, first
     start = max(parent["start_line"], first - context_lines)
     end = min(parent["end_line"], node["end_line"] + context_lines)
     return parent_lines[start - parent["start_line"]:end - parent["start_line"] + 1], start
 
 
-def _page(lines: list[str], first: int, page: int) -> dict:
+def _contiguous(node: dict) -> bool:
+    """Whether the text is the lines from `start_line` to `end_line`; a file node's text is
+    only its module-level lines, so its line range would not match it."""
+    return node["start_line"] is None or node["text"].count("\n") == node["end_line"] - node["start_line"]
+
+
+def _page(lines: list[str], first: int | None, page: int) -> dict:
+    """Page `page` of `lines`, with its line range when `first` is known."""
     pages = max(1, -(-len(lines) // PAGE_LINES))
     page = min(max(page, 1), pages)
     offset = (page - 1) * PAGE_LINES
     shown = lines[offset:offset + PAGE_LINES]
-    out = {"text": "\n".join(shown), "lines": [first + offset, first + offset + len(shown) - 1]}
+    out = {"text": "\n".join(shown)}
+    if first is not None:
+        out["lines"] = [first + offset, first + offset + len(shown) - 1]
     if pages > 1:
         out.update(page=page, pages=pages)
     return out

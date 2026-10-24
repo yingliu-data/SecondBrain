@@ -135,6 +135,16 @@ def test_importer_follows_a_target_that_appears_or_goes(store, repo):
     assert store.edges.count_documents({"src_path": "main.py", "active": False}) == 2
 
 
+def test_importer_changed_in_the_same_sync_sees_the_removal(store, repo):
+    """Criterion: edges are resolved once every node of the sync is written: `main.py`, changed in
+    the sync that removes `calculate_sum` from a file indexed after it, gets no edge to the removed node."""
+    run(store, repo)
+    edit(repo, UTILS, "def calculate_sum(a, b):\n    return a + b\n", "")
+    edit(repo, "main.py", "    return LIMIT\n", "    return LIMIT + 1\n")
+    run(store, repo)
+    assert store.edges.find_one({"dst": f"code/{UTILS}:calculate_sum", "active": True}) is None
+
+
 def test_removed_file_marked(store, repo):
     """Criterion: a removed file and its nodes get `removed_at`, its edges go inactive, nothing is deleted."""
     run(store, repo)
@@ -146,7 +156,7 @@ def test_removed_file_marked(store, repo):
     assert shape["is_latest"] is False and shape["removed_at"] is not None
     assert store.chunks.find_one({"nid": shape["nid"]})["is_latest"] is False
     assert store.files.find_one({"path": SHAPES})["removed_at"] is not None
-    assert not any(e["active"] for e in store.edges.find({"src_path": SHAPES}))
+    assert not any(e["active"] for e in store.edges.find({"$or": [{"src_path": SHAPES}, {"dst": shape["nid"]}]}))
 
 
 def test_restore_continues_versions(store, repo):
@@ -161,6 +171,8 @@ def test_restore_continues_versions(store, repo):
     shape = latest(store, f"code/{SHAPES}:Shape")
     assert shape["version"] == 1 and shape["removed_at"] is None
     assert store.chunks.find_one({"nid": shape["nid"]})["is_latest"] is True
+    assert {e["src"] for e in store.edges.find({"dst": shape["nid"], "active": True})} == {
+        f"code/{SHAPES}", "code/main.py:module_attr", "code/main.py:Square"}
     assert store.files.find_one({"path": SHAPES})["removed_at"] is None
     (repo / SHAPES).unlink()
     run(store, repo)

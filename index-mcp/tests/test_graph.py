@@ -61,6 +61,7 @@ def test_file_node_holds_its_module_level_text(repo):
     assert utils["text"] == "CONSTANT = 1" + "\n" * 8
     assert nodes["code/pkg/sub/tools.py"]["text"] == "LIMIT = 10\n\n"
     assert nodes["code"]["text"] == "" and nodes["code"]["start_line"] is None
+    assert FileGraph("pkg/Config.py", b"X = 1\n").nodes["code/pkg/Config.py"]["names"] == ["config.py"]
 
 
 def test_edges(repo):

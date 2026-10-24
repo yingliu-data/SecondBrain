@@ -6,12 +6,14 @@ logical ID, with the newest version in `nodes`: an unchanged node keeps its
 version (its lines follow the file), a changed one gets `@v(n+1)` and a
 `supersedes` edge from the new version ID to the old one, and a node that is
 gone gets `removed_at`. The file's edges are found by `src_path`: those no
-longer parsed are deactivated, new ones inserted. When the file's entities
-appeared or went away, the files with an edge into it (found by `dst`) get
-their edges resolved again, so an unchanged importer follows a target that it
-gained or lost; an importer indexed before the target's file existed gets the
-edge when it next changes. Each new class or function version gets one chunk,
-which Atlas embeds once. Nothing is ever deleted.
+longer parsed are deactivated, new ones inserted. Edges are resolved once
+every node of the run is written. When the file's entities appeared or went
+away, the files that ever had an edge into it (found by `dst`) get their edges
+resolved again, so an unchanged importer follows a target that it gained,
+lost or got back; an importer indexed before the target's file existed gets
+the edge when it next changes. The edges into a removed file are deactivated.
+Each new class or function version gets one chunk, which Atlas embeds once.
+Nothing is ever deleted.
 
 `sync` walks a folder, indexes its files, and marks the files that are gone.
 Run: `python -m index_mcp.indexer sync <folder> --source code`.
@@ -56,12 +58,13 @@ def index_files(store: Store, source: str, root: Path, paths: list[Path]) -> Cou
         counts["nodes_removed"] += len(before - graph.nodes.keys())
         if before != graph.nodes.keys():
             reshaped |= before | graph.nodes.keys()
-        graph.resolve_edges(lambda nid: types.get(nid) or _stored_type(store, nid))
-        _write_edges(store, graph.rel, graph.edges)
         store.files.update_one({"source": source, "path": graph.rel}, {
             "$set": manifest,
             "$push": {"versions": {"hash": manifest["hash"], "indexed_at": now(), "node_ids": inserted}},
         }, upsert=True)
+    for graph, _ in batch:
+        graph.resolve_edges(lambda nid: types.get(nid) or _stored_type(store, nid))
+        _write_edges(store, graph.rel, graph.edges)
     _resolve_importers(store, root, reshaped, {graph.rel for graph, _ in batch})
     return counts
 
@@ -72,9 +75,9 @@ def _stored_type(store: Store, nid: str) -> str | None:
 
 
 def _resolve_importers(store: Store, root: Path, nids: set[str], indexed: set[str]) -> None:
-    """Resolve again the edges of the files, other than `indexed`, with an active edge into
+    """Resolve again the edges of the files, other than `indexed`, that ever had an edge into
     `nids`: an entity that appeared or went away changes what their imports and calls reach."""
-    importers = set(store.edges.distinct("src_path", {"dst": {"$in": list(nids)}, "active": True}))
+    importers = set(store.edges.distinct("src_path", {"dst": {"$in": list(nids)}}))
     for rel in sorted(importers - indexed):
         try:
             graph = FileGraph(rel, (root / rel).read_bytes())
@@ -168,11 +171,12 @@ def _write_edges(store: Store, rel: str, edges: set[tuple[str, str, str]]) -> No
 
 
 def _remove_file(store: Store, source: str, rel: str) -> int:
-    """A file that is gone: its latest nodes, its parsed edges and its manifest row are marked removed."""
+    """A file that is gone: its latest nodes, its parsed edges, the edges into it and its manifest
+    row are marked removed."""
     latest = [doc["nid"] for doc in store.nodes.find({"source": source, "path": rel, "is_latest": True}, {"nid": 1})]
     for nid in latest:
         _mark_removed(store, nid)
-    store.edges.update_many({"src_path": rel, "active": True, "type": {"$ne": "supersedes"}},
+    store.edges.update_many({"$or": [{"src_path": rel}, {"dst": {"$in": latest}}], "active": True, "type": {"$ne": "supersedes"}},
                             {"$set": {"active": False, "deactivated_at": now()}})
     store.files.update_one({"source": source, "path": rel}, {"$set": {"removed_at": now()}})
     return len(latest)

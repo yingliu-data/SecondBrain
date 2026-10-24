@@ -66,9 +66,12 @@ def test_layer3_keyword_over_names_not_folders(indexed):
     assert found["layer"] == 3 and SUM + "@v1" in ids(found)
     assert search(indexed, "utils", node_types=["file"], detail="fold")["layer"] == 3
     assert indexed.keyword_names("pkg", {"is_latest": True}) == []
+    assert indexed.keyword_names("calc", {"is_latest": True}) == []   # a word of a name, not a part of one
     assert search(indexed, "pkg")["layer"] != 3
     nodes_index = next(spec for spec in search_index_specs() if spec["name"] == "nodes_search")
-    assert set(nodes_index["definition"]["mappings"]["fields"]) == {"names", "heading_path", "stem", "is_latest", "source"}
+    fields = nodes_index["definition"]["mappings"]["fields"]
+    assert set(fields) == {"names", "heading_path", "stem", "is_latest", "source"}
+    assert all(fields[name]["analyzer"] == "lucene.simple" for name in ("names", "heading_path", "stem"))
 
 
 def test_layer4_content(indexed):
@@ -162,6 +165,9 @@ def test_retrieve_text_lines_and_newest(indexed, repo):
     top_level, = retrieve(indexed, [SUM], context_lines=3)
     assert top_level["lines"] == [4, 5]   # a file node holds no contiguous text to widen into
     assert retrieve(indexed, [f"code/{UTILS}"], detail="preview")[0]["preview"] == "CONSTANT = 1\n\n\n\n"
+    whole_file, = retrieve(indexed, [f"code/{UTILS}"])
+    assert whole_file["text"] == "CONSTANT = 1" + "\n" * 8 and "lines" not in whole_file   # module-level lines only
+    assert retrieve(indexed, ["code/env/settings.py"])[0]["lines"] == [1, 1]
 
 
 def test_retrieve_pages_a_long_text(store, repo):
