@@ -1,0 +1,12 @@
+{
+  "_comment": "Copy to data/config.json (gitignored) and restart. No file = the defaults in app/config.py (local vLLM). An env var always wins over this file. llm.vendor is one of vllm, openai, anthropic, gemini, for the whole server. llm.url is a base URL (default per vendor: vllm http://secondbrain-llm:8080, openai https://api.openai.com, anthropic https://api.anthropic.com, gemini https://generativelanguage.googleapis.com). llm.model is required for every vendor but vllm. Never put a key here: llm.api_key_env names the env var that holds it (default OPENAI_API_KEY, ANTHROPIC_API_KEY or GEMINI_API_KEY; none for vllm), and the server does not start when it is unset. Examples: {\"vendor\": \"openai\", \"model\": \"gpt-4.1-mini\"}, {\"vendor\": \"anthropic\", \"model\": \"claude-sonnet-5-5\"}, {\"vendor\": \"gemini\", \"model\": \"gemini-2.5-flash\"}. `settings` takes any setting of app/config.py by its env name (API_SECRET_KEY, INTERNAL_TOKEN and *_API_KEY stay in the env).",
+  "llm": {
+    "vendor": "vllm",
+    "model": "qwen3-14b",
+    "url": "http://secondbrain-llm:8080"
+  },
+  "settings": {
+    "LLM_STREAM": true,
+    "HARNESS_MAX_TURNS": 12
+  }
+}

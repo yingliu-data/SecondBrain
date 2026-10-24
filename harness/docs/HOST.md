@@ -50,8 +50,8 @@ calls from the fold, so the result is accepted and wakes the guest.
   `ticket_id_for`, `answer_input_id`, `GuestError`. `settings.py`:
   `WorkerSettings`, one frozen value built from `app.config`
   (`WorkerSettings.from_config(**over)`; `dataclasses.replace` for a
-  variant). Dependencies (sandbox, `DeviceCalls`, the admission) stay
-  keyword arguments.
+  variant). Dependencies (sandbox, `DeviceCalls`, the admission, the
+  optional `on_event` hook the terminal chat uses) stay keyword arguments.
 - **Task API** (both drivers): `ensure_ready(input_id, driver)` boot /
   wake (prepare_vm); `start_task(task_input)` the worker-owned task of an
   input (a retry re-attaches by input_id); `wait_outcome(input_id)` its

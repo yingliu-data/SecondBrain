@@ -26,6 +26,7 @@
 
 - Backend entry point: [agent-api/app/main.py](agent-api/app/main.py)
 - Config & system prompt: [agent-api/app/config.py](agent-api/app/config.py)
+- LLM vendor and local chat: `agent-api/data/config.json` holds the vendor (vllm, openai, anthropic, gemini) and any setting by its env name (see [config.json.example](agent-api/config.json.example); env vars win; restart to apply); terminal chat on the local sandbox: `cd agent-api && uv run python -m app.cli [--session NAME]` ([app/cli.py](agent-api/app/cli.py))
 - Agent engine (host half): [agent-api/app/host/worker.py](agent-api/app/host/worker.py) drives one microVM guest per session; the guest harness (stdlib, event-sourced) is [harness/guest/](harness/guest/), the shared wire/event protocol [harness/protocol/](harness/protocol/), design and runbooks in [harness/docs/](harness/docs/)
 - Auth middleware: [agent-api/app/auth/middleware.py](agent-api/app/auth/middleware.py)
 - Skills folder: [agent-api/app/skills/](agent-api/app/skills/)

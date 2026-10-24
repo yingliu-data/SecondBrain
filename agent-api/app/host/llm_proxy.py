@@ -1,9 +1,15 @@
-"""llm_proxy — :5010 → vLLM.
+"""llm_proxy — :5010 → the LLM vendor (app.config.VENDORS: vllm, openai,
+anthropic, gemini).
 
 A threaded HTTP/1.1 server on the session's :5010 Unix socket. It forwards
-`POST /v1/chat/completions` to LLM_URL with httpx, passes the upstream status
-and body back verbatim, and records one `usage` host event per call (prompt
-and completion tokens). No key injection (OpenShell's job).
+`POST /v1/chat/completions` to the vendor's chat path under LLM_URL with
+httpx, passes the upstream status and body back verbatim, and records one
+`usage` host event per call (prompt and completion tokens). Vendor rules
+(vendor_headers, vendor_body; the avatar planner uses them too): with a key
+env var, `Authorization: Bearer <key>` (the key is read when the proxy is
+built, and never reaches the guest or an event); for a vendor other than
+vllm, the body loses the vLLM-only `chat_template_kwargs`, and openai gets
+`max_completion_tokens` for `max_tokens`. A vllm body is forwarded as it came.
 
 Streaming: when the request body has `stream: true` the upstream call is
 `client.stream(...)` and the SSE bytes are relayed as they arrive, as an
@@ -27,7 +33,8 @@ running total reaches it, every further call is answered
 is per session.
 
   LLMProxy(listener, upstream_url, host_event=None, timeout_s=LLM_TIMEOUT,
-           token_budget=HARNESS_TOKEN_BUDGET)
+           token_budget=HARNESS_TOKEN_BUDGET, vendor=LLM_VENDOR,
+           api_key_env=LLM_API_KEY_ENV)
     .start()   serve in a daemon thread
     .stop()    shut down
     .tokens_used, .token_budget, .budget_exhausted()
@@ -36,6 +43,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import socket
 import threading
@@ -48,7 +56,7 @@ from protocol.clock import elapsed_ms
 from protocol.sse import iter_sse_data
 from protocol.usage import normalise_usage
 
-from app.config import HARNESS_TOKEN_BUDGET, LLM_TIMEOUT, LLM_URL
+from app.config import HARNESS_TOKEN_BUDGET, LLM_API_KEY_ENV, LLM_TIMEOUT, LLM_URL, LLM_VENDOR, VENDORS
 from app.host.http_clients import shared_client
 from app.host.uds_http import UDSHandler, UDSService
 
@@ -79,11 +87,9 @@ class _Handler(UDSHandler):
             self._reply(402, BUDGET_BODY, "application/json")
             return
         headers = {"Content-Type": self.headers.get("Content-Type", "application/json"),
-                   "Accept": self.headers.get("Accept", "application/json")}
-        if _wants_stream(body):
-            self._forward_stream(proxy, path, body, headers, started)
-        else:
-            self._forward(proxy, path, body, headers, started)
+                   "Accept": self.headers.get("Accept", "application/json"), **proxy.auth}
+        forward = self._forward_stream if _wants_stream(body) else self._forward
+        forward(proxy, proxy.chat_path, proxy.upstream_body(body), headers, started)
 
     def _reply_buffered(self, proxy: "LLMProxy", resp: httpx.Response, raw: bytes,
                         started: float) -> None:
@@ -124,6 +130,21 @@ class _Handler(UDSHandler):
         proxy.record({"status": 502, "error": str(e)[:300],
                       "duration_ms": elapsed_ms(started)})
         self._error(502, f"upstream unreachable: {e}", "upstream_unreachable")
+
+
+def vendor_headers(api_key_env: str) -> dict:
+    """`Authorization: Bearer <the key in env var api_key_env>`; none without one."""
+    return {"Authorization": f"Bearer {os.environ[api_key_env]}"} if api_key_env else {}
+
+
+def vendor_body(vendor: str, body: dict) -> dict:
+    """An OpenAI chat-completions body as `vendor` takes it."""
+    if vendor == "vllm":
+        return body
+    body = {k: v for k, v in body.items() if k != "chat_template_kwargs"}
+    if vendor == "openai" and "max_tokens" in body:
+        body["max_completion_tokens"] = body.pop("max_tokens")
+    return body
 
 
 _STREAM_TRUE = (b'"stream": true', b'"stream":true')
@@ -231,9 +252,13 @@ class LLMProxy(UDSService):
 
     def __init__(self, listener: socket.socket, upstream_url: str = LLM_URL,
                  host_event: Callable[[str, dict], object] | None = None, *,
-                 timeout_s: float = LLM_TIMEOUT, token_budget: int = HARNESS_TOKEN_BUDGET) -> None:
+                 timeout_s: float = LLM_TIMEOUT, token_budget: int = HARNESS_TOKEN_BUDGET,
+                 vendor: str = LLM_VENDOR, api_key_env: str = LLM_API_KEY_ENV) -> None:
         super().__init__(listener)
         self.upstream_url = upstream_url.rstrip("/")
+        self.vendor = vendor
+        self.chat_path = VENDORS[vendor].chat_path
+        self.auth = vendor_headers(api_key_env)
         self.host_event = host_event
         # the process's client for this upstream (http_clients): not closed with the proxy
         self.client = shared_client(self.upstream_url, httpx.Timeout(timeout_s))
@@ -241,6 +266,15 @@ class LLMProxy(UDSService):
         self.tokens_used = 0
         self._lock = threading.Lock()
         self.calls = 0
+
+    def upstream_body(self, body: bytes) -> bytes:
+        if self.vendor == "vllm":
+            return body
+        try:
+            data = json.loads(body)
+        except ValueError:
+            return body
+        return json.dumps(vendor_body(self.vendor, data)).encode() if isinstance(data, dict) else body
 
     def budget_exhausted(self) -> bool:
         with self._lock:

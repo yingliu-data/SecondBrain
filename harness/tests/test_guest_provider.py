@@ -614,3 +614,26 @@ def test_delta_relay_matches_the_reference_on_many_fragments():
         assert relay_run(attempts) == reference(attempts)
     many = [C(*["x"] * 20_000)]
     assert len(relay_run(many)) == 20_000
+
+
+TWO_CALLS = [{"id": "a", "type": "function", "function": {"name": "x", "arguments": '{"a":1}'}},
+             {"id": "b", "type": "function", "function": {"name": "y", "arguments": "{}"}}]
+
+
+def _tool_chunk(*frags, finish=None) -> dict:
+    return {"choices": [{"index": 0, "delta": {"tool_calls": list(frags)}, "finish_reason": finish}]}
+
+
+@pytest.mark.parametrize("chunks, tool_calls", [
+    ([{"choices": [{"index": 0, "delta": {"content": "hi"}, "finish_reason": "stop"}]}], None),
+    ([_tool_chunk({"index": 0, "id": "a", "function": {"name": "x", "arguments": '{"a":'}},
+                  {"index": 1, "id": "b", "function": {"name": "y", "arguments": "{}"}}),
+      _tool_chunk({"index": 0, "function": {"arguments": "1}"}}, finish="tool_calls")], TWO_CALLS),
+    ([_tool_chunk(TWO_CALLS[0]), _tool_chunk(TWO_CALLS[1], finish="tool_calls")], TWO_CALLS),
+], ids=["no-tool-call", "two-with-index", "two-without-index"])
+def test_vendor_tool_call_shapes(chunks, tool_calls):
+    """Plan feat/52 step 2 (issue #52: a vendor reply with no tool call, or several,
+    is read correctly): vLLM/OpenAI/Anthropic stream `index`ed fragments; Gemini
+    streams each call whole, with an `id` and no `index`."""
+    message = assemble_chunks(chunks)["choices"][0]["message"]
+    assert message.get("tool_calls") == tool_calls

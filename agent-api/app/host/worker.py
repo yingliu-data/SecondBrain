@@ -89,9 +89,11 @@ class Worker(VMLifecycle):
     def __init__(self, session, tenant, registry, sandbox: Sandbox, sinks=None, *,
                  settings: WorkerSettings | None = None,
                  device_calls: DeviceCalls = DEVICE_CALLS,
-                 admission: Admission | None = None) -> None:
+                 admission: Admission | None = None,
+                 on_event: Callable[[dict], object] | None = None) -> None:
         """Safe off the loop (Workers.open builds it in a thread: the log is
-        folded here); on_loop() then finishes what needs the loop."""
+        folded here); on_loop() then finishes what needs the loop.
+        `on_event` sees each stored guest event (the terminal chat, app/cli.py)."""
         self.session = session
         self.tenant = tenant
         self.registry = registry
@@ -100,6 +102,7 @@ class Worker(VMLifecycle):
         self.sinks: list[asyncio.Queue] = list(sinks or [])
         self._sink_input: dict[int, str] = {}     # id(queue) -> the input it streams
         self.device_calls = device_calls
+        self.on_event = on_event
         self.ports = dict(self.settings.ports)
 
         meta = session.read_meta()
@@ -661,7 +664,10 @@ class Worker(VMLifecycle):
             self.endpoints = Endpoints(self.session.root, listen)
             self.proxy = LLMProxy(self.endpoints.listener(self.ports["llm"]),
                                   self.settings.llm_url, self.sync.host_event,
-                                  token_budget=self.settings.token_budget)
+                                  timeout_s=self.settings.llm_timeout_s,
+                                  token_budget=self.settings.token_budget,
+                                  vendor=self.settings.llm_vendor,
+                                  api_key_env=self.settings.llm_api_key_env)
             self.proxy.start()
             if self.vm_state == "parked":
                 self._close_guest_ports()       # a restarted worker: listen at the wake
@@ -1224,6 +1230,11 @@ class Worker(VMLifecycle):
             await asyncio.to_thread(self.sync.project, ev)
         self.last_active = time.monotonic()
         self._emit_many(self.projector.project(ev))
+        if self.on_event is not None:
+            try:
+                self.on_event(ev)
+            except Exception:   # the hook never breaks the engine
+                logger.exception("session %s: on_event failed", self.session_key)
         etype, body = ev["type"], ev["body"]
         if etype == "session_start":
             self._check_harness_version(body.get("harness_version"))
