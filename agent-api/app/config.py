@@ -31,6 +31,9 @@ def load_config_file(path: str) -> dict:
             raise ValueError(f"{path}: {block} must be a JSON object")
     if "api_key" in data.get("llm", {}):
         raise ValueError(f"{path}: llm.api_key: put the key in an env var and name it in llm.api_key_env")
+    for key in data.get("llm", {}):
+        if key not in ("vendor", "model", "url", "api_key_env"):
+            raise ValueError(f"{path}: llm.{key}: not one of vendor, model, url, api_key_env")
     for name in data.get("settings", {}):
         if name in ("API_SECRET_KEY", "INTERNAL_TOKEN") or name.endswith("_API_KEY"):
             raise ValueError(f"{path}: settings.{name}: a secret stays in the env")
@@ -44,28 +47,41 @@ _SETTINGS = _FILE.get("settings", {})
 _ASKED: set[str] = set()     # every setting name read below: any other name in the file is refused
 
 
+def _file_type_ok(value, cast) -> bool:
+    """A file value has its setting's JSON type: a string (as the env gives
+    it), else an integer for int, a number for float, true/false for bool."""
+    if isinstance(value, bool):
+        return cast is bool
+    if isinstance(value, str):
+        return True
+    return (cast is int and isinstance(value, int)) or (cast is float and isinstance(value, (int, float)))
+
+
 def _setting(name: str, default, cast=None):
     """The env var `name`, else the file's settings[name], else `default`,
-    through `cast` when given. ValueError names a value that does not convert."""
+    through `cast` (int, float) when given. ValueError names a file value of
+    the wrong JSON type (`cast`, bool for _flag, else a string) and a value
+    that does not convert."""
     _ASKED.add(name)
-    field = name if name in os.environ else f"settings.{name}"
-    value = os.environ[name] if name in os.environ else _SETTINGS.get(name, default)
-    if cast is None:
+    field, value = name, default
+    if name in os.environ:
+        value = os.environ[name]
+    elif name in _SETTINGS:
+        field, value = f"settings.{name}", _SETTINGS[name]
+        if not _file_type_ok(value, cast):
+            raise ValueError(f"{field}: {value!r} is not a valid {(cast or str).__name__}")
+    if cast not in (int, float):
         return value
     try:
         return cast(value)
-    except (TypeError, ValueError):
+    except ValueError:
         raise ValueError(f"{field}: {value!r} is not a valid {cast.__name__}") from None
 
 
 def _flag(name: str, default: bool) -> bool:
     """A yes/no setting: JSON true/false from the file, or "1"/"true"/"yes"."""
-    value = _setting(name, default)
-    if isinstance(value, bool):
-        return value
-    if not isinstance(value, str):
-        raise ValueError(f"settings.{name}: {value!r} is not true or false")
-    return value.lower() in ("1", "true", "yes")
+    value = _setting(name, default, bool)
+    return value if isinstance(value, bool) else value.lower() in ("1", "true", "yes")
 
 
 # ── LLM Provider ──

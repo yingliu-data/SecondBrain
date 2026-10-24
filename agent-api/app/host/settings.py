@@ -18,6 +18,7 @@ class WorkerSettings:
     llm_url: str = ""
     llm_vendor: str = "vllm"
     llm_api_key_env: str = ""       # the env var's name, never the key
+    llm_timeout_s: float = 120.0
     ports: dict = field(default_factory=dict)
     hello_timeout_s: float = 30.0
     heartbeat_s: float = 15.0
@@ -52,6 +53,7 @@ class WorkerSettings:
         from app import config as c
         values = dict(
             llm_url=c.LLM_URL, llm_vendor=c.LLM_VENDOR, llm_api_key_env=c.LLM_API_KEY_ENV,
+            llm_timeout_s=c.LLM_TIMEOUT,
             ports=dict(c.HARNESS_PORTS),
             hello_timeout_s=c.HARNESS_HELLO_TIMEOUT_S, heartbeat_s=c.HARNESS_HEARTBEAT_S,
             wall_clock_s=c.HARNESS_WALL_CLOCK_S, session_idle_s=c.HARNESS_SESSION_IDLE_S,

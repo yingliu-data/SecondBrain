@@ -14,7 +14,6 @@ from pathlib import Path
 import pytest
 
 from app import cli
-from app.host.llm_proxy import LLMProxy
 from app.host.sandbox.local import LocalSandbox
 from app.host.worker import Workers
 from app.session.dir_store import DirStore
@@ -48,6 +47,9 @@ def lines(*texts) -> asyncio.Queue:
 
 def guests(root: Path) -> list[str]:
     """The live guest processes of sessions under `root` (a zombie has no cmdline)."""
+    if not Path("/proc").exists():      # macOS
+        cmd = ["pgrep", "-f", f"guest.main --connect unix:{root}"]
+        return subprocess.run(cmd, capture_output=True, text=True).stdout.split()
     found = []
     for p in Path("/proc").iterdir():
         try:
@@ -72,11 +74,11 @@ def local_chat(tmp_path, users_root, monkeypatch, upstream):  # noqa: F811
     from app.routes import chat
     monkeypatch.setattr(chat, "_registry", FakeRegistry())
 
-    def new_run():
+    def new_run(**over):
         monkeypatch.setattr(chat, "workers", Workers(
             sandbox_factory=lambda: LocalSandbox(GUEST_ROOT), sessions=DirStore(tmp_path / "sessions"),
             **worker_kwargs(llm_url=upstream.url, hello_timeout_s=20, heartbeat_s=1, wall_clock_s=60,
-                            device_tool_timeout_s=1)))
+                            device_tool_timeout_s=1, **over)))
     new_run()
     return new_run
 
@@ -152,10 +154,10 @@ async def test_question_is_answered(local_chat, upstream):
     assert "blue" in answer[0]["content"]
 
 
-async def test_vendor_error_then_next_turn(local_chat, upstream, monkeypatch):
+async def test_vendor_error_then_next_turn(local_chat, upstream):
     """Issue #52: a vendor error, rate limit or timeout ends the turn with one
     readable `error:` line, and the session stays usable."""
-    monkeypatch.setitem(LLMProxy.__init__.__kwdefaults__, "timeout_s", 1)
+    local_chat(llm_timeout_s=1)
     out, q = Out(), asyncio.Queue()
     loop = asyncio.ensure_future(cli.chat_loop(FakeTenant(), "s1", q, out))
 

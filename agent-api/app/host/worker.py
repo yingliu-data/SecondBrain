@@ -664,6 +664,7 @@ class Worker(VMLifecycle):
             self.endpoints = Endpoints(self.session.root, listen)
             self.proxy = LLMProxy(self.endpoints.listener(self.ports["llm"]),
                                   self.settings.llm_url, self.sync.host_event,
+                                  timeout_s=self.settings.llm_timeout_s,
                                   token_budget=self.settings.token_budget,
                                   vendor=self.settings.llm_vendor,
                                   api_key_env=self.settings.llm_api_key_env)

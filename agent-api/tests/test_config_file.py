@@ -76,8 +76,9 @@ def test_env_overrides_file(tmp_path, monkeypatch):
 
 
 def test_env_vendor_drops_the_file_s_vendor_fields(monkeypatch):
-    """Review of feat/52, request 1: LLM_VENDOR that changes the vendor drops the
-    file's url, model and key env, so the key never goes to the file's vLLM host."""
+    """Plan criterion: env vars override the file. An LLM_VENDOR that changes the
+    vendor drops the file's url, model and key env, so the key never goes to the
+    file's vLLM host."""
     template = load_config_file(str(AGENT_API / "config.json.example"))
     monkeypatch.setenv("LLM_VENDOR", "openai")
     monkeypatch.setenv("LLM_MODEL", "gpt-x")
@@ -85,16 +86,21 @@ def test_env_vendor_drops_the_file_s_vendor_fields(monkeypatch):
     assert llm_config(template["llm"]) == ("openai", "gpt-x", "https://api.openai.com", "OPENAI_API_KEY")
 
 
-@pytest.mark.parametrize("settings, field", [
-    ({"HARNESS_MAX_TURN": 3}, "settings.HARNESS_MAX_TURN"),
-    ({"HARNESS_MAX_TURNS": "abc"}, "settings.HARNESS_MAX_TURNS"),
-    ({"LLM_STREAM": 1}, "settings.LLM_STREAM"),
+@pytest.mark.parametrize("doc, field", [
+    ({"settings": {"HARNESS_MAX_TURN": 3}}, "settings.HARNESS_MAX_TURN"),
+    ({"settings": {"HARNESS_MAX_TURNS": "abc"}}, "settings.HARNESS_MAX_TURNS"),
+    ({"settings": {"HARNESS_MAX_TURNS": True}}, "settings.HARNESS_MAX_TURNS"),
+    ({"settings": {"HARNESS_MAX_TURNS": 5.9}}, "settings.HARNESS_MAX_TURNS"),
+    ({"settings": {"SESSIONS_ROOT": 5}}, "settings.SESSIONS_ROOT"),
+    ({"settings": {"LLM_STREAM": 1}}, "settings.LLM_STREAM"),
+    ({"llm": {"vendor": "vllm", "urll": "http://x"}}, "llm.urll"),
 ])
-def test_bad_setting_names_field(tmp_path, settings, field):
-    """Review of feat/52, request 2: an unknown setting name, or a value that does
-    not convert, stops the import with an error naming settings.<name>."""
+def test_bad_setting_names_field(tmp_path, doc, field):
+    """Plan criterion: a config file that is not valid is a clear error naming the
+    field. An unknown name, a value of the wrong JSON type or one that does not
+    convert stops the import."""
     with pytest.raises(subprocess.CalledProcessError) as e:
-        _import_config(_write(tmp_path, {"settings": settings}))
+        _import_config(_write(tmp_path, doc))
     assert f"{field}:" in e.value.stderr
 
 
