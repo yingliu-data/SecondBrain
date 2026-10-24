@@ -85,7 +85,7 @@ def load_index(repo_path: str) -> CodeIndex:
         graph = json.loads((folder / "graph.json").read_text())
         bm25 = bm25s.BM25.load(folder / "bm25", show_progress=False)
     except (OSError, ValueError) as e:
-        raise CodeIndexError("index damaged, run build_index again") from e
+        raise CodeIndexError("index damaged, rebuild it: run build_index again") from e
     return CodeIndex(manifest, graph, bm25)
 
 
@@ -103,10 +103,10 @@ def _searchable(nodes: dict) -> list[str]:
 
 
 class CodeIndex:
-    """A loaded index: the graph's nodes, and the three search layers over them."""
+    """A loaded index: the graph, and the three search layers over its nodes."""
 
     def __init__(self, manifest: dict, graph: dict, bm25: bm25s.BM25):
-        self.manifest, self.nodes, self.bm25 = manifest, graph["nodes"], bm25
+        self.manifest, self.nodes, self.edges, self.bm25 = manifest, graph["nodes"], graph["edges"], bm25
         self.ids = _searchable(self.nodes)   # in the order the BM25 index was built
         self.searchable = set(self.ids)
         self.by_name: dict[str, list[str]] = {}
