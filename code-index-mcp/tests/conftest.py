@@ -84,6 +84,7 @@ FILES = {
             pass
     """,
     "pkg/shapes.py": """
+        # shapes\x0c page two
         class Shape:
             pass
     """,
@@ -119,6 +120,8 @@ FILES = {
     "broken.py": "def oops(:\n",
     ".venv/hidden.py": "def hidden():\n    pass\n",
     "venv/installed.py": "def installed():\n    pass\n",
+    "venv/pyvenv.cfg": "",
+    "env/settings.py": "DEBUG = False\n",
 }
 
 

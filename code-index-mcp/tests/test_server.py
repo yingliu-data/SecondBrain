@@ -68,7 +68,7 @@ async def test_refuses_without_token(url):
 
 
 def test_open_host_needs_token(monkeypatch):
-    """Review request 1: on a host other than loopback, the server does not start without a token."""
+    """On a host other than loopback, the server does not start without a token."""
     monkeypatch.delenv("CODE_INDEX_TOKEN", raising=False)
     monkeypatch.setattr(sys, "argv", ["code_index.server", "--host", "0.0.0.0"])
     monkeypatch.setattr(code_index_server.uvicorn, "run", lambda *a, **k: pytest.fail("the server started"))
@@ -77,7 +77,7 @@ def test_open_host_needs_token(monkeypatch):
 
 
 async def test_build_does_not_block_other_calls(url, monkeypatch):
-    """Review request 2: a build runs in a worker thread, so other calls are answered meanwhile."""
+    """A build runs in a worker thread, so other calls are answered meanwhile."""
     started, release = threading.Event(), threading.Event()
 
     def slow_build(repo_path):
@@ -103,7 +103,7 @@ async def test_build_saves_index(url, repo):
     is_error, manifest = await call(url, "build_index", repo_path=str(repo))
     assert not is_error
     graph = build_graph(repo)
-    assert (manifest["files"], manifest["entities"]) == (9, 20)
+    assert (manifest["files"], manifest["entities"]) == (10, 20)
     assert manifest["edges"] == sum(map(len, graph["edges"].values()))
     assert {s["file"] for s in manifest["skipped"]} == {"broken.py", "binary.py"}
     folder = index_dir(repo.resolve())

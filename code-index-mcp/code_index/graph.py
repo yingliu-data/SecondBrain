@@ -17,11 +17,12 @@ from __future__ import annotations
 import ast
 import os
 import posixpath
+import re
 from pathlib import Path
 
 EDGE_TYPES = ("contains", "imports", "invokes", "inherits")
 DEFS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
-SKIP_DIRS = {"venv", "env", "site-packages", "node_modules"}
+SKIP_DIRS = {"site-packages", "node_modules"}
 
 
 def build_graph(repo: Path) -> dict:
@@ -35,7 +36,7 @@ def build_graph(repo: Path) -> dict:
         try:
             text = path.read_bytes().decode("utf-8")
             trees[rel] = ast.parse(text, filename=rel)
-        except (OSError, SyntaxError, ValueError) as e:
+        except (OSError, SyntaxError, ValueError, RecursionError, MemoryError) as e:
             graph["skipped"].append({"file": rel, "error": f"{type(e).__name__}: {e}"})
             continue
         _add_file(graph, rel, text, trees[rel])
@@ -46,13 +47,18 @@ def build_graph(repo: Path) -> dict:
 
 
 def _py_files(repo: Path):
-    """`.py` files in a stable order; hidden folders such as `.git` or `.venv`, and
-    folders of installed packages (SKIP_DIRS), are not walked."""
+    """`.py` files in a stable order, without the folders that `_skip_dir` names."""
     for root, dirs, files in os.walk(repo):
-        dirs[:] = sorted(d for d in dirs if not d.startswith(".") and d not in SKIP_DIRS)
+        dirs[:] = sorted(d for d in dirs if not _skip_dir(Path(root, d)))
         for name in sorted(files):
             if name.endswith(".py"):
                 yield Path(root, name)
+
+
+def _skip_dir(path: Path) -> bool:
+    """A hidden folder such as `.git`, a virtualenv (it holds `pyvenv.cfg`), or a
+    folder of installed packages (SKIP_DIRS)."""
+    return path.name.startswith(".") or path.name in SKIP_DIRS or (path / "pyvenv.cfg").is_file()
 
 
 def _node(kind: str, name: str, file: str, start=None, end=None, code="") -> dict:
@@ -65,7 +71,10 @@ def _child_id(parent: str, name: str) -> str:
 
 
 def _add_file(graph: dict, rel: str, text: str, tree: ast.Module) -> None:
-    lines = text.splitlines()
+    # The line breaks that ast counts; str.splitlines also splits on \f, \x85 and others.
+    lines = re.split(r"\r\n|\r|\n", text)
+    if not lines[-1]:
+        lines.pop()
     folder = posixpath.dirname(rel) or "."
     graph["nodes"].setdefault(folder, _node("directory", posixpath.basename(folder), folder))
     graph["nodes"][rel] = _node("file", posixpath.basename(rel), rel, 1, len(lines), text)
@@ -81,8 +90,9 @@ def _add_defs(graph: dict, parent: str, body: list[ast.stmt], lines: list[str]) 
             continue
         nid = _child_id(parent, stmt.name)
         kind = "class" if isinstance(stmt, ast.ClassDef) else "function"
-        code = "\n".join(lines[stmt.lineno - 1:stmt.end_lineno])
-        graph["nodes"][nid] = _node(kind, stmt.name, file, stmt.lineno, stmt.end_lineno, code)
+        start = min([stmt.lineno, *(d.lineno for d in stmt.decorator_list)])
+        code = "\n".join(lines[start - 1:stmt.end_lineno])
+        graph["nodes"][nid] = _node(kind, stmt.name, file, start, stmt.end_lineno, code)
         graph["edges"]["contains"].add((parent, nid))
         if kind == "class":
             _add_defs(graph, nid, stmt.body, lines)

@@ -21,8 +21,13 @@ def test_node_ids(repo):
     assert (method["type"], method["name"], method["file"]) == ("function", "double", "pkg/utils.py")
     assert method["code"] == "    def double(self, a):\n        return self.calculate_sum(a, a)"
     assert method["end"] == method["start"] + 1
+    decorated = nodes["pkg/utils.py:MathUtils.make"]
+    assert decorated["code"] == "    @classmethod\n    def make(cls):\n        return cls.create()"
+    assert decorated["end"] == decorated["start"] + 2
+    assert nodes["pkg/shapes.py:Shape"]["code"] == "class Shape:\n    pass"   # after a form feed
     assert "tests/test_x.py:only_in_tests" in nodes and "foo_test.py:only_in_foo_test" in nodes
     assert not any(nid.split("/")[0] in (".venv", "venv") for nid in nodes)
+    assert "env/settings.py" in nodes   # a package named env, not a virtualenv
     assert json.loads(json.dumps(graph)) == graph
 
 
@@ -68,9 +73,13 @@ def test_edges(repo):
 def test_syntax_error_skipped(repo):
     """Criterion 11: a file that fails to parse or decode is skipped with its
     error, and the other files are indexed."""
+    (repo / "deep.py").write_text("1+" * 200000 + "1\n")
+    (repo / "nested.py").write_text("x = " + "-" * 100000 + "1\n")
     graph = build_graph(repo)
     errors = {s["file"]: s["error"] for s in graph["skipped"]}
-    assert errors.keys() == {"broken.py", "binary.py"}
+    assert errors.keys() == {"broken.py", "binary.py", "deep.py", "nested.py"}
     assert errors["broken.py"].startswith("SyntaxError")
     assert errors["binary.py"].startswith("UnicodeDecodeError")
+    assert errors["deep.py"].startswith("RecursionError")
+    assert errors["nested.py"].startswith("MemoryError")
     assert "broken.py" not in graph["nodes"] and "main.py" in graph["nodes"]

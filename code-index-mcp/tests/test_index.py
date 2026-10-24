@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import threading
+
+import bm25s
 import pytest
 
 from code_index.index import TOP_K, build_index, is_test_file, load_index
@@ -48,6 +51,30 @@ def test_layer3_bm25_ids(index):
     assert len(index.search("py")["results"]) == TOP_K
 
 
+def test_builds_do_not_overlap(repo, monkeypatch):
+    """A second build of one repo waits until the first has written its index,
+    so their files never mix."""
+    entered, release = threading.Event(), threading.Event()
+    save = bm25s.BM25.save
+
+    def slow_save(self, *args, **kwargs):
+        if not entered.is_set():
+            entered.set()
+            release.wait(5)
+        return save(self, *args, **kwargs)
+    monkeypatch.setattr(bm25s.BM25, "save", slow_save)
+    builds = [threading.Thread(target=build_index, args=(str(repo),)) for _ in range(2)]
+    builds[0].start()
+    assert entered.wait(5)
+    builds[1].start()
+    builds[1].join(0.5)
+    assert builds[1].is_alive()
+    release.set()
+    for build in builds:
+        build.join(5)
+    assert load_index(str(repo)).search("calculate_sum")["layer"] == 2
+
+
 def test_detail_levels(index):
     """Criterion 4: fold is the ID, preview the def line or a file's first 5 lines, full the source."""
     nid = f"{UTILS}:MathUtils.double"
@@ -55,6 +82,7 @@ def test_detail_levels(index):
     assert index.search(nid, detail="preview")["results"] == [{"id": nid, "preview": "    def double(self, a):"}]
     assert index.search(nid, detail="full")["results"] == [
         {"id": nid, "code": "    def double(self, a):\n        return self.calculate_sum(a, a)"}]
+    assert index.render(f"{UTILS}:MathUtils.make", "preview")["preview"] == "    def make(cls):"
     assert index.search(UTILS)["results"][0]["preview"] == (
         "CONSTANT = 1\n\n\ndef calculate_sum(a, b):\n    return a + b")
 

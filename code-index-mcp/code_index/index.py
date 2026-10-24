@@ -16,6 +16,7 @@ import json
 import os
 import re
 import shutil
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -26,6 +27,10 @@ from code_index.graph import build_graph
 ENTITY_TYPES = ("file", "class", "function")
 TOP_K = 10
 PREVIEW_LINES = 5
+DEF_LINE = re.compile(r"\s*(async\s+)?(def|class)\s")
+# Tool calls run in worker threads; two builds (say, a retry after a gateway
+# timeout) must not write into one index folder at once.
+_BUILD_LOCK = threading.Lock()
 
 
 class CodeIndexError(Exception):
@@ -57,22 +62,23 @@ def build_index(repo_path: str) -> dict:
         raise CodeIndexError(
             f"no Python files to index in {repo} (test files and files that do not parse are left out)")
     folder = index_dir(repo)
-    shutil.rmtree(folder, ignore_errors=True)
-    folder.mkdir(parents=True)
-    (folder / "graph.json").write_text(json.dumps(graph))
-    bm25 = bm25s.BM25()
-    bm25.index([split_words(nid) for nid in ids], show_progress=False)
-    bm25.save(folder / "bm25", show_progress=False)
-    nodes = graph["nodes"].values()
-    manifest = {
-        "repo": str(repo),
-        "built_at": datetime.now(UTC).isoformat(timespec="seconds"),
-        "files": sum(n["type"] == "file" for n in nodes),
-        "entities": sum(n["type"] in ("class", "function") for n in nodes),
-        "edges": sum(map(len, graph["edges"].values())),
-        "skipped": graph["skipped"],
-    }
-    (folder / "manifest.json").write_text(json.dumps(manifest))
+    with _BUILD_LOCK:
+        shutil.rmtree(folder, ignore_errors=True)
+        folder.mkdir(parents=True)
+        (folder / "graph.json").write_text(json.dumps(graph))
+        bm25 = bm25s.BM25()
+        bm25.index([split_words(nid) for nid in ids], show_progress=False)
+        bm25.save(folder / "bm25", show_progress=False)
+        nodes = graph["nodes"].values()
+        manifest = {
+            "repo": str(repo),
+            "built_at": datetime.now(UTC).isoformat(timespec="seconds"),
+            "files": sum(n["type"] == "file" for n in nodes),
+            "entities": sum(n["type"] in ("class", "function") for n in nodes),
+            "edges": sum(map(len, graph["edges"].values())),
+            "skipped": graph["skipped"],
+        }
+        (folder / "manifest.json").write_text(json.dumps(manifest))
     return manifest
 
 
@@ -138,8 +144,10 @@ class CodeIndex:
             return {"id": nid}
         if detail == "full":
             return {"id": nid, "code": code}
-        lines = code.splitlines()[:PREVIEW_LINES if self.nodes[nid]["type"] == "file" else 1]
-        return {"id": nid, "preview": "\n".join(lines)}
+        lines = code.splitlines()
+        if self.nodes[nid]["type"] == "file":
+            return {"id": nid, "preview": "\n".join(lines[:PREVIEW_LINES])}
+        return {"id": nid, "preview": next((l for l in lines if DEF_LINE.match(l)), lines[0])}
 
     def _bm25(self, query: str, entity_type: str) -> list[str]:
         tokens = split_words(query)
