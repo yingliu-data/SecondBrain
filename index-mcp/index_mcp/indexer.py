@@ -56,8 +56,9 @@ def index_files(store: Store, source: str, root: Path, paths: list[Path]) -> Cou
         inserted, before = _write_nodes(store, source, graph.rel, graph.nodes)
         counts["nodes_inserted"] += len(inserted)
         counts["nodes_removed"] += len(before - graph.nodes.keys())
-        if before != graph.nodes.keys():
-            reshaped |= before | graph.nodes.keys()
+        entities = {nid for nid, fields in graph.nodes.items() if fields["type"] != "directory"}
+        if before != entities:
+            reshaped |= before | entities
         store.files.update_one({"source": source, "path": graph.rel}, {
             "$set": manifest,
             "$push": {"versions": {"hash": manifest["hash"], "indexed_at": now(), "node_ids": inserted}},

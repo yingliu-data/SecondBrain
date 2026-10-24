@@ -4,6 +4,7 @@ from __future__ import annotations
 import pytest
 
 from conftest import NODE_FIELDS
+from index_mcp import indexer
 from index_mcp.indexer import index_files, main, sync
 from index_mcp.store import Store
 
@@ -112,7 +113,7 @@ def test_import_resolves_through_store(store, repo):
     assert imports == {f"code/{UTILS}", f"code/{UTILS}:calculate_sum"}   # pkg/shapes.py is not indexed yet
 
 
-def test_importer_follows_a_target_that_appears_or_goes(store, repo):
+def test_importer_follows_a_target_that_appears_or_goes(store, repo, monkeypatch):
     """Criterion: a cross-file edge is refreshed when only its target changes: `main.py` is not
     re-indexed, yet it loses the edges to `calculate_sum` when the function goes and gets them back
     when it returns; a file whose entities only changed inside re-resolves nothing."""
@@ -133,6 +134,11 @@ def test_importer_follows_a_target_that_appears_or_goes(store, repo):
     run(store, repo)
     assert {(kind, src, target) for kind, src in into_target} <= active_from_main()
     assert store.edges.count_documents({"src_path": "main.py", "active": False}) == 2
+    reshaped = []
+    monkeypatch.setattr(indexer, "_resolve_importers", lambda store, root, nids, indexed: reshaped.append(nids))
+    edit(repo, UTILS, "    return a + b\n", "    return b + a\n")
+    run(store, repo)
+    assert reshaped == [set()]
 
 
 def test_importer_changed_in_the_same_sync_sees_the_removal(store, repo):
