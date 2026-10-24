@@ -1,16 +1,19 @@
-"""The MongoDB store the indexer writes and the server reads.
+"""The MongoDB store the indexer writes and the search side reads.
 
-One database holds four collections shared by every source (`code`, and
-`docs` later): `files` (one manifest row per indexed file), `nodes` (one
-document per version of a directory, file, class, function or section),
-`edges` (between logical IDs, or between version IDs for `supersedes`, with
-the file they were parsed from) and `chunks` (the text MongoDB embeds, one
-per node version). A node's logical ID `nid` is `<source>/<path>` for a file
-or `<source>/<path>:<name>` for an entity, and its `_id` is `<nid>@v<n>`.
+One database holds four collections shared by every source (one source per
+indexed project or folder): `files` (one manifest row per indexed file),
+`nodes` (one document per version of a directory, file, class, function,
+document, section or block), `edges` (between logical IDs, or between version
+IDs for `supersedes`, with the source and file they were parsed from) and
+`chunks` (the text MongoDB embeds, one per node version). A node's logical ID
+`nid` is `<source>/<path>` for a file, `<source>/<path>:<name>` for a code
+entity and `<source>/<path>#<heading path>` for a Markdown section, and its
+`_id` is `<nid>@v<n>`.
 
 Credentials are `MONGODB_USERNAME`, `MONGODB_PASSWORD`, `MONGODB_HOST` and
-`MONGODB_DB`, from the environment or from a `.env` in the current folder or
-a parent. The three search methods need the Atlas Search indexes described in
+`MONGODB_DB`, from the environment or else from a `.env` in the current folder
+or a parent. The `.env` is read, never loaded into the environment, so a
+process this one starts does not inherit the credentials. The three search methods need the Atlas Search indexes described in
 `atlas/*.json`; `ensure_search_indexes` creates them on Atlas, and the tests
 replace the methods with in-memory versions.
 """
@@ -25,14 +28,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote_plus
 
-from dotenv import find_dotenv, load_dotenv
+from dotenv import dotenv_values, find_dotenv
 from pymongo import ASCENDING, MongoClient
 from pymongo.errors import OperationFailure
 from pymongo.operations import SearchIndexModel
 
 log = logging.getLogger(__name__)
 
-ATLAS_DIR = Path(__file__).resolve().parent.parent / "atlas"
+ATLAS_DIR = Path(__file__).resolve().parent / "atlas"
 SERVER_SELECTION_TIMEOUT_MS = 3000
 MAX_CANDIDATES = 10000   # the most `$vectorSearch` accepts
 
@@ -46,7 +49,7 @@ INDEXES = [
     ("nodes", ["removed_at"], {}),
     ("edges", ["src"], {}),
     ("edges", ["dst"], {}),
-    ("edges", ["src_path"], {}),
+    ("edges", ["source", "src_path"], {}),
     ("edges", ["type", "active"], {}),
     ("files", ["source", "path"], {"unique": True}),
     ("chunks", ["nid"], {}),
@@ -55,12 +58,16 @@ INDEXES = [
 
 def settings() -> dict[str, str]:
     """The `MONGODB_*` variables; a missing one is an error that names it."""
-    load_dotenv(find_dotenv(usecwd=True))
-    values = {name: os.environ.get(name, "") for name in ("MONGODB_USERNAME", "MONGODB_PASSWORD", "MONGODB_HOST")}
-    missing = [name for name, value in values.items() if not value]
+    found = find_dotenv(usecwd=True)
+    dotenv = dotenv_values(found) if found else {}
+
+    def value(name: str) -> str:
+        return os.environ.get(name) or dotenv.get(name) or ""
+    values = {name: value(name) for name in ("MONGODB_USERNAME", "MONGODB_PASSWORD", "MONGODB_HOST")}
+    missing = [name for name, v in values.items() if not v]
     if missing:
         raise RuntimeError(f"set {', '.join(missing)} in the environment or in .env")
-    values["MONGODB_DB"] = os.environ.get("MONGODB_DB", "secondbrain")
+    values["MONGODB_DB"] = value("MONGODB_DB") or "secondbrain"
     return values
 
 
@@ -100,12 +107,14 @@ def node(nid: str, *, type: str, source: str, path: str, title: str, heading_pat
     }
 
 
-def edge(edge_type: str, src: str, dst: str, *, src_path: str, ambiguous: bool = False) -> dict:
-    """One edge between logical IDs (version IDs for `supersedes`), found again by the file it was parsed from."""
+def edge(edge_type: str, src: str, dst: str, *, source: str, src_path: str, ambiguous: bool = False) -> dict:
+    """One edge between logical IDs (version IDs for `supersedes`), found again by the source and
+    file it was parsed from."""
     return {
         "type": edge_type,
         "src": src,
         "dst": dst,
+        "source": source,
         "src_path": src_path,
         "active": True,
         "created_at": now(),

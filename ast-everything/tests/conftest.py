@@ -10,7 +10,7 @@ from pathlib import Path
 import mongomock
 import pytest
 
-from index_mcp.store import Store
+from ast_everything.store import Store
 
 NODE_FIELDS = {"_id", "nid", "type", "source", "path", "title", "heading_path", "names", "start_line", "end_line",
                "text", "text_hash", "version", "is_latest", "created_at", "superseded_at", "superseded_by", "removed_at"}

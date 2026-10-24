@@ -32,7 +32,7 @@ from urllib.parse import unquote, urlsplit
 
 from markdown_it import MarkdownIt
 
-from ast_everything.parsers.python import Lookup, nid_of
+from ast_everything.parsers.code_graph import Lookup, nid_of
 
 BLOCKS = {
     "paragraph_open": ("paragraph", "p"),
@@ -55,7 +55,7 @@ def slug(title: str) -> str:
     return text.replace(" ", "-") or "section"
 
 
-class MarkdownGraph:
+class MarkdownTree:
     """The nodes of one Markdown file, parsed from its bytes, and its `links_to` edges
     once `resolve_edges` has a lookup for the other files. A file that is not UTF-8
     raises UnicodeDecodeError, one of PARSE_ERRORS."""
@@ -98,7 +98,7 @@ class _Builder:
     """One pass over markdown-it's block tokens: sections from the headings, a node for
     each top-level block, and the items of each top-level list."""
 
-    def __init__(self, graph: MarkdownGraph, text: str):
+    def __init__(self, graph: MarkdownTree, text: str):
         self.graph = graph
         lines = re.split(r"\r\n|\r|\n", text)
         if lines and not lines[-1]:

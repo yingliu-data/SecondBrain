@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from index_mcp.graph import PARSE_ERRORS, FileGraph, _py_files
+from ast_everything.parsers import PARSE_ERRORS, iter_files
+from ast_everything.parsers.code_graph import CodeGraph
 
 
 def build(repo: Path) -> tuple[dict, set, dict]:
@@ -11,10 +12,10 @@ def build(repo: Path) -> tuple[dict, set, dict]:
     file first, then each file's edges with a lookup over all of them. Returns the nodes
     by ID, the (type, source, target) edges, and the parse error of each skipped file."""
     graphs, skipped = {}, {}
-    for path in _py_files(repo):
+    for path in iter_files(repo):
         rel = path.relative_to(repo).as_posix()
         try:
-            graphs[rel] = FileGraph(rel, path.read_bytes())
+            graphs[rel] = CodeGraph("code", rel, path.read_bytes())
         except PARSE_ERRORS as e:
             skipped[rel] = f"{type(e).__name__}: {e}"
     nodes = {nid: fields for graph in graphs.values() for nid, fields in graph.nodes.items()}
@@ -61,7 +62,7 @@ def test_file_node_holds_its_module_level_text(repo):
     assert utils["text"] == "CONSTANT = 1" + "\n" * 8
     assert nodes["code/pkg/sub/tools.py"]["text"] == "LIMIT = 10\n\n"
     assert nodes["code"]["text"] == "" and nodes["code"]["start_line"] is None
-    assert FileGraph("pkg/Config.py", b"X = 1\n").nodes["code/pkg/Config.py"]["names"] == ["config.py"]
+    assert CodeGraph("code", "pkg/Config.py", b"X = 1\n").nodes["code/pkg/Config.py"]["names"] == ["config.py"]
 
 
 def test_edges(repo):

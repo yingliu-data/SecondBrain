@@ -1,4 +1,4 @@
-"""The read side of the store: the four search layers, a graph walk, the text
+"""The read side of the store: the indexed sources, the four search layers, a graph walk, the text
 of an entity, and what changed in a time range.
 
 `search` tries the exact ID, the name, Atlas Search over names, and chunk
@@ -18,7 +18,7 @@ import logging
 import re
 from datetime import datetime, timezone
 
-from index_mcp.store import Store, query_filter
+from ast_everything.store import Store, query_filter
 
 log = logging.getLogger(__name__)
 
@@ -269,3 +269,14 @@ def _changed_at(node: dict, window: dict) -> datetime:
     """The latest of the node's timestamps inside `window`."""
     moments = (node[field] for field in TIMESTAMPS)
     return max(moment for moment in moments if moment and window.get("$gte", moment) <= moment <= window.get("$lte", moment))
+
+
+def sources(store: Store) -> list[dict]:
+    """Each indexed source with its count of present files and of files skipped for a parse error."""
+    rows = store.files.aggregate([
+        {"$match": {"removed_at": None}},
+        {"$group": {"_id": "$source", "files": {"$sum": 1},
+                    "skipped": {"$sum": {"$cond": [{"$eq": ["$hash", None]}, 1, 0]}}}},
+        {"$sort": {"_id": 1}},
+    ])
+    return [{"source": row["_id"], "files": row["files"], "skipped": row["skipped"]} for row in rows]

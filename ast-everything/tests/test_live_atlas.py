@@ -1,7 +1,7 @@
 """The real store: Atlas Search, automated embedding and vector search over the fixture repo.
 
 Needs the `MONGODB_*` variables (`.env`) and a cluster that allows the Atlas Search
-indexes of `atlas/*.json`. Run with `INDEX_MCP_LIVE=1`; skipped otherwise. It writes
+indexes of `atlas/*.json`. Run with `AST_EVERYTHING_LIVE=1`; skipped otherwise. It writes
 into a throw-away database named after the run and drops it at the end.
 """
 from __future__ import annotations
@@ -13,11 +13,11 @@ import uuid
 import pytest
 from pymongo import MongoClient
 
-from index_mcp.indexer import sync
-from index_mcp.search import search
-from index_mcp.store import Store, settings, uri
+from ast_everything.indexer import sync
+from ast_everything.search import search
+from ast_everything.store import Store, settings, uri
 
-pytestmark = pytest.mark.skipif(os.environ.get("INDEX_MCP_LIVE") != "1", reason="set INDEX_MCP_LIVE=1 to run against Atlas")
+pytestmark = pytest.mark.skipif(os.environ.get("AST_EVERYTHING_LIVE") != "1", reason="set AST_EVERYTHING_LIVE=1 to run against Atlas")
 
 SUM = "code/pkg/utils.py:calculate_sum@v1"
 WAIT_S = 600
@@ -27,7 +27,7 @@ WAIT_S = 600
 def live_store():
     values = settings()
     client = MongoClient(uri(values), tz_aware=True)
-    name = f"index_mcp_test_{uuid.uuid4().hex[:8]}"
+    name = f"ast_everything_test_{uuid.uuid4().hex[:8]}"
     store = Store(client, name)
     store.ensure_indexes()
     store.ensure_search_indexes()

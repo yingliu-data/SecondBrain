@@ -183,3 +183,26 @@ def test_restore_while_running_is_an_error(guest_root, session_dir):
             sb.restore(session_dir)
     finally:
         sb.stop()
+
+
+def test_guest_environment_has_no_mongodb_credentials(guest_root, session_dir, monkeypatch):
+    """The host's MONGODB_* variables (the ast_index skill's) never reach the guest's shell."""
+    monkeypatch.setenv("MONGODB_PASSWORD", "secret")
+    monkeypatch.setenv("SB_TEST_VISIBLE", "1")
+    (guest_root / "guest" / "main.py").write_text(
+        "import json, os, sys, time\n"
+        "log = sys.argv[sys.argv.index('--log-dir') + 1]\n"
+        "json.dump(sorted(os.environ), open(os.path.join(log, 'env.json'), 'w'))\n"
+        "time.sleep(30)\n")
+    sb = LocalSandbox(guest_root=guest_root)
+    sb.start(session_dir)
+    try:
+        out = session_dir / "guest" / "env.json"
+        deadline = time.monotonic() + 5
+        while not (out.exists() and out.read_text().endswith("]")):
+            assert time.monotonic() < deadline, "guest did not write its environment"
+            time.sleep(0.02)
+        names = json.loads(out.read_text())
+        assert "SB_TEST_VISIBLE" in names and not any(n.startswith("MONGODB_") for n in names)
+    finally:
+        sb.stop()

@@ -43,14 +43,17 @@ Four deployable pieces, all in this repo:
 | Host / API | [agent-api/](agent-api/) | the `agent-api` container |
 | MCP gateway | [mcp-gateway/](mcp-gateway/) | the `mcp-gateway` container |
 | Workflows | [flows/](flows/) | imported by agent-api (Temporal worker in-process) |
+| AST index | [ast-everything/](ast-everything/) | a library imported by agent-api's `ast_index` host skill |
 
-The four are members of **one uv workspace** (root `pyproject.toml`, one
+The five are members of **one uv workspace** (root `pyproject.toml`, one
 `uv.lock`). `harness/protocol` is shared by the guest, agent-api and the
-gateway; `flows` is used only by agent-api.
+gateway; `flows` and `ast-everything` are used only by agent-api.
 
-[index-mcp/](index-mcp/) is not a member: it is a standalone uv project with
-its own `uv.lock`, an MCP server for code search over a MongoDB Atlas store
-that runs on the host and is an upstream of mcp-gateway (see its README).
+`ast-everything` parses Python and Markdown files into add-only, versioned
+nodes and edges in MongoDB Atlas and searches them. agent-api offers it as
+host tools (`ast_index`, `ast_search`, `ast_traverse`, `ast_retrieve`, …,
+[agent-api/app/skills/ast_index/](agent-api/app/skills/ast_index/)), so the
+Atlas credentials stay in agent-api and the guest never sees them (see its README).
 
 ## 2. Hard rules (the design depends on them)
 

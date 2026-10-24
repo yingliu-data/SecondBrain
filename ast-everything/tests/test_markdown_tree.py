@@ -7,7 +7,7 @@ import pytest
 
 from ast_everything.indexer import sync
 from ast_everything.parsers import PARSE_ERRORS, iter_files
-from ast_everything.parsers.markdown import MarkdownGraph, slug
+from ast_everything.parsers.markdown_tree import MarkdownTree, slug
 from ast_everything.search import retrieve, search, sources, traverse
 
 GUIDE = textwrap.dedent("""\
@@ -45,8 +45,8 @@ GUIDE = textwrap.dedent("""\
 DOC = "notes/docs/guide.md"
 
 
-def parse(text: str = GUIDE, rel: str = "docs/guide.md", lookup=lambda nid: None) -> MarkdownGraph:
-    graph = MarkdownGraph("notes", rel, text.encode())
+def parse(text: str = GUIDE, rel: str = "docs/guide.md", lookup=lambda nid: None) -> MarkdownTree:
+    graph = MarkdownTree("notes", rel, text.encode())
     graph.resolve_edges(lookup)
     return graph
 
@@ -123,7 +123,7 @@ def test_no_heading_keeps_the_whole_file_in_the_document():
 
 def test_text_that_is_not_utf8_is_a_parse_error():
     with pytest.raises(PARSE_ERRORS):
-        MarkdownGraph("notes", "bad.md", b"\xff\xfe# x\n")
+        MarkdownTree("notes", "bad.md", b"\xff\xfe# x\n")
 
 
 @pytest.fixture

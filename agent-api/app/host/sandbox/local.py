@@ -51,6 +51,7 @@ from app.host.sandbox.firecracker import _ms_since, _unlink, write_json
 logger = logging.getLogger("host.sandbox")
 
 LOCAL_SNAPSHOT_MARKER = "LOCAL_SNAPSHOT.json"
+GUEST_HIDDEN_ENV_PREFIXES = ("MONGODB_",)   # never in the guest process's environment
 
 
 class _Frozen:
@@ -147,7 +148,8 @@ class LocalSandbox(Sandbox):
             "--workspace", str(workspace),
             *self.extra_args,
         ]
-        env = dict(os.environ)
+        # The host's MongoDB credentials are for the ast_index skill, not the guest.
+        env = {k: v for k, v in os.environ.items() if not k.startswith(GUEST_HIDDEN_ENV_PREFIXES)}
         env["PYTHONPATH"] = str(self.guest_root) + (
             os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
         env.setdefault("PYTHONUNBUFFERED", "1")

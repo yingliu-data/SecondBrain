@@ -53,6 +53,7 @@ import time
 from typing import Callable, Iterable, Iterator
 
 from protocol.canonical import is_int
+from protocol.limits import DEFAULT_LIMITS
 from protocol.ports import LLM
 from protocol.sse import iter_sse_data
 from protocol.usage import USAGE_KEYS, normalise_usage
@@ -311,7 +312,7 @@ class Provider:
             "messages": list(request.messages),
             "stream": bool(stream),
             "temperature": params.pop("temperature", 0),
-            "max_tokens": params.pop("max_tokens", 512),
+            "max_tokens": params.pop("max_tokens", DEFAULT_LIMITS["max_tokens"]),
             "chat_template_kwargs": {"enable_thinking": self.enable_thinking},
         }
         if stream:

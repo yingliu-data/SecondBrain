@@ -12,11 +12,13 @@ dependencies = [
     "ddgs>=9.0",
     "secondbrain-harness",
     "flows",
+    "ast-everything",
     "temporalio>=1.0,<2",
 ]
 
 [dependency-groups]
 dev = [
+    "mongomock>=4.3",
     "pytest>=8",
     "pytest-asyncio>=0.24",
     "pytest-xdist>=3",
@@ -29,3 +31,4 @@ package = false
 # Workspace members (root pyproject.toml); installed editable.
 secondbrain-harness = { workspace = true }
 flows = { workspace = true }
+ast-everything = { workspace = true }

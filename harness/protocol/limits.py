@@ -37,7 +37,7 @@ DEFAULT_LIMITS = {
     "wall_clock_s": 600,
     "max_tools": 10,
     "max_turns": 12,
-    "max_tokens": 512,
+    "max_tokens": 4096,
     "op_timeout_s": {"guest": 120, "host": 120, "device": 60, "mcp": 300},
     "spill_threshold": 2000,
     "spill_quota_bytes": 50_000_000,

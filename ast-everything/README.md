@@ -1,109 +1,112 @@
-# index-mcp
+# ast-everything
 
-An MCP server over a MongoDB Atlas store of code entities, after LocAgent, so the
-agent finds code without reading every file. The indexer writes the store; the server
-only reads it. It runs on the host, like the wcc servers, and mcp-gateway reaches it
-as an upstream. It is a standalone uv project with its own `uv.lock`, not a member of
-the root workspace.
+A library that turns Python and Markdown files into AST-style nodes and edges in a
+MongoDB Atlas store, versioned and add-only, and searches them, so an agent finds
+code and documents without reading every file. It is a member of the uv workspace;
+agent-api offers it to agents as the host tools of its `ast_index` skill
+([agent-api/app/skills/ast_index/](../agent-api/app/skills/ast_index/)), which hold
+the Atlas credentials, so the guest never sees them.
 
 ## The store
 
-One database (`MONGODB_DB`, default `secondbrain`) with four collections, shared by
-every source so Markdown notes can join later: `files` (one manifest row per indexed
-file: hash, size, mtime, versions, `removed_at`, `skipped_reason`), `nodes` (one
-document per version of a directory, file, class or function), `edges` (`contains`,
-`imports`, `invokes`, `inherits`, and `supersedes` between versions) and `chunks` (the
-text Atlas embeds, one per class or function version). IDs are `code/<path>` for a
-file and `code/<path>:<qualified name>` for an entity; a version is `<id>@v<n>`.
+One database (`MONGODB_DB`, default `secondbrain`) with four collections shared by
+every source. A source is one indexed project, folder or document set, and its name
+heads every ID, so two sources never share a node:
 
-Indexing is add-only: a changed function gets a new version and a `supersedes` edge,
-a removed file or function gets `removed_at`, a restored file continues its versions,
-and nothing is deleted. When a file gains or loses an entity, or is removed, the edges
-of the files that import from it are resolved again, so an unchanged importer follows
-the change; an importer indexed before the target's file existed gets the edge when it
-next changes. A file node's text is its module-level code; the text of a class or
-function is its own.
+- `files`: one manifest row per indexed file (hash, size, mtime, versions,
+  `removed_at`, `skipped_reason`);
+- `nodes`: one document per version of a node;
+- `edges`: `contains`, `imports`, `invokes`, `inherits`, `links_to`, and `supersedes`
+  between versions, each with the source and file it was parsed from;
+- `chunks`: the text Atlas embeds, one per version of a chunked node.
+
+A version's ID is `<id>@v<n>`. Indexing is add-only: a changed node gets a new version
+and a `supersedes` edge, a removed file or node gets `removed_at`, a restored file
+continues its versions, and nothing is deleted. When a file gains or loses a node, or
+is removed, the edges of the files that point into it are resolved again; a file
+indexed before its target existed gets the edge when it next changes.
+
+## The parsers
+
+A parser per file type ([ast_everything/parsers/](ast_everything/parsers/)), chosen by
+suffix. The walk skips hidden folders, virtualenvs and installed packages.
+
+**Python** (`.py`, [code_graph.py](ast_everything/parsers/code_graph.py)), modeled on
+LocAgent's dependency graph:
+
+| Node | ID | Text |
+|---|---|---|
+| `directory` | `<source>/<folder>` | none |
+| `file` | `<source>/<path>` | the module-level lines |
+| `class`, `function` | `<source>/<path>:Qualified.name` | its own lines |
+
+Edges: `contains`, `imports`, `invokes`, `inherits`. Classes and functions are
+chunked.
+
+**Markdown** (`.md`, `.markdown`, [markdown_tree.py](ast_everything/parsers/markdown_tree.py)),
+parsed with markdown-it (CommonMark and tables), down to blocks:
+
+| Node | ID | Text |
+|---|---|---|
+| `document` | `<source>/<path>` | front matter and the lines before the first heading |
+| `section` | `<source>/<path>#setup/usage` (heading slugs, as GitHub makes anchors) | the heading and its blocks up to the next heading |
+| `paragraph`, `list`, `table`, `code`, `quote`, `html` | `<section>:p1`, `:list2`, `:code1`, … | the block's lines |
+| `list_item` | `<list>.item3` | the item's lines |
+
+Edges: `contains` (document, sections, subsections, blocks, list items) and `links_to`
+(from a block to a section of the same file by `#anchor`, or to another indexed file
+by relative link). Documents and sections are chunked; blocks are not embedded and
+are found by ID, by traversal, or through their section.
 
 ## Credentials
 
-Four variables, in `.env` at the repository root (see `.env.example`) or in the
-environment: `MONGODB_USERNAME`, `MONGODB_PASSWORD`, `MONGODB_HOST` (the cluster host
-alone, the part after `@` in the connection string that Atlas shows under Clusters,
-Connect; the URI is built from it) and `MONGODB_DB`. The indexer needs read and write;
-give the server a read-only Atlas user (Database Access, role `read` on the database)
-in the environment it starts from, since the same variables serve both.
+Four variables, from the environment or else from `.env` at the repository root (see
+`.env.example`): `MONGODB_USERNAME`, `MONGODB_PASSWORD`, `MONGODB_HOST` (the cluster
+host alone, the part after `@` in the connection string that Atlas shows under
+Clusters, Connect) and `MONGODB_DB`. The `.env` is read, never loaded into the
+environment, and the local sandbox strips `MONGODB_*` from the guest's environment.
+Indexing needs a user with `readWrite` on the database. Atlas must allow the host's IP
+(Network Access): an IP it does not allow fails with `TLSV1_ALERT_INTERNAL_ERROR`.
 
-## Index a folder
+## The agent's tools (`ast_index` skill)
 
-```bash
-cd index-mcp && uv sync
-uv run python -m index_mcp.indexer sync /path/to/repo --source code
-```
-
-It creates the ordinary indexes and the three Atlas Search indexes of [atlas/](atlas/)
-(the vector index embeds every chunk with `voyage-4`, which Atlas bills per token),
-walks every `.py` file under the folder (not hidden folders, virtualenvs or installed
-packages), and prints the counts. Run it again after the code changes: an unchanged
-folder inserts nothing. A file that does not parse is recorded with its reason and
-tried again next time.
-
-## Run the server
-
-```bash
-INDEX_MCP_TOKEN=<token> uv run python -m index_mcp.server --host 0.0.0.0 --port 8770
-```
-
-The gateway container reaches the host only on a non-loopback address, hence
-`--host 0.0.0.0` (the default is `127.0.0.1`). The server serves the indexed source
-code, so on any host but loopback it does not start without `INDEX_MCP_TOKEN`; on
-loopback without it, requests are not checked.
-
-Tools, with one output shape for every entity (ID, type, location, status `latest`,
-`superseded` or `removed`, and a preview or the text):
-
-- `SearchEntity(query, scope, node_types, path_prefix, time_range, history, detail, limit)`:
+- `ast_index(path | workspace_path | git_url, name)`: indexes a folder or one file on
+  the host, in the session's workspace (as of the end of the last task), or a git repo
+  cloned under `AST_REPOS_DIR` (default `data/ast-everything/repos`), as the source
+  `name` (default: made from the folder or repo name). It runs in the background and
+  returns a `job_id`; one job per source runs at a time. In the agent-api container a
+  host path is visible only when mounted.
+- `ast_index_status(job_id)`: the job's state (`running`, `done`, `failed`), its counts
+  or its error.
+- `ast_sources()`: the indexed sources with their file counts.
+- `ast_search(query, scope, node_types, path_prefix, time_range, history, detail, limit)`:
   four layers, exact ID, name, keyword over names (Atlas Search), then content by
-  keyword and meaning (vector search over the embedded chunks); the first layer with
-  hits answers. Latest versions only unless `history`. If vector search fails, the
-  content layer answers by keyword and logs a warning.
-- `TraverseGraph(start_ids, direction, hops, node_types, edge_types, max_fanout)`:
-  the entities within `hops` edges, one indexed query per hop.
-- `RetrieveEntity(ids, detail, context_lines, page)`: the text with its line range
-  (none for a file node, whose text is only its module-level lines), 200 lines a page;
-  a superseded version names the newest one.
-- `SearchByTime(time_range, scope, node_types, limit)`: what was added, changed or
-  removed in the range, each with the moment of that change.
+  keyword and meaning (vector search over the chunks); the first layer with hits
+  answers. Latest versions only unless `history`.
+- `ast_traverse(start_ids, direction, hops, node_types, edge_types, max_fanout)`: the
+  nodes within `hops` edges, one indexed query per hop.
+- `ast_retrieve(ids, detail, context_lines, page)`: the text with its line range,
+  200 lines a page; a superseded version names the newest one.
+- `ast_search_by_time(time_range, scope, node_types, limit)`: what was added, changed
+  or removed in the range.
 
 `limit` is 1 to 100, `hops` 1 to 5, `max_fanout` 1 to 100 and `context_lines` 0 to 100;
-a value outside its bounds is refused with an error that names the argument.
+a value outside its bounds is refused with an error that names the argument. When
+MongoDB is down or the credentials are wrong, the tool answers with an error that says so.
 
-When MongoDB is down or the credentials are wrong, each tool returns an error that
-says so and the server stays up.
+The first index job creates the ordinary indexes and the three Atlas Search indexes of
+[ast_everything/atlas/](ast_everything/atlas/). The vector index embeds every new chunk
+with `voyage-4`, which Atlas bills per token.
 
-## Gateway entry
+## From the command line
 
-Add this upstream to `mcp-gateway/data/gateway.json`, with `auth_token` equal to
-`INDEX_MCP_TOKEN`, add `"index-mcp"` to the tenant's `upstreams`, and restart
-mcp-gateway (`docker compose restart mcp-gateway`). It is also in
-[gateway.json.example](../mcp-gateway/gateway.json.example).
-
-```json
-"index-mcp": {
-  "url": "http://host.docker.internal:8770/mcp",
-  "auth_token": "<must match INDEX_MCP_TOKEN on the index-mcp server>",
-  "timeout_s": 600,
-  "allow_private": true
-}
+```bash
+uv run python -m ast_everything.indexer sync /path/to/project [--source NAME]
 ```
-
-The gateway names the tools `index-mcp__<tool>`, and the agent calls them through
-`call_tool` (for example `index-mcp__SearchEntity`).
 
 ## Test
 
 ```bash
-cd index-mcp && uv run pytest -q                              # offline, on mongomock
-INDEX_MCP_LIVE=1 uv run pytest -q tests/test_live_atlas.py    # against Atlas, in a throw-away database
+cd ast-everything && uv run pytest -n auto -q                        # offline, on mongomock
+AST_EVERYTHING_LIVE=1 uv run pytest -q tests/test_live_atlas.py      # against Atlas, in a throw-away database
 ```
-
-CI does not run these tests; its lint job (`uvx ruff@0.14.0 check .`) covers the folder.

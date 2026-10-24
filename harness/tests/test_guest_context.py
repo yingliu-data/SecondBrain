@@ -216,6 +216,22 @@ def test_denied_call_gets_a_filler_tool_message():
                                 "content": context.MISSING_TOOL_MESSAGE}
 
 
+def test_empty_assistant_message_renders_with_filler_text():
+    """A response cut off at max_tokens before any text or call is committed
+    as content None; rendered verbatim, providers refuse every later turn."""
+    cfg = make_cfg()
+    log = Log(SID, tools=cfg.tools)
+    log.start()
+    log.input("in-1", "do it")
+    log.turn("t1")
+    log.response("t1", content=None, finish_reason="length")
+    log.input("in-2", "again", kind="follow_up")
+    state = fold(log.events)
+    req = context.build_request(state, cfg, 1)
+    assert [m["role"] for m in req.messages] == ["system", "user", "assistant", "user"]
+    assert req.messages[2] == {"role": "assistant", "content": context.EMPTY_ASSISTANT_MESSAGE}
+
+
 def test_open_call_shows_the_placeholder_the_fold_commits():
     """A turn started with a call open (async mode) shows it as the fold's
     PLACEHOLDER tool message, never the MISSING_TOOL_MESSAGE filler."""

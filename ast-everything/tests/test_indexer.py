@@ -4,9 +4,9 @@ from __future__ import annotations
 import pytest
 
 from conftest import NODE_FIELDS
-from index_mcp import indexer
-from index_mcp.indexer import index_files, main, sync
-from index_mcp.store import Store
+from ast_everything import indexer
+from ast_everything.indexer import index_files, main, sync
+from ast_everything.store import Store
 
 UTILS = "pkg/utils.py"
 SHAPES = "pkg/shapes.py"
@@ -135,7 +135,7 @@ def test_importer_follows_a_target_that_appears_or_goes(store, repo, monkeypatch
     assert {(kind, src, target) for kind, src in into_target} <= active_from_main()
     assert store.edges.count_documents({"src_path": "main.py", "active": False}) == 2
     reshaped = []
-    monkeypatch.setattr(indexer, "_resolve_importers", lambda store, root, nids, indexed: reshaped.append(nids))
+    monkeypatch.setattr(indexer, "_resolve_importers", lambda store, source, root, nids, indexed: reshaped.append(nids))
     edit(repo, UTILS, "    return a + b\n", "    return b + a\n")
     run(store, repo)
     assert reshaped == [set()]
@@ -213,13 +213,27 @@ def test_broken_file_reported(store, repo):
 
 
 def test_sync_command_prints_counts(store, repo, monkeypatch, capsys):
-    """`python -m index_mcp.indexer sync <folder> --source code` prints the counts."""
+    """`python -m ast_everything.indexer sync <folder> --source code` prints the source and the counts."""
     monkeypatch.setattr(Store, "connect", classmethod(lambda cls: store))
     main(["sync", str(repo), "--source", "code"])
-    assert capsys.readouterr().out == "files: 12\nunchanged: 0\nskipped: 2\nnodes inserted: 35\nnodes removed: 0\n"
+    assert capsys.readouterr().out == ("source: code\nfiles: 12\nunchanged: 0\nskipped: 2\n"
+                                       "nodes inserted: 35\nnodes removed: 0\n")
     assert "nid_1" in store.nodes.index_information()
 
 
-def test_only_code_is_indexed(store, repo):
-    with pytest.raises(ValueError, match="docs"):
-        index_files(store, "docs", repo, [])
+def test_sync_command_names_the_source_after_the_folder(store, repo, monkeypatch, capsys):
+    monkeypatch.setattr(Store, "connect", classmethod(lambda cls: store))
+    main(["sync", str(repo)])
+    assert capsys.readouterr().out.startswith("source: repo\n")
+    assert latest(store, "repo/main.py")
+
+
+@pytest.mark.parametrize("name", ["", "a/b", "a#b", "a:b", "-lead", "x" * 101])
+def test_a_source_name_that_cannot_head_an_id_is_refused(store, repo, name):
+    with pytest.raises(ValueError, match="source name"):
+        index_files(store, name, repo, [])
+
+
+def test_source_name_from_a_folder_name():
+    assert indexer.source_name("My Project (v2)") == "My-Project-v2"
+    assert indexer.source_name("...") == "source"

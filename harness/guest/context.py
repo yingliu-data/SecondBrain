@@ -76,7 +76,9 @@ try:  # the sibling package; TOOL_DEFINITIONS may still be a stub ({}).
 except Exception:  # pragma: no cover - import-time safety only
     TOOL_DEFINITIONS = {}
 
-MISSING_TOOL_MESSAGE = "error: this tool call was not run (tool not offered in this session)"
+MISSING_TOOL_MESSAGE = ("error: this tool call was not run (tool not offered in this session, "
+                        "or the response was cut off at the token limit)")
+EMPTY_ASSISTANT_MESSAGE = "(no output: the response was cut off at the token limit)"
 CURRENT_TIME_TOKEN = "{current_time}"
 CHARS_PER_TOKEN = 4
 # sampling params never sent to the model as-is: `stream` is the transport
@@ -306,6 +308,10 @@ def _render_item(message: dict, preambles: dict) -> dict:
     if role == "tool":
         return {"role": "tool", "tool_call_id": message.get("tool_call_id"),
                 "content": message.get("content") or ""}
+    if not message.get("content") and not message.get("tool_calls"):
+        # a response cut off at max_tokens before any text or call: providers
+        # refuse an empty assistant message, so every later turn would fail
+        return {**message, "content": EMPTY_ASSISTANT_MESSAGE}
     return dict(message)   # assistant: verbatim
 
 

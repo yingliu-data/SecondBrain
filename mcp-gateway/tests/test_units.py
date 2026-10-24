@@ -96,8 +96,8 @@ def test_ssrf():
 
 def test_example_config_loads():
     cfg = GatewayConfig.load(ROOT / "gateway.json.example")
-    assert set(cfg.upstreams) == {"wcc-events", "wcc-mentorship", "wcc-analytic", "index-mcp"}
-    assert Policy(cfg).upstreams_for("default") == ["wcc-events", "wcc-mentorship", "wcc-analytic", "index-mcp"]
+    assert set(cfg.upstreams) == {"wcc-events", "wcc-mentorship", "wcc-analytic"}
+    assert Policy(cfg).upstreams_for("default") == ["wcc-events", "wcc-mentorship", "wcc-analytic"]
     assert set(cfg.tenants) == {"default"}
 
 

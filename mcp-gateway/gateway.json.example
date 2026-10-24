@@ -19,16 +19,10 @@
       "auth_token": "<must match WCC_MCP_TOKEN_ANALYTIC>",
       "timeout_s": 1200,
       "allow_private": true
-    },
-    "index-mcp": {
-      "url": "http://host.docker.internal:8770/mcp",
-      "auth_token": "<must match INDEX_MCP_TOKEN on the index-mcp server>",
-      "timeout_s": 600,
-      "allow_private": true
     }
   },
   "tenants": {
-    "default": {"upstreams": ["wcc-events", "wcc-mentorship", "wcc-analytic", "index-mcp"], "allow": ["*"], "deny": [], "promoted": [], "max_concurrent": 2}
+    "default": {"upstreams": ["wcc-events", "wcc-mentorship", "wcc-analytic"], "allow": ["*"], "deny": [], "promoted": [], "max_concurrent": 2}
   },
   "input_expires_s": 3600
 }

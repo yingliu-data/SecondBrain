@@ -7,9 +7,9 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from index_mcp.indexer import sync
-from index_mcp.search import by_time, retrieve, search, traverse
-from index_mcp.store import search_index_specs
+from ast_everything.indexer import sync
+from ast_everything.search import by_time, retrieve, search, traverse
+from ast_everything.store import search_index_specs
 
 UTILS = "pkg/utils.py"
 SUM = f"code/{UTILS}:calculate_sum"
@@ -89,7 +89,7 @@ def test_layer4_content(indexed):
 def test_vector_failure_falls_back(indexed, caplog):
     """Criterion: when vector search fails, layer 4 answers by keyword alone and logs a warning."""
     indexed.vector_error = RuntimeError("no vector index")
-    with caplog.at_level(logging.WARNING, logger="index_mcp.search"):
+    with caplog.at_level(logging.WARNING, logger="ast_everything.search"):
         found = search(indexed, "a + b", detail="fold")
     assert found["layer"] == 4 and ids(found) == [f"{SUM}@v1"]
     assert "vector search failed" in caplog.text and "no vector index" in caplog.text

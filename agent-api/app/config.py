@@ -160,6 +160,8 @@ SESSION_BACKEND = _setting("SESSION_BACKEND", "dir")
 SESSION_DB_PATH = _setting("SESSION_DB_PATH", "data/conversations.db")
 SESSIONS_ROOT = _setting("SESSIONS_ROOT", "data/sessions")   # dir backend
 USERS_ROOT = _setting("USERS_ROOT", "data/users")            # user-scope memory/profile
+# ast_index skill: where `ast_index(git_url=...)` keeps its clones
+AST_REPOS_DIR = _setting("AST_REPOS_DIR", "data/ast-everything/repos")
 
 SYSTEM_PROMPT = """You are a personal AI assistant running on the user's private server.
 You have tools that execute on the user's iPhone (calendar, reminders, contacts, clipboard)

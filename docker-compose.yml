@@ -63,6 +63,11 @@ services:
       - MAX_INPUT_LENGTH=4096
       - MCP_GATEWAY_URL=http://mcp-gateway:8090
       - INTERNAL_TOKEN=${INTERNAL_TOKEN}          # shared bearer with mcp-gateway (both directions)
+      # ast_index skill (ast-everything): the MongoDB Atlas store, from .env
+      - MONGODB_USERNAME=${MONGODB_USERNAME:-}
+      - MONGODB_PASSWORD=${MONGODB_PASSWORD:-}
+      - MONGODB_HOST=${MONGODB_HOST:-}
+      - MONGODB_DB=${MONGODB_DB:-secondbrain}
       # Harness tenants run through the Temporal session workflow (and the
       # worker runs in this process); unset TEMPORAL_ADDRESS -> direct path.
       - TEMPORAL_ADDRESS=temporal:7233

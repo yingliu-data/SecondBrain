@@ -45,12 +45,14 @@ COPY harness/pyproject.toml harness/
 COPY flows/pyproject.toml flows/
 COPY agent-api/pyproject.toml agent-api/
 COPY mcp-gateway/pyproject.toml mcp-gateway/
+COPY ast-everything/pyproject.toml ast-everything/
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --package agent-api --no-install-workspace
 
 COPY harness/protocol harness/protocol
 COPY harness/guest harness/guest
 COPY flows/flows flows/flows
+COPY ast-everything/ast_everything ast-everything/ast_everything
 COPY agent-api/app agent-api/app
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --package agent-api

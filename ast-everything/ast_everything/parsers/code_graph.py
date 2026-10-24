@@ -1,9 +1,10 @@
-"""Code graph of one Python file, after LocAgent.
+"""Code graph of one Python file, modeled on LocAgent's dependency graph (its node and edge
+types; the code is this package's own).
 
 Nodes are directories, files, classes and functions, keyed by logical ID:
-`code/<path>` for a directory (`code` for the indexed root) or a file, and
-`code/<path>:Qualified.name` for a class or function (a method is
-`code/file.py:Class.method`). Each node holds the fields of the shared schema
+`<source>/<path>` for a directory (`<source>` for the indexed root) or a file,
+and `<source>/<path>:Qualified.name` for a class or function (a method is
+`<source>/file.py:Class.method`). Each node holds the fields of the shared schema
 (`store.node`): its type, title, path, heading path, the names layer 2
 matches, start and end lines, and its source text.
 
@@ -18,25 +19,21 @@ from __future__ import annotations
 
 import ast
 import io
-import os
 import posixpath
 import re
 import tokenize
 from collections.abc import Callable
-from pathlib import Path
 
-SOURCE = "code"
 DEFS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
 BLOCKS = (ast.If, ast.Try, ast.TryStar, ast.ExceptHandler, ast.With, ast.AsyncWith)
-SKIP_DIRS = {"site-packages", "node_modules"}
 PARSE_ERRORS = (SyntaxError, ValueError, RecursionError, MemoryError)
 
 Lookup = Callable[[str], str | None]
 
 
-def nid_of(rel: str) -> str:
-    """`pkg/utils.py` -> `code/pkg/utils.py`; the root folder `.` -> `code`."""
-    return posixpath.normpath(f"{SOURCE}/{rel}")
+def nid_of(source: str, rel: str) -> str:
+    """`code`, `pkg/utils.py` -> `code/pkg/utils.py`; the root folder `.` -> `code`."""
+    return posixpath.normpath(f"{source}/{rel}")
 
 
 def is_test_file(path: str) -> bool:
@@ -45,28 +42,15 @@ def is_test_file(path: str) -> bool:
     return bool({"test", "tests"} & set(folders)) or name.startswith("test_") or name.endswith("_test.py")
 
 
-def _py_files(repo: Path):
-    """`.py` files in a stable order, without the folders that `_skip_dir` names."""
-    for root, dirs, files in os.walk(repo):
-        dirs[:] = sorted(d for d in dirs if not _skip_dir(Path(root, d)))
-        for name in sorted(files):
-            if name.endswith(".py"):
-                yield Path(root, name)
-
-
-def _skip_dir(path: Path) -> bool:
-    """A hidden folder such as `.git`, a virtualenv (it holds `pyvenv.cfg`), or a
-    folder of installed packages (SKIP_DIRS)."""
-    return path.name.startswith(".") or path.name in SKIP_DIRS or (path / "pyvenv.cfg").is_file()
-
-
-class FileGraph:
+class CodeGraph:
     """The nodes of one file, parsed from its bytes, and its edges once
     `resolve_edges` has a lookup for the other files. A file that cannot be
     decoded or parsed raises one of PARSE_ERRORS."""
 
-    def __init__(self, rel: str, data: bytes):
-        self.rel = rel
+    chunked = ("class", "function")   # the node types that get a chunk for Atlas to embed
+
+    def __init__(self, source: str, rel: str, data: bytes):
+        self.source, self.rel = source, rel
         self.nodes: dict[str, dict] = {}
         self.edges: set[tuple[str, str, str]] = set()
         text = data.decode(tokenize.detect_encoding(io.BytesIO(data).readline)[0])
@@ -100,20 +84,21 @@ def _child_id(parent: str, name: str) -> str:
     return f"{parent}{'.' if ':' in parent else ':'}{name}"
 
 
-def _add_file(graph: FileGraph, rel: str, text: str) -> None:
+def _add_file(graph: CodeGraph, rel: str, text: str) -> None:
     # The line breaks that ast counts; str.splitlines also splits on \f, \x85 and others.
     lines = re.split(r"\r\n|\r|\n", text)
     if not lines[-1]:
         lines.pop()
     folder = posixpath.dirname(rel) or "."
-    graph.nodes[nid_of(folder)] = _node("directory", posixpath.basename(folder), folder)
-    graph.nodes[nid_of(rel)] = _node("file", posixpath.basename(rel), rel, None, 1, len(lines))
-    graph.edges.add(("contains", nid_of(folder), nid_of(rel)))
-    _add_defs(graph, nid_of(rel), graph.tree.body, lines)
-    graph.nodes[nid_of(rel)]["text"] = _own_text(graph, nid_of(rel), lines)
+    file, parent = nid_of(graph.source, rel), nid_of(graph.source, folder)
+    graph.nodes[parent] = _node("directory", posixpath.basename(folder), folder)
+    graph.nodes[file] = _node("file", posixpath.basename(rel), rel, None, 1, len(lines))
+    graph.edges.add(("contains", parent, file))
+    _add_defs(graph, file, graph.tree.body, lines)
+    graph.nodes[file]["text"] = _own_text(graph, file, lines)
 
 
-def _own_text(graph: FileGraph, file: str, lines: list[str]) -> str:
+def _own_text(graph: CodeGraph, file: str, lines: list[str]) -> str:
     """The module-level lines of a file: those outside its top-level classes and functions,
     so that an edit inside a function does not make a new version of the file node."""
     covered: set[int] = set()
@@ -132,7 +117,7 @@ def _defs_in(body):
             yield from _defs_in(ast.iter_child_nodes(stmt))
 
 
-def _add_defs(graph: FileGraph, parent: str, body: list[ast.stmt], lines: list[str]) -> None:
+def _add_defs(graph: CodeGraph, parent: str, body: list[ast.stmt], lines: list[str]) -> None:
     """Classes and functions defined in `body`, and the members of each class. A repeat
     of a name, such as a property setter, widens the node to hold every definition."""
     for stmt in _defs_in(body):
@@ -162,9 +147,9 @@ class _FileEdges:
     links to the top-level `f` of the module that `mod` is bound to.
     """
 
-    def __init__(self, graph: FileGraph, lookup: Lookup):
-        self.edges, self.rel, self.lookup = graph.edges, graph.rel, lookup
-        self.file = nid_of(graph.rel)
+    def __init__(self, graph: CodeGraph, lookup: Lookup):
+        self.edges, self.source, self.rel, self.lookup = graph.edges, graph.source, graph.rel, lookup
+        self.file = nid_of(graph.source, graph.rel)
         self.bound: dict[str, str] = {}   # local name -> node ID that an import bound it to
 
     def run(self, tree: ast.Module) -> None:
@@ -220,7 +205,7 @@ class _FileEdges:
     def _module(self, parts: list[str]) -> str | None:
         path = "/".join(parts)
         files = (f"{path}.py", f"{path}/__init__.py") if path else ("__init__.py",)
-        return next((nid_of(f) for f in files if self.lookup(nid_of(f))), None)
+        return next((nid_of(self.source, f) for f in files if self.lookup(nid_of(self.source, f))), None)
 
     def _defs(self, parent: str, body: list[ast.stmt]) -> None:
         cls = parent if ":" in parent else None
