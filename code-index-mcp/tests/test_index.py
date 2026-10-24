@@ -118,3 +118,29 @@ def test_index_is_private(repo):
     folder = index_dir(repo.resolve())
     assert folder.stat().st_mode & 0o777 == 0o700
     assert (folder / "graph.json").stat().st_mode & 0o777 == 0o600
+
+
+def test_load_waits_for_build(repo, monkeypatch):
+    """A load during a rebuild waits until the rebuild has written its index,
+    so it never mixes the files of two builds."""
+    build_index(str(repo))
+    entered, release = threading.Event(), threading.Event()
+    save = bm25s.BM25.save
+
+    def slow_save(self, *args, **kwargs):
+        entered.set()
+        release.wait(5)
+        return save(self, *args, **kwargs)
+    monkeypatch.setattr(bm25s.BM25, "save", slow_save)
+    build = threading.Thread(target=build_index, args=(str(repo),))
+    build.start()
+    assert entered.wait(5)
+    loaded = []
+    load = threading.Thread(target=lambda: loaded.append(load_index(str(repo))))
+    load.start()
+    load.join(0.5)
+    assert load.is_alive()
+    release.set()
+    build.join(5)
+    load.join(5)
+    assert loaded[0].search("calculate_sum")["layer"] == 2

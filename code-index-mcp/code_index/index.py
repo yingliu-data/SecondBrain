@@ -29,7 +29,8 @@ TOP_K = 10
 PREVIEW_LINES = 5
 DEF_LINE = re.compile(r"\s*(async\s+)?(def|class)\s")
 # Tool calls run in worker threads; two builds (say, a retry after a gateway
-# timeout) must not write into one index folder at once.
+# timeout) must not write into one index folder at once, and a load must not
+# read one while a build writes it.
 _BUILD_LOCK = threading.Lock()
 
 
@@ -85,15 +86,16 @@ def build_index(repo_path: str) -> dict:
 
 def load_index(repo_path: str) -> CodeIndex:
     folder = index_dir(_repo(repo_path))
-    if not folder.is_dir():
-        raise CodeIndexError("not indexed, run build_index first")
-    try:
-        manifest = json.loads((folder / "manifest.json").read_text())
-        graph = json.loads((folder / "graph.json").read_text())
-        bm25 = bm25s.BM25.load(folder / "bm25", show_progress=False)
-        return CodeIndex(manifest, graph, bm25)
-    except (OSError, ValueError, KeyError, TypeError) as e:
-        raise CodeIndexError("index damaged, rebuild it: run build_index again") from e
+    with _BUILD_LOCK:
+        if not folder.is_dir():
+            raise CodeIndexError("not indexed, run build_index first")
+        try:
+            manifest = json.loads((folder / "manifest.json").read_text())
+            graph = json.loads((folder / "graph.json").read_text())
+            bm25 = bm25s.BM25.load(folder / "bm25", show_progress=False)
+            return CodeIndex(manifest, graph, bm25)
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            raise CodeIndexError("index damaged, rebuild it: run build_index again") from e
 
 
 def _repo(repo_path: str) -> Path:
