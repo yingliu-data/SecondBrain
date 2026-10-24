@@ -1,0 +1,17 @@
+{
+  "collection": "nodes",
+  "name": "nodes_search",
+  "type": "search",
+  "definition": {
+    "mappings": {
+      "dynamic": false,
+      "fields": {
+        "names": {"type": "string"},
+        "heading_path": {"type": "string"},
+        "stem": {"type": "string"},
+        "is_latest": {"type": "boolean"},
+        "source": {"type": "token"}
+      }
+    }
+  }
+}

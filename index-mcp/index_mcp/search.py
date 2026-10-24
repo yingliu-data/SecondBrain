@@ -1,0 +1,249 @@
+"""The read side of the store: the four search layers, a graph walk, the text
+of an entity, and what changed in a time range.
+
+`search` tries the exact ID, the name, Atlas Search over names, and chunk
+content (keyword and vector, fused by reciprocal rank), and stops at the
+first layer that finds something. Every layer takes the same filters:
+`scope` (the source), `node_types`, `path_prefix`, `time_range` on
+`created_at`, and `history`, without which only the latest versions are
+seen. Each layer is one indexed query; nothing is built in memory.
+
+Every answer renders nodes in one shape for code and docs: ID, type,
+location, status (latest, superseded or removed) and, by `detail`, nothing
+more (fold), a preview, or the full text.
+"""
+from __future__ import annotations
+
+import logging
+import re
+from datetime import datetime, timezone
+
+from index_mcp.store import Store, query_filter
+
+log = logging.getLogger(__name__)
+
+PREVIEW_LINES = 5
+PAGE_LINES = 200
+RRF_K = 60   # the usual constant of reciprocal rank fusion
+VERSION_SUFFIX = re.compile(r"@v\d+$")
+DEF_LINE = re.compile(r"\s*(async\s+)?(def|class)\s")
+TIMESTAMPS = ("created_at", "superseded_at", "removed_at")
+CHUNK_FIELDS = ("is_latest", "source", "path")
+
+
+def search(store: Store, query: str, *, scope: str | None = None, node_types: list[str] | None = None,
+           path_prefix: str | None = None, time_range: list[str | None] | None = None, history: bool = False,
+           detail: str = "preview", limit: int = 10) -> dict:
+    """The results of the first layer that finds something; `layer` is None when none does."""
+    match = node_filter(scope=scope, node_types=node_types, path_prefix=path_prefix,
+                        time_range=time_range, history=history)
+    layers = (
+        lambda: store.nodes.find({**match, "$or": [{"_id": query}, {"nid": query}]}).sort("version", -1).limit(limit),
+        lambda: store.nodes.find({**match, "names": query.strip().lower()}).sort("_id").limit(limit),
+        lambda: store.keyword_names(query, match, limit),
+        lambda: _content(store, query, match, limit),
+    )
+    for layer, find in enumerate(layers, 1):
+        hits = list(find())
+        if hits:
+            return {"layer": layer, "results": [render(node, detail) for node in hits]}
+    return {"layer": None, "results": []}
+
+
+def node_filter(*, scope: str | None = None, node_types: list[str] | None = None, path_prefix: str | None = None,
+                time_range: list[str | None] | None = None, history: bool = False) -> dict:
+    match = query_filter(source=scope, path_prefix=path_prefix, latest_only=not history)
+    if node_types:
+        match["type"] = {"$in": list(node_types)}
+    if time_range and any(time_range):
+        match["created_at"] = between(time_range)
+    return match
+
+
+def between(time_range: list[str | None]) -> dict:
+    """`[start, end]` as ISO 8601 strings, one of them may be empty, as a MongoDB range."""
+    start, end = time_range
+    bounds = {"$gte": _moment(start), "$lte": _moment(end)}
+    if not any(bounds.values()):
+        raise ValueError("a time range needs a start or an end")
+    return {op: value for op, value in bounds.items() if value}
+
+
+def _moment(text: str | None) -> datetime | None:
+    if not text:
+        return None
+    moment = datetime.fromisoformat(text)
+    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+
+
+def _content(store: Store, query: str, match: dict, limit: int) -> list[dict]:
+    """Layer 4: chunks by keyword and by vector, fused by reciprocal rank, mapped to their
+    node versions; keyword results alone when vector search fails."""
+    chunk_match = {key: match[key] for key in CHUNK_FIELDS if key in match}
+    rankings = [store.keyword_text(query, chunk_match, limit)]
+    try:
+        rankings.append(store.vector(query, chunk_match, limit))
+    except Exception as exc:
+        log.warning("vector search failed, keyword results only: %s", exc)
+    scores: dict[str, float] = {}
+    for ranking in rankings:
+        for rank, chunk in enumerate(ranking, 1):
+            node_id = chunk["_id"].rsplit("#", 1)[0]
+            scores[node_id] = scores.get(node_id, 0) + 1 / (RRF_K + rank)
+    ordered = sorted(scores, key=scores.__getitem__, reverse=True)
+    nodes = {doc["_id"]: doc for doc in store.nodes.find({**match, "_id": {"$in": ordered}})}
+    return [nodes[node_id] for node_id in ordered if node_id in nodes][:limit]
+
+
+def render(node: dict, detail: str = "preview") -> dict:
+    out = {"id": node["_id"], "type": node["type"], "location": _location(node), "status": _status(node)}
+    if node["heading_path"]:
+        out["heading_path"] = node["heading_path"]
+    if detail == "preview":
+        out["preview"] = _preview(node)
+    elif detail == "full":
+        out["text"] = node["text"]
+    return out
+
+
+def _location(node: dict) -> str:
+    if node["start_line"] is None:
+        return node["path"]
+    return f"{node['path']}:{node['start_line']}-{node['end_line']}"
+
+
+def _status(node: dict) -> str:
+    if node["superseded_by"]:
+        return "superseded"
+    if node["removed_at"]:
+        return "removed"
+    return "latest"
+
+
+def _preview(node: dict) -> str:
+    """The def or class line of an entity; the first lines of anything else."""
+    lines = node["text"].split("\n")
+    if node["type"] in ("class", "function"):
+        return next((line for line in lines if DEF_LINE.match(line)), lines[0])
+    return "\n".join(lines[:PREVIEW_LINES])
+
+
+def logical_id(node_id: str) -> str:
+    """A version ID or a logical ID -> the logical ID."""
+    return VERSION_SUFFIX.sub("", node_id)
+
+
+def traverse(store: Store, start_ids: list[str], *, direction: str = "out", hops: int = 1,
+             node_types: list[str] | None = None, edge_types: list[str] | None = None,
+             max_fanout: int = 20) -> dict:
+    """The latest nodes within `hops` active edges of `start_ids`, one indexed query per hop
+    and at most `max_fanout` edges per node. `direction` is out, in or both."""
+    frontier = {logical_id(node_id) for node_id in start_ids}
+    nodes = {doc["nid"]: doc for doc in store.nodes.find({"nid": {"$in": list(frontier)}, "is_latest": True})}
+    edges: list[dict] = []
+    for _ in range(hops):
+        found = [(edge, _ends(edge, frontier, direction)[1]) for edge in _hop(store, frontier, direction, edge_types, max_fanout)]
+        query = {"nid": {"$in": list({other for _, other in found} - nodes.keys())}, "is_latest": True}
+        if node_types:
+            query["type"] = {"$in": list(node_types)}
+        reached = {doc["nid"]: doc for doc in store.nodes.find(query)}
+        nodes.update(reached)
+        edges += [{"type": edge["type"], "src": edge["src"], "dst": edge["dst"]} for edge, other in found if other in nodes]
+        frontier = set(reached)
+        if not frontier:
+            break
+    return {"nodes": [render(doc, "fold") for doc in nodes.values()], "edges": edges}
+
+
+def _hop(store: Store, frontier: set[str], direction: str, edge_types: list[str] | None, max_fanout: int) -> list[dict]:
+    """The active edges leaving (out), entering (in) or touching (both) the frontier, at most
+    `max_fanout` per frontier node, in a stable order."""
+    ids = list(frontier)
+    query: dict = {"active": True}
+    if edge_types:
+        query["type"] = {"$in": list(edge_types)}
+    if direction == "both":
+        query["$or"] = [{"src": {"$in": ids}}, {"dst": {"$in": ids}}]
+    else:
+        query["src" if direction == "out" else "dst"] = {"$in": ids}
+    taken: dict[str, int] = {}
+    kept = []
+    for edge in store.edges.find(query).sort([("src", 1), ("dst", 1)]):
+        anchor, _ = _ends(edge, frontier, direction)
+        if taken.get(anchor, 0) < max_fanout:
+            taken[anchor] = taken.get(anchor, 0) + 1
+            kept.append(edge)
+    return kept
+
+
+def _ends(edge: dict, frontier: set[str], direction: str) -> tuple[str, str]:
+    """(the end of `edge` in the frontier, the other end) for the walk's direction."""
+    if direction != "out" and edge["dst"] in frontier:
+        return edge["dst"], edge["src"]
+    return edge["src"], edge["dst"]
+
+
+def retrieve(store: Store, ids: list[str], *, detail: str = "full", context_lines: int = 0,
+             page: int = 1) -> list[dict]:
+    """The text of each ID (a version ID, or a logical ID for its latest version) with its line
+    range, `PAGE_LINES` lines a page, and the newest version's ID for a superseded node."""
+    out = []
+    for node_id in ids:
+        node = (store.nodes.find_one({"_id": node_id})
+                or store.nodes.find_one({"nid": node_id}, sort=[("is_latest", -1), ("version", -1)]))
+        if node is None:
+            out.append({"id": node_id, "error": "unknown ID"})
+            continue
+        item = render(node, detail)
+        if detail == "full":
+            lines, first = _with_context(store, node, context_lines)
+            item.update(_page(lines, first, page))
+        if node["superseded_by"]:
+            item["newest"] = store.nodes.find_one({"nid": node["nid"]}, sort=[("version", -1)])["_id"]
+        out.append(item)
+    return out
+
+
+def _with_context(store: Store, node: dict, context_lines: int) -> tuple[list[str], int]:
+    """The node's lines and its first line number, widened by `context_lines` on each side
+    from the node that contains it when that node's text is contiguous (a class is; a file
+    node holds only its module-level lines, so a top-level entity gets no context)."""
+    lines, first = node["text"].split("\n"), node["start_line"] or 1
+    if not context_lines:
+        return lines, first
+    edge = store.edges.find_one({"type": "contains", "dst": node["nid"], "active": True})
+    parent = edge and store.nodes.find_one({"nid": edge["src"], "is_latest": True})
+    if not parent or parent["start_line"] is None:
+        return lines, first
+    parent_lines = parent["text"].split("\n")
+    if len(parent_lines) != parent["end_line"] - parent["start_line"] + 1:
+        return lines, first
+    start = max(parent["start_line"], first - context_lines)
+    end = min(parent["end_line"], node["end_line"] + context_lines)
+    return parent_lines[start - parent["start_line"]:end - parent["start_line"] + 1], start
+
+
+def _page(lines: list[str], first: int, page: int) -> dict:
+    pages = max(1, -(-len(lines) // PAGE_LINES))
+    page = min(max(page, 1), pages)
+    offset = (page - 1) * PAGE_LINES
+    shown = lines[offset:offset + PAGE_LINES]
+    out = {"text": "\n".join(shown), "lines": [first + offset, first + offset + len(shown) - 1]}
+    if pages > 1:
+        out.update(page=page, pages=pages)
+    return out
+
+
+def by_time(store: Store, time_range: list[str | None], *, scope: str | None = None,
+            node_types: list[str] | None = None, limit: int = 50) -> list[dict]:
+    """The nodes added, superseded or removed in `time_range`, newest change first."""
+    window = between(time_range)
+    match = node_filter(scope=scope, node_types=node_types, history=True)
+    match["$or"] = [{field: window} for field in TIMESTAMPS]
+    changed = sorted(store.nodes.find(match), key=_changed_at, reverse=True)[:limit]
+    return [{**render(node, "fold"), "changed_at": _changed_at(node).isoformat(timespec="seconds")}
+            for node in changed]
+
+
+def _changed_at(node: dict) -> datetime:
+    return max(moment for moment in (node[field] for field in TIMESTAMPS) if moment)

@@ -1,0 +1,15 @@
+{
+  "collection": "chunks",
+  "name": "chunks_search",
+  "type": "search",
+  "definition": {
+    "mappings": {
+      "dynamic": false,
+      "fields": {
+        "text": {"type": "string"},
+        "is_latest": {"type": "boolean"},
+        "source": {"type": "token"}
+      }
+    }
+  }
+}

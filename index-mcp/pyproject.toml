@@ -1,5 +1,5 @@
 [project]
-name = "code-index-mcp"
+name = "index-mcp"
 version = "0.1.0"
 description = "MCP server: a code graph and name search over one Python repo, after LocAgent"
 requires-python = ">=3.12"
@@ -7,12 +7,14 @@ dependencies = [
     "mcp>=1.28,<2",
     "uvicorn>=0.34",
     "starlette>=0.40",
-    "bm25s>=0.2",
+    "pymongo>=4.10",
+    "python-dotenv>=1.0",
 ]
 
 [dependency-groups]
 dev = [
     "httpx>=0.28",
+    "mongomock>=4.3",
     "pytest>=8",
     "pytest-asyncio>=0.24",
 ]
