@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from app import cli
+from app.host.llm_proxy import LLMProxy
 from app.host.sandbox.local import LocalSandbox
 from app.host.worker import Workers
 from app.session.dir_store import DirStore
@@ -74,7 +75,8 @@ def local_chat(tmp_path, users_root, monkeypatch, upstream):  # noqa: F811
     def new_run():
         monkeypatch.setattr(chat, "workers", Workers(
             sandbox_factory=lambda: LocalSandbox(GUEST_ROOT), sessions=DirStore(tmp_path / "sessions"),
-            **worker_kwargs(llm_url=upstream.url, hello_timeout_s=20, heartbeat_s=1, wall_clock_s=60)))
+            **worker_kwargs(llm_url=upstream.url, hello_timeout_s=20, heartbeat_s=1, wall_clock_s=60,
+                            device_tool_timeout_s=1)))
     new_run()
     return new_run
 
@@ -85,7 +87,7 @@ async def test_one_turn_streams_reply(tmp_path, local_chat, upstream):
     upstream.responses = [{"content": "one two three"}]
     out = Out()
     try:
-        await cli.run_turn(FakeTenant(), "s1", "count", out)
+        await cli.run_turn(FakeTenant(), "s1", "count", lines(), out)
     finally:
         from app.routes import chat
         await chat.workers.shutdown()
@@ -110,6 +112,70 @@ async def test_follow_up_and_resume(tmp_path, local_chat, upstream):
     history = json.dumps(upstream.requests[-1]["messages"])
     assert all(t in history for t in ("first", "r1", "second", "r2", "third"))
     assert guests(tmp_path) == []
+
+
+def tool_call(*calls) -> dict:
+    return {"content": None, "tool_calls": [
+        {"id": f"call_{name}", "type": "function", "function": {"name": name, "arguments": json.dumps(args)}}
+        for name, args in calls]}
+
+
+def text_of(out: Out) -> str:
+    return "".join(p for p in out.parts if p is not FLUSH)
+
+
+async def test_tool_calls_are_shown(local_chat, upstream):
+    """Issue #52: tool calls are shown, each on its own line; two calls in one
+    reply (a host tool and a device tool, which ends at its timeout) both run."""
+    upstream.responses = [tool_call(("web_search", {"q": "weather"}), ("get_calendar_events", {"day": "today"})),
+                          {"content": "all done"}]
+    out = Out()
+    await cli.chat_loop(FakeTenant(), "s1", lines("look it up"), out)
+    shown = text_of(out).splitlines()
+    assert '[tool] web_search({"q": "weather"})' in shown
+    assert '[tool] get_calendar_events({"day": "today"})' in shown
+    assert "all done" in text_of(out)
+    results = [m for m in upstream.requests[1]["messages"] if m["role"] == "tool"]
+    assert [m["tool_call_id"] for m in results] == ["call_web_search", "call_get_calendar_events"]
+
+
+async def test_question_is_answered(local_chat, upstream):
+    """Issue #52: a question from the harness is shown with its options, the next
+    input line answers it (a number picks an option), and the task finishes."""
+    upstream.responses = [tool_call(("question", {"text": "Which colour?", "options": ["red", "blue"]})),
+                          {"content": "blue it is"}]
+    out = Out()
+    await cli.chat_loop(FakeTenant(), "s1", lines("pick a colour", "2"), out)
+    shown = text_of(out)
+    assert "Which colour?\n  1. red\n  2. blue\n" in shown and "blue it is" in shown
+    answer = [m for m in upstream.requests[1]["messages"] if m["role"] == "tool"]
+    assert "blue" in answer[0]["content"]
+
+
+async def test_vendor_error_then_next_turn(local_chat, upstream, monkeypatch):
+    """Issue #52: a vendor error, rate limit or timeout ends the turn with one
+    readable `error:` line, and the session stays usable."""
+    monkeypatch.setitem(LLMProxy.__init__.__kwdefaults__, "timeout_s", 1)
+    out, q = Out(), asyncio.Queue()
+    loop = asyncio.ensure_future(cli.chat_loop(FakeTenant(), "s1", q, out))
+
+    async def turn(status, delay_s=0.0):
+        upstream.status, upstream.delay_s = status, delay_s
+        prompts = out.parts.count("> ")
+        q.put_nowait("hi\n")
+        while out.parts.count("> ") == prompts:
+            await asyncio.sleep(0.05)
+        return text_of(out).split("> ")[-2]
+
+    while "> " not in out.parts:
+        await asyncio.sleep(0.05)
+    for status, delay_s, says in [(429, 0, "429"), (500, 0, "500"), (200, 3, "502")]:
+        shown = await turn(status, delay_s)
+        errors = [line for line in shown.splitlines() if line.startswith("error:")]
+        assert len(errors) == 1 and says in errors[0], shown
+    assert "hello there" in await turn(200)
+    q.put_nowait(None)
+    await loop
 
 
 def run_cli(tmp_path, upstream, *args, **env) -> subprocess.Popen:

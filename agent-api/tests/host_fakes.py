@@ -577,7 +577,7 @@ class FakeUpstreamLLM:
     chunk; `cut_after=n` closes the connection after n data chunks (no
     finish_reason, no [DONE]). `streamed` keeps the SSE text sent per streamed
     call, for verbatim checks; `paths` and `headers` (lower-case names) each
-    request's path and headers."""
+    request's path and headers. `delay_s` holds each answer back that long."""
 
     def __init__(self, responses, status=200):
         self.responses = list(responses)
@@ -585,6 +585,7 @@ class FakeUpstreamLLM:
         self.error_body: dict | None = None
         self.keepalive = False
         self.cut_after: int | None = None
+        self.delay_s = 0.0
         self.requests: list[dict] = []
         self.paths: list[str] = []
         self.headers: list[dict] = []
@@ -604,6 +605,7 @@ class FakeUpstreamLLM:
                 outer.requests.append(req)
                 outer.paths.append(self.path)
                 outer.headers.append({k.lower(): v for k, v in self.headers.items()})
+                time.sleep(outer.delay_s)
                 if outer.status != 200:
                     body = json.dumps(outer.error_body if outer.error_body is not None
                                       else {"error": "nope"}).encode()
