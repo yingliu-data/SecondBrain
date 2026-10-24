@@ -15,11 +15,12 @@ import functools
 import hmac
 import os
 import threading
-from typing import Literal
+from typing import Annotated, Literal
 
 import uvicorn
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
+from pydantic import Field
 from pymongo.errors import OperationFailure, PyMongoError
 from starlette.responses import PlainTextResponse
 
@@ -27,6 +28,10 @@ from index_mcp.search import by_time, retrieve, search, traverse
 from index_mcp.store import Store
 
 Detail = Literal["fold", "preview", "full"]
+Limit = Annotated[int, Field(ge=1, le=100)]
+Hops = Annotated[int, Field(ge=1, le=5)]
+Fanout = Annotated[int, Field(ge=1, le=100)]
+ContextLines = Annotated[int, Field(ge=0, le=100)]
 LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
 AUTHENTICATION_FAILED = 18   # MongoDB's error code
 
@@ -45,7 +50,7 @@ def store() -> Store:
 
 def search_entity(query: str, scope: str | None = None, node_types: list[str] | None = None,
                   path_prefix: str | None = None, time_range: list[str | None] | None = None,
-                  history: bool = False, detail: Detail = "preview", limit: int = 10) -> dict:
+                  history: bool = False, detail: Detail = "preview", limit: Limit = 10) -> dict:
     """Find files, classes and functions: by exact ID (`code/pkg/utils.py:MathUtils.double`),
     else by name, else by keyword over names, else by content (keyword and meaning). The first
     layer with hits answers. `scope` is the source (`code`); `node_types` filters by type
@@ -60,9 +65,9 @@ def search_entity(query: str, scope: str | None = None, node_types: list[str] | 
     return result
 
 
-def traverse_graph(start_ids: list[str], direction: Literal["out", "in", "both"] = "out", hops: int = 1,
+def traverse_graph(start_ids: list[str], direction: Literal["out", "in", "both"] = "out", hops: Hops = 1,
                    node_types: list[str] | None = None, edge_types: list[str] | None = None,
-                   max_fanout: int = 20) -> dict:
+                   max_fanout: Fanout = 20) -> dict:
     """The entities within `hops` edges of `start_ids` (IDs from SearchEntity), and those edges.
     Edge types: contains, imports, invokes, inherits, supersedes. `out` follows edges from the
     start, `in` edges into it, `both` either way; at most `max_fanout` edges are taken per node."""
@@ -73,7 +78,7 @@ def traverse_graph(start_ids: list[str], direction: Literal["out", "in", "both"]
     return result
 
 
-def retrieve_entity(ids: list[str], detail: Detail = "full", context_lines: int = 0, page: int = 1) -> dict:
+def retrieve_entity(ids: list[str], detail: Detail = "full", context_lines: ContextLines = 0, page: int = 1) -> dict:
     """The text of each ID with its line range: a version ID as it was, a logical ID as it is now.
     A long text comes in pages of 200 lines (`page`); a superseded version names the newest one;
     `context_lines` adds lines around a method from its class."""
@@ -81,7 +86,7 @@ def retrieve_entity(ids: list[str], detail: Detail = "full", context_lines: int 
 
 
 def search_by_time(time_range: list[str | None], scope: str | None = None,
-                   node_types: list[str] | None = None, limit: int = 50) -> dict:
+                   node_types: list[str] | None = None, limit: Limit = 50) -> dict:
     """What was added, changed or removed in `time_range` (`[start, end]` in ISO 8601, either
     one null), newest change first, with when it changed."""
     return {"results": by_time(store(), time_range, scope=scope, node_types=node_types, limit=limit)}

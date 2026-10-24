@@ -18,13 +18,14 @@ import logging
 import re
 from datetime import datetime, timezone
 
-from index_mcp.store import OVERFETCH, Store, query_filter
+from index_mcp.store import Store, query_filter
 
 log = logging.getLogger(__name__)
 
 PREVIEW_LINES = 5
 PAGE_LINES = 200
 RRF_K = 60   # the usual constant of reciprocal rank fusion
+OVERFETCH = 5   # chunks fetched per wanted node in layer 4: the node filters apply after the fusion
 DEF_LINE = re.compile(r"\s*(async\s+)?(def|class)\s")
 TIMESTAMPS = ("created_at", "superseded_at", "removed_at")
 CHUNK_FIELDS = ("is_latest", "source", "path")
@@ -251,10 +252,12 @@ def by_time(store: Store, time_range: list[str | None], *, scope: str | None = N
     for field in TIMESTAMPS:
         for node in store.nodes.find({**match, field: window}, {"text": 0}).sort(field, -1).limit(limit):
             changed[node["_id"]] = node
-    newest = sorted(changed.values(), key=_changed_at, reverse=True)[:limit]
-    return [{**render(node, "fold"), "changed_at": _changed_at(node).isoformat(timespec="seconds")}
+    newest = sorted(changed.values(), key=lambda node: _changed_at(node, window), reverse=True)[:limit]
+    return [{**render(node, "fold"), "changed_at": _changed_at(node, window).isoformat(timespec="seconds")}
             for node in newest]
 
 
-def _changed_at(node: dict) -> datetime:
-    return max(moment for moment in (node[field] for field in TIMESTAMPS) if moment)
+def _changed_at(node: dict, window: dict) -> datetime:
+    """The latest of the node's timestamps inside `window`."""
+    moments = (node[field] for field in TIMESTAMPS)
+    return max(moment for moment in moments if moment and window.get("$gte", moment) <= moment <= window.get("$lte", moment))

@@ -34,8 +34,7 @@ log = logging.getLogger(__name__)
 
 ATLAS_DIR = Path(__file__).resolve().parent.parent / "atlas"
 SERVER_SELECTION_TIMEOUT_MS = 3000
-# The search stages over-fetch because only `_native_filter` can go into their own filter.
-OVERFETCH = 5
+MAX_CANDIDATES = 10000   # the most `$vectorSearch` accepts
 
 INDEXES = [
     ("nodes", ["nid"], {}),
@@ -190,8 +189,8 @@ class Store:
             "index": "chunks_vector",
             "path": "text",
             "query": query,
-            "numCandidates": limit * OVERFETCH * 10,
-            "limit": limit * OVERFETCH,
+            "numCandidates": min(limit * 10, MAX_CANDIDATES),
+            "limit": limit,
             "filter": _native_filter(match),
         }}
         return self._run(self.chunks, stage, match, limit)

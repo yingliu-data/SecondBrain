@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -191,3 +191,9 @@ def test_by_time(indexed, repo):
     assert [c["id"] for c in by_time(indexed, [before, None], limit=1)] == [changed[0]["id"]]
     with pytest.raises(ValueError, match="start or an end"):
         by_time(indexed, [None, None])
+    # A closed range: a node superseded after it is reported by its change inside it, not the later one.
+    end = a_moment_later()
+    indexed.nodes.update_one({"_id": f"{SUM}@v2"}, {"$set": {"superseded_at": datetime.fromisoformat(end) + timedelta(days=1)}})
+    closed = by_time(indexed, [before, end])
+    assert {c["id"] for c in closed} == {c["id"] for c in changed}
+    assert all(before[:19] <= c["changed_at"][:19] <= end[:19] for c in closed)

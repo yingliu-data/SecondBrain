@@ -6,8 +6,12 @@ logical ID, with the newest version in `nodes`: an unchanged node keeps its
 version (its lines follow the file), a changed one gets `@v(n+1)` and a
 `supersedes` edge from the new version ID to the old one, and a node that is
 gone gets `removed_at`. The file's edges are found by `src_path`: those no
-longer parsed are deactivated, new ones inserted. Each new class or function
-version gets one chunk, which Atlas embeds once. Nothing is ever deleted.
+longer parsed are deactivated, new ones inserted. When the file's entities
+appeared or went away, the files with an edge into it (found by `dst`) get
+their edges resolved again, so an unchanged importer follows a target that it
+gained or lost; an importer indexed before the target's file existed gets the
+edge when it next changes. Each new class or function version gets one chunk,
+which Atlas embeds once. Nothing is ever deleted.
 
 `sync` walks a folder, indexes its files, and marks the files that are gone.
 Run: `python -m index_mcp.indexer sync <folder> --source code`.
@@ -45,24 +49,39 @@ def index_files(store: Store, source: str, root: Path, paths: list[Path]) -> Cou
     counts = Counter(files=0, unchanged=0, skipped=0, nodes_inserted=0, nodes_removed=0)
     batch = _parse_changed(store, source, root, paths, counts)
     types = {nid: fields["type"] for graph, _ in batch for nid, fields in graph.nodes.items()}
-
-    def lookup(nid: str) -> str | None:
-        if nid in types:
-            return types[nid]
-        doc = store.nodes.find_one({"nid": nid, "is_latest": True}, {"type": 1})
-        return doc["type"] if doc else None
-
+    reshaped: set[str] = set()
     for graph, manifest in batch:
-        inserted, removed = _write_nodes(store, source, graph.rel, graph.nodes)
+        inserted, before = _write_nodes(store, source, graph.rel, graph.nodes)
         counts["nodes_inserted"] += len(inserted)
-        counts["nodes_removed"] += removed
-        graph.resolve_edges(lookup)
+        counts["nodes_removed"] += len(before - graph.nodes.keys())
+        if before != graph.nodes.keys():
+            reshaped |= before | graph.nodes.keys()
+        graph.resolve_edges(lambda nid: types.get(nid) or _stored_type(store, nid))
         _write_edges(store, graph.rel, graph.edges)
         store.files.update_one({"source": source, "path": graph.rel}, {
             "$set": manifest,
             "$push": {"versions": {"hash": manifest["hash"], "indexed_at": now(), "node_ids": inserted}},
         }, upsert=True)
+    _resolve_importers(store, root, reshaped, {graph.rel for graph, _ in batch})
     return counts
+
+
+def _stored_type(store: Store, nid: str) -> str | None:
+    doc = store.nodes.find_one({"nid": nid, "is_latest": True}, {"type": 1})
+    return doc["type"] if doc else None
+
+
+def _resolve_importers(store: Store, root: Path, nids: set[str], indexed: set[str]) -> None:
+    """Resolve again the edges of the files, other than `indexed`, with an active edge into
+    `nids`: an entity that appeared or went away changes what their imports and calls reach."""
+    importers = set(store.edges.distinct("src_path", {"dst": {"$in": list(nids)}, "active": True}))
+    for rel in sorted(importers - indexed):
+        try:
+            graph = FileGraph(rel, (root / rel).read_bytes())
+        except (OSError, *PARSE_ERRORS):
+            continue
+        graph.resolve_edges(lambda nid: _stored_type(store, nid))
+        _write_edges(store, rel, graph.edges)
 
 
 def _parse_changed(store: Store, source: str, root: Path, paths: list[Path], counts: Counter) -> list:
@@ -94,12 +113,11 @@ def _manifest(source: str, path: Path, rel: str, data: bytes) -> dict:
             "mtime": stat.st_mtime, "removed_at": None, "lock_until": None, "skipped_reason": None}
 
 
-def _write_nodes(store: Store, source: str, rel: str, nodes: dict[str, dict]) -> tuple[list[str], int]:
-    """Version the parsed nodes against the store: the IDs inserted, and the count removed."""
-    gone = {doc["nid"] for doc in store.nodes.find({"source": source, "path": rel, "is_latest": True}, {"nid": 1})}
+def _write_nodes(store: Store, source: str, rel: str, nodes: dict[str, dict]) -> tuple[list[str], set[str]]:
+    """Version the parsed nodes against the store: the IDs inserted, and the nids that were latest before."""
+    before = {doc["nid"] for doc in store.nodes.find({"source": source, "path": rel, "is_latest": True}, {"nid": 1})}
     inserted = []
     for nid, fields in nodes.items():
-        gone.discard(nid)
         old = store.nodes.find_one({"nid": nid}, sort=[("version", -1)])
         doc = node(nid, source=source, version=old["version"] + 1 if old else 1, **fields)
         if old and old["text_hash"] == doc["text_hash"]:
@@ -111,9 +129,9 @@ def _write_nodes(store: Store, source: str, rel: str, nodes: dict[str, dict]) ->
         if doc["type"] in CHUNKED_TYPES:
             store.chunks.insert_one(chunk(doc, f"{nid}\n{doc['text']}"))
         inserted.append(doc["_id"])
-    for nid in gone:
+    for nid in before - nodes.keys():
         _mark_removed(store, nid)
-    return inserted, len(gone)
+    return inserted, before
 
 
 def _keep(store: Store, old: dict, doc: dict) -> None:

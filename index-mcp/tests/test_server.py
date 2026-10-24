@@ -25,6 +25,9 @@ from index_mcp.server import create_app
 TOKEN = "test-token"
 TOOL_CALLS = (("SearchEntity", {"query": "x"}), ("TraverseGraph", {"start_ids": ["x"]}),
               ("RetrieveEntity", {"ids": ["x"]}), ("SearchByTime", {"time_range": ["2000-01-01", None]}))
+OUT_OF_BOUNDS = (("SearchEntity", {"query": "x", "limit": 0}), ("TraverseGraph", {"start_ids": ["x"], "hops": 6}),
+                 ("TraverseGraph", {"start_ids": ["x"], "max_fanout": 0}), ("RetrieveEntity", {"ids": ["x"], "context_lines": -1}),
+                 ("SearchByTime", {"time_range": ["2000-01-01", None], "limit": 101}))
 
 
 @pytest.fixture
@@ -93,6 +96,19 @@ async def test_tools_answer_from_the_store(url, served):
     assert len(changed["results"]) == 10
     is_error, text = await call(url, "SearchByTime", time_range=[None, None])
     assert is_error and "start or an end" in text
+
+
+async def test_out_of_bounds_input_is_a_clear_error(url, served):
+    """A `limit`, `hops`, `max_fanout` or `context_lines` outside its bounds is refused with an
+    error that names the argument, before any query runs; the schema tells the client the bounds."""
+    for tool, args in OUT_OF_BOUNDS:
+        is_error, text = await call(url, tool, **args)
+        bad, = set(args) - {"query", "start_ids", "ids", "time_range"}
+        assert is_error and bad in text and "MongoDB" not in text, (tool, args)
+    async with session(url) as s:
+        schemas = {t.name: t.inputSchema["properties"] for t in (await s.list_tools()).tools}
+    assert (schemas["SearchEntity"]["limit"]["minimum"], schemas["SearchEntity"]["limit"]["maximum"]) == (1, 100)
+    assert schemas["TraverseGraph"]["hops"]["maximum"] == 5 and schemas["RetrieveEntity"]["context_lines"]["minimum"] == 0
 
 
 async def test_refuses_without_token(url):

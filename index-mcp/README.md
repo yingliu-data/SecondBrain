@@ -18,8 +18,11 @@ file and `code/<path>:<qualified name>` for an entity; a version is `<id>@v<n>`.
 
 Indexing is add-only: a changed function gets a new version and a `supersedes` edge,
 a removed file or function gets `removed_at`, a restored file continues its versions,
-and nothing is deleted. A file node's text is its module-level code; the text of a
-class or function is its own.
+and nothing is deleted. When a file gains or loses an entity, the edges of the files
+that import from it are resolved again, so an unchanged importer follows the change;
+an importer indexed before the target's file existed gets the edge when it next
+changes. A file node's text is its module-level code; the text of a class or function
+is its own.
 
 ## Credentials
 
@@ -68,7 +71,10 @@ Tools, with one output shape for every entity (ID, type, location, status `lates
 - `RetrieveEntity(ids, detail, context_lines, page)`: the text with its line range,
   200 lines a page; a superseded version names the newest one.
 - `SearchByTime(time_range, scope, node_types, limit)`: what was added, changed or
-  removed in the range.
+  removed in the range, each with the moment of that change.
+
+`limit` is 1 to 100, `hops` 1 to 5, `max_fanout` 1 to 100 and `context_lines` 0 to 100;
+a value outside its bounds is refused with an error that names the argument.
 
 When MongoDB is down or the credentials are wrong, each tool returns an error that
 says so and the server stays up.

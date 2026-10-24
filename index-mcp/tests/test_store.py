@@ -5,7 +5,7 @@ import pytest
 
 from conftest import NODE_FIELDS
 from index_mcp import store as store_module
-from index_mcp.store import edge, node, search_index_specs, settings, uri
+from index_mcp.store import Store, edge, node, search_index_specs, settings, uri
 
 EDGE_FIELDS = {"type", "src", "dst", "src_path", "active", "created_at", "deactivated_at", "ambiguous"}
 
@@ -47,6 +47,18 @@ def test_search_index_specs_name_the_three_indexes():
     assert set(specs) == {"nodes_search", "chunks_search", "chunks_vector"}
     assert specs["chunks_vector"]["type"] == "vectorSearch"
     assert specs["chunks_vector"]["definition"]["fields"][0]["model"] == "voyage-4"
+
+
+def test_vector_stage_takes_the_limit_as_is_within_the_cap(store):
+    """`$vectorSearch` gets the caller's limit, not an over-fetch of it, and at most 10000 candidates;
+    only `is_latest` and `source` go into its own filter."""
+    pipelines = []
+    store.chunks.aggregate = lambda pipeline: pipelines.append(pipeline) or []
+    for limit in (50, 2000):
+        Store.vector(store, "q", {"is_latest": True, "path": {"$regex": "^pkg"}}, limit)
+    stages = [pipeline[0]["$vectorSearch"] for pipeline in pipelines]
+    assert [(stage["limit"], stage["numCandidates"]) for stage in stages] == [(50, 500), (2000, 10000)]
+    assert stages[0]["filter"] == {"is_latest": True}
 
 
 def test_node_builder_sets_every_common_field():

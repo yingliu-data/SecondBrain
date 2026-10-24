@@ -112,6 +112,29 @@ def test_import_resolves_through_store(store, repo):
     assert imports == {f"code/{UTILS}", f"code/{UTILS}:calculate_sum"}   # pkg/shapes.py is not indexed yet
 
 
+def test_importer_follows_a_target_that_appears_or_goes(store, repo):
+    """Criterion: a cross-file edge is refreshed when only its target changes: `main.py` is not
+    re-indexed, yet it loses the edges to `calculate_sum` when the function goes and gets them back
+    when it returns; a file whose entities only changed inside re-resolves nothing."""
+    run(store, repo)
+    target = f"code/{UTILS}:calculate_sum"
+    into_target = {("imports", "code/main.py"), ("invokes", "code/main.py:bare_imported")}
+
+    def active_from_main():
+        return {(e["type"], e["src"], e["dst"]) for e in store.edges.find({"src_path": "main.py", "active": True})}
+    assert {(kind, src, target) for kind, src in into_target} <= active_from_main()
+    text = (repo / UTILS).read_text()
+    edit(repo, UTILS, "def calculate_sum(a, b):\n    return a + b\n", "")
+    result = run(store, repo)
+    assert (result["unchanged"], result["nodes_removed"]) == (9, 1)
+    edges = active_from_main()
+    assert not {e for e in edges if e[2] == target} and ("imports", "code/main.py", f"code/{UTILS}") in edges
+    (repo / UTILS).write_text(text)
+    run(store, repo)
+    assert {(kind, src, target) for kind, src in into_target} <= active_from_main()
+    assert store.edges.count_documents({"src_path": "main.py", "active": False}) == 2
+
+
 def test_removed_file_marked(store, repo):
     """Criterion: a removed file and its nodes get `removed_at`, its edges go inactive, nothing is deleted."""
     run(store, repo)
