@@ -6,6 +6,8 @@
 # `--package mcp-gateway` (see each member's Dockerfile).
 [tool.uv.workspace]
 members = ["harness", "flows", "agent-api", "mcp-gateway"]
+# Own uv.lock: as a member it would need a COPY line in each member's Dockerfile.
+exclude = ["code-index-mcp"]
 
 # Lint (CI's lint job: `uvx ruff@0.14.0 check .`). No `ruff format`: the code
 # keeps its hand-aligned style. Tests import pytest fixtures and take them as
