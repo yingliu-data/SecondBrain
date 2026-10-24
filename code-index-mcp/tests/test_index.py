@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import os
 import threading
 
 import bm25s
 import pytest
 
-from code_index.index import TOP_K, CodeIndexError, build_index, is_test_file, load_index
+from code_index.index import TOP_K, CodeIndexError, build_index, index_dir, is_test_file, load_index
 
 UTILS = "pkg/utils.py"
 
@@ -105,3 +106,15 @@ def test_relative_repo_path_rejected(repo, monkeypatch):
     for call in (build_index, load_index):
         with pytest.raises(CodeIndexError, match="absolute"):
             call(".")
+
+
+def test_index_is_private(repo):
+    """The saved index holds the source of every file, so only its owner can read it."""
+    old = os.umask(0o022)
+    try:
+        build_index(str(repo))
+    finally:
+        os.umask(old)
+    folder = index_dir(repo.resolve())
+    assert folder.stat().st_mode & 0o777 == 0o700
+    assert (folder / "graph.json").stat().st_mode & 0o777 == 0o600

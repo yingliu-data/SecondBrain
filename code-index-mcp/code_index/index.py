@@ -64,7 +64,8 @@ def build_index(repo_path: str) -> dict:
     folder = index_dir(repo)
     with _BUILD_LOCK:
         shutil.rmtree(folder, ignore_errors=True)
-        folder.mkdir(parents=True)
+        folder.mkdir(parents=True, mode=0o700)
+        (folder / "graph.json").touch(mode=0o600)
         (folder / "graph.json").write_text(json.dumps(graph))
         bm25 = bm25s.BM25()
         bm25.index([split_words(nid) for nid in ids], show_progress=False)
