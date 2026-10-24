@@ -1,0 +1,17 @@
+{
+  "collection": "nodes",
+  "name": "nodes_search",
+  "type": "search",
+  "definition": {
+    "mappings": {
+      "dynamic": false,
+      "fields": {
+        "names": {"type": "string", "analyzer": "lucene.simple"},
+        "heading_path": {"type": "string", "analyzer": "lucene.simple"},
+        "stem": {"type": "string", "analyzer": "lucene.simple"},
+        "is_latest": {"type": "boolean"},
+        "source": {"type": "token"}
+      }
+    }
+  }
+}

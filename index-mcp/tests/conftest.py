@@ -3,10 +3,17 @@ file with a syntax error would fail the lint job, and checked-in `test_*.py`
 fixtures would be collected by pytest."""
 from __future__ import annotations
 
+import re
 import textwrap
 from pathlib import Path
 
+import mongomock
 import pytest
+
+from index_mcp.store import Store
+
+NODE_FIELDS = {"_id", "nid", "type", "source", "path", "title", "heading_path", "names", "start_line", "end_line",
+               "text", "text_hash", "version", "is_latest", "created_at", "superseded_at", "superseded_by", "removed_at"}
 
 FILES = {
     "main.py": """
@@ -134,12 +141,45 @@ def write_repo(root: Path) -> Path:
     return root
 
 
-@pytest.fixture(autouse=True)
-def index_home(tmp_path: Path, monkeypatch) -> Path:
-    monkeypatch.setenv("CODE_INDEX_HOME", str(tmp_path / "index"))
-    return tmp_path / "index"
-
-
 @pytest.fixture
 def repo(tmp_path: Path) -> Path:
     return write_repo(tmp_path / "repo")
+
+
+class FakeStore(Store):
+    """`Store` on mongomock, which has no Atlas Search: `keyword_names` matches a word of
+    the names as `lucene.simple` does, the two chunk searches become substring matches,
+    and `vector` raises `vector_error` when a test sets it."""
+
+    vector_error: Exception | None = None
+
+    def ensure_search_indexes(self):
+        pass
+
+    def keyword_names(self, query, match, limit=10):
+        words = set(_words(query))
+        found = [doc for doc in self.nodes.find(match) if words & set(_words(" ".join([*doc["names"], *doc["heading_path"], doc["stem"]])))]
+        return found[:limit]
+
+    def keyword_text(self, query, match, limit=10):
+        return self._substring(self.chunks, query, lambda doc: [doc["text"]], match, limit)
+
+    def vector(self, query, match, limit=10):
+        if self.vector_error:
+            raise self.vector_error
+        return self.keyword_text(query, match, limit)
+
+    def _substring(self, collection, query, texts_of, match, limit):
+        pattern = re.compile(re.escape(query), re.IGNORECASE)
+        found = [doc for doc in collection.find(match) if any(pattern.search(t) for t in texts_of(doc))]
+        return found[:limit]
+
+
+def _words(text: str) -> list[str]:
+    """The tokens of `lucene.simple`: runs of letters, lower-cased."""
+    return re.findall(r"[^\W\d_]+", text.lower())
+
+
+@pytest.fixture
+def store() -> FakeStore:
+    return FakeStore(mongomock.MongoClient(tz_aware=True), "test")
