@@ -105,6 +105,20 @@ def test_stream_is_relayed_verbatim_and_usage_recorded(proxy):
     assert r.status_code == 200 and p.calls == 2
 
 
+def test_gzipped_stream_is_relayed_decoded(proxy):
+    p, upstream, usage, client = proxy
+    upstream.gzip = True
+    upstream.responses = [{"content": "one two three"}]
+    with client.stream("POST", "/v1/chat/completions",
+                       json={"model": "m", "messages": [], "stream": True,
+                             "stream_options": {"include_usage": True}}) as r:
+        assert r.status_code == 200
+        assert "content-encoding" not in r.headers
+        received = b"".join(r.iter_raw()).decode()
+    assert received == upstream.streamed[0]                  # the plain SSE text
+    assert usage[0][1]["total_tokens"] == 108
+
+
 def test_stream_with_tool_calls_and_keepalive_comments_is_relayed(proxy):
     p, upstream, usage, client = proxy
     upstream.keepalive = True
@@ -224,7 +238,8 @@ def test_proxies_of_one_upstream_share_one_client_that_outlives_them(tmp_path):
 
 
 # ---------------------------------------------------------------- vendors
-GUEST_BODY = {"model": "m", "messages": [], "max_tokens": 5, "chat_template_kwargs": {"enable_thinking": False}}
+GUEST_BODY = {"model": "m", "messages": [], "max_tokens": 5, "temperature": 0,
+              "chat_template_kwargs": {"enable_thinking": False}}
 
 
 @pytest.mark.parametrize("stream", [False, True])
@@ -257,6 +272,8 @@ def test_vendor_request_shape(tmp_path, monkeypatch, vendor, stream):
         del expected["chat_template_kwargs"]
     if vendor == "openai":
         expected["max_completion_tokens"] = expected.pop("max_tokens")
+    if vendor == "anthropic":
+        del expected["temperature"]
     assert upstream.requests == [expected]
     assert usage[0]["total_tokens"] == 108 and "sk-secret" not in json.dumps(usage)
 

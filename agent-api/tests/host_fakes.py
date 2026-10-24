@@ -20,6 +20,7 @@ import queue
 import socket
 import threading
 import time
+import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -577,7 +578,9 @@ class FakeUpstreamLLM:
     chunk; `cut_after=n` closes the connection after n data chunks (no
     finish_reason, no [DONE]). `streamed` keeps the SSE text sent per streamed
     call, for verbatim checks; `paths` and `headers` (lower-case names) each
-    request's path and headers. `delay_s` holds each answer back that long."""
+    request's path and headers. `delay_s` holds each answer back that long.
+    `gzip=True` sends the stream gzipped (Content-Encoding: gzip, a sync
+    flush per frame), as Gemini does."""
 
     def __init__(self, responses, status=200):
         self.responses = list(responses)
@@ -586,6 +589,7 @@ class FakeUpstreamLLM:
         self.keepalive = False
         self.cut_after: int | None = None
         self.delay_s = 0.0
+        self.gzip = False
         self.requests: list[dict] = []
         self.paths: list[str] = []
         self.headers: list[dict] = []
@@ -650,6 +654,12 @@ class FakeUpstreamLLM:
                 self.send_header("Content-Type", "text/event-stream; charset=utf-8")
                 self.send_header("Cache-Control", "no-cache")
                 self.send_header("Transfer-Encoding", "chunked")
+                if outer.gzip:
+                    self.send_header("Content-Encoding", "gzip")
+                    z = zlib.compressobj(wbits=31)
+                    writes = [z.compress(d) + z.flush(zlib.Z_SYNC_FLUSH) for d in writes]
+                    if not cut:
+                        writes.append(z.flush())
                 self.end_headers()
                 for data in writes:
                     self.wfile.write(b"%x\r\n%s\r\n" % (len(data), data))

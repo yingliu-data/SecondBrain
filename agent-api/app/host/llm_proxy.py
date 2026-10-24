@@ -8,8 +8,9 @@ httpx, passes the upstream status and body back verbatim, and records one
 (vendor_headers, vendor_body; the avatar planner uses them too): with a key
 env var, `Authorization: Bearer <key>` (the key is read when the proxy is
 built, and never reaches the guest or an event); for a vendor other than
-vllm, the body loses the vLLM-only `chat_template_kwargs`, and openai gets
-`max_completion_tokens` for `max_tokens`. A vllm body is forwarded as it came.
+vllm, the body loses the vLLM-only `chat_template_kwargs`, openai gets
+`max_completion_tokens` for `max_tokens`, and anthropic loses `temperature`
+(newer Claude models reject it). A vllm body is forwarded as it came.
 
 Streaming: when the request body has `stream: true` the upstream call is
 `client.stream(...)` and the SSE bytes are relayed as they arrive, as an
@@ -144,6 +145,8 @@ def vendor_body(vendor: str, body: dict) -> dict:
     body = {k: v for k, v in body.items() if k != "chat_template_kwargs"}
     if vendor == "openai" and "max_tokens" in body:
         body["max_completion_tokens"] = body.pop("max_tokens")
+    if vendor == "anthropic":
+        body.pop("temperature", None)
     return body
 
 

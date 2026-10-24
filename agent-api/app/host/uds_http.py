@@ -75,8 +75,10 @@ class UDSHandler(BaseHTTPRequestHandler):
 
     def _relay_sse(self, resp, content_type: str, headers: dict | None = None,
                    on_data: Callable[[bytes], None] | None = None) -> str | None:
-        """Relay an httpx streaming response's raw bytes as they arrive.
-        None when the stream ran to its end; else why it ended early (an
+        """Relay an httpx streaming response's bytes as they arrive, decoded
+        (a gzipped upstream, as Gemini's, would reach the guest as gzip with
+        no Content-Encoding to say so). None when the stream ran to its end;
+        else why it ended early (an
         upstream cut, httpx.HTTPError, or a guest that left, OSError) - the
         headers went out already, so there is nothing left to answer."""
         self.send_response(resp.status_code)
@@ -89,7 +91,7 @@ class UDSHandler(BaseHTTPRequestHandler):
         self.wfile.flush()
         self.close_connection = True
         try:
-            for data in resp.iter_raw():
+            for data in resp.iter_bytes():
                 self.wfile.write(data)
                 self.wfile.flush()
                 if on_data is not None:
