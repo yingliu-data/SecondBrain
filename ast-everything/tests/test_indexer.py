@@ -1,6 +1,9 @@
 """Add-only indexing of the fixture repo into the fake store (plan step 3)."""
 from __future__ import annotations
 
+from collections import Counter
+
+import mongomock
 import pytest
 
 from conftest import NODE_FIELDS
@@ -135,7 +138,7 @@ def test_importer_follows_a_target_that_appears_or_goes(store, repo, monkeypatch
     assert {(kind, src, target) for kind, src in into_target} <= active_from_main()
     assert store.edges.count_documents({"src_path": "main.py", "active": False}) == 2
     reshaped = []
-    monkeypatch.setattr(indexer, "_resolve_importers", lambda store, source, root, nids, indexed: reshaped.append(nids))
+    monkeypatch.setattr(indexer, "_resolve_importers", lambda store, source, root, nids, indexed, types: reshaped.append(nids))
     edit(repo, UTILS, "    return a + b\n", "    return b + a\n")
     run(store, repo)
     assert reshaped == [set()]
@@ -237,3 +240,79 @@ def test_a_source_name_that_cannot_head_an_id_is_refused(store, repo, name):
 def test_source_name_from_a_folder_name():
     assert indexer.source_name("My Project (v2)") == "My-Project-v2"
     assert indexer.source_name("...") == "source"
+
+
+def active_edges(store) -> set[tuple[str, str, str]]:
+    return {(e["type"], e["src"], e["dst"]) for e in store.edges.find({"active": True})}
+
+
+def test_interrupted_sync_resumes_with_every_edge(store, repo, monkeypatch):
+    """The manifest is written after the edges: a sync that stops in the edge pass leaves its
+    files unindexed, and the next sync writes them whole, inserting no node twice."""
+    real = indexer._write_edges
+
+    def fail_once(*args):
+        monkeypatch.setattr(indexer, "_write_edges", real)
+        raise RuntimeError("stopped")
+    monkeypatch.setattr(indexer, "_write_edges", fail_once)
+    with pytest.raises(RuntimeError, match="stopped"):
+        run(store, repo)
+    assert store.files.count_documents({"hash": {"$ne": None}}) == 0     # no file counts as indexed
+    resumed = run(store, repo)
+    assert (resumed["unchanged"], resumed["nodes_inserted"]) == (0, 0)  # every node was kept
+    fresh = type(store)(mongomock.MongoClient(tz_aware=True), "fresh")
+    run(fresh, repo)
+    assert active_edges(store) == active_edges(fresh) and active_edges(store)
+    assert ({r["path"]: r["hash"] for r in store.files.find()} == {r["path"]: r["hash"] for r in fresh.files.find()})
+
+
+class Counting:
+    """A collection that counts the calls made on it."""
+
+    def __init__(self, collection, calls: Counter):
+        self._collection, self._calls = collection, calls
+
+    def __getattr__(self, name):
+        attr = getattr(self._collection, name)
+        if callable(attr):
+            def call(*args, **kwargs):
+                self._calls[f"{self._collection.name}.{name}"] += 1
+                return attr(*args, **kwargs)
+            return call
+        return attr
+
+
+def store_calls(store, action) -> Counter:
+    calls: Counter = Counter()
+    names = ("files", "nodes", "edges", "chunks")
+    originals = {name: getattr(store, name) for name in names}
+    for name in names:
+        setattr(store, name, Counting(originals[name], calls))
+    try:
+        action()
+    finally:
+        for name in names:
+            setattr(store, name, originals[name])
+    return calls
+
+
+def test_unchanged_sync_makes_the_same_store_calls_however_many_files(store, repo):
+    """An unchanged re-sync reads the manifest once; it does not make a call per file."""
+    run(store, repo)
+    small = store_calls(store, lambda: run(store, repo))
+    for n in range(30):
+        (repo / f"extra_{n}.py").write_text(f"def f{n}():\n    return {n}\n")
+    run(store, repo)
+    large = store_calls(store, lambda: run(store, repo))
+    assert small == large and sum(large.values()) <= 6
+
+
+def test_one_edited_function_writes_one_version_one_chunk_one_supersedes(store, repo):
+    run(store, repo)
+    before = counts(store)
+    edit(repo, UTILS, "    return a + b\n", "    return b + a\n")
+    result = run(store, repo)
+    after = counts(store)
+    assert result["nodes_inserted"] == 1
+    assert (after["nodes"] - before["nodes"], after["chunks"] - before["chunks"]) == (1, 1)
+    assert store.edges.count_documents({"type": "supersedes"}) == 1

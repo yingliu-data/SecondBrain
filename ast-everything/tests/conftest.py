@@ -12,6 +12,19 @@ import pytest
 
 from ast_everything.store import Store
 
+
+def _accept_pymongo_bulk_kwargs():
+    """mongomock 4.3 predates pymongo 4.11's `sort` on UpdateOne, which bulk_write passes on."""
+    from mongomock.collection import BulkOperationBuilder
+    add_update = BulkOperationBuilder.add_update
+
+    def patched(self, selector, doc, multi=False, upsert=False, collation=None, array_filters=None, hint=None, **_):
+        return add_update(self, selector, doc, multi, upsert, collation, array_filters, hint)
+    BulkOperationBuilder.add_update = patched
+
+
+_accept_pymongo_bulk_kwargs()
+
 NODE_FIELDS = {"_id", "nid", "type", "source", "path", "title", "heading_path", "names", "start_line", "end_line",
                "text", "text_hash", "version", "is_latest", "created_at", "superseded_at", "superseded_by", "removed_at"}
 

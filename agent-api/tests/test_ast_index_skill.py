@@ -20,6 +20,19 @@ from app.skills.ast_index.skill import AstIndexSkill
 from app.skills.registry import SkillRegistry
 
 
+def _accept_pymongo_bulk_kwargs():
+    """mongomock 4.3 predates pymongo 4.11's `sort` on UpdateOne, which bulk_write passes on."""
+    from mongomock.collection import BulkOperationBuilder
+    add_update = BulkOperationBuilder.add_update
+
+    def patched(self, selector, doc, multi=False, upsert=False, collation=None, array_filters=None, hint=None, **_):
+        return add_update(self, selector, doc, multi, upsert, collation, array_filters, hint)
+    BulkOperationBuilder.add_update = patched
+
+
+_accept_pymongo_bulk_kwargs()
+
+
 class MockStore(Store):
     """Store on mongomock, which has no Atlas Search: those layers find nothing."""
 
