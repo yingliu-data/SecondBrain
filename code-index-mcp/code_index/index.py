@@ -84,9 +84,9 @@ def load_index(repo_path: str) -> CodeIndex:
         manifest = json.loads((folder / "manifest.json").read_text())
         graph = json.loads((folder / "graph.json").read_text())
         bm25 = bm25s.BM25.load(folder / "bm25", show_progress=False)
-    except (OSError, ValueError) as e:
+        return CodeIndex(manifest, graph, bm25)
+    except (OSError, ValueError, KeyError, TypeError) as e:
         raise CodeIndexError("index damaged, rebuild it: run build_index again") from e
-    return CodeIndex(manifest, graph, bm25)
 
 
 def _check_repo(repo_path: str) -> Path:
@@ -106,7 +106,7 @@ class CodeIndex:
     """A loaded index: the graph, and the three search layers over its nodes."""
 
     def __init__(self, manifest: dict, graph: dict, bm25: bm25s.BM25):
-        self.manifest, self.nodes, self.edges, self.bm25 = manifest, graph["nodes"], graph["edges"], bm25
+        self.built_at, self.nodes, self.edges, self.bm25 = manifest["built_at"], graph["nodes"], graph["edges"], bm25
         self.ids = _searchable(self.nodes)   # in the order the BM25 index was built
         self.searchable = set(self.ids)
         self.by_name: dict[str, list[str]] = {}
@@ -115,7 +115,7 @@ class CodeIndex:
 
     def search(self, query: str, entity_type: str = "all", detail: str = "preview") -> dict:
         """The results of the first layer that finds something; `layer` is None when none does.
-        `entity_type` (file, class, function or all) filters layer 3."""
+        `entity_type` (file, class, function or all) filters only layer 3."""
         layers = (
             lambda: [query] if query in self.searchable else [],
             lambda: self.by_name.get(query, []),
@@ -128,7 +128,7 @@ class CodeIndex:
         return self._result(None, [], detail)
 
     def _result(self, layer: int | None, hits: list[str], detail: str) -> dict:
-        return {"layer": layer, "built_at": self.manifest["built_at"],
+        return {"layer": layer, "built_at": self.built_at,
                 "results": [self.render(nid, detail) for nid in hits]}
 
     def render(self, nid: str, detail: str) -> dict:

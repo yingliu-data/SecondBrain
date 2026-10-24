@@ -21,6 +21,7 @@ from pathlib import Path
 
 EDGE_TYPES = ("contains", "imports", "invokes", "inherits")
 DEFS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+SKIP_DIRS = {"venv", "env", "site-packages", "node_modules"}
 
 
 def build_graph(repo: Path) -> dict:
@@ -45,9 +46,10 @@ def build_graph(repo: Path) -> dict:
 
 
 def _py_files(repo: Path):
-    """`.py` files in a stable order; hidden folders such as `.git` or `.venv` are not walked."""
+    """`.py` files in a stable order; hidden folders such as `.git` or `.venv`, and
+    folders of installed packages (SKIP_DIRS), are not walked."""
     for root, dirs, files in os.walk(repo):
-        dirs[:] = sorted(d for d in dirs if not d.startswith("."))
+        dirs[:] = sorted(d for d in dirs if not d.startswith(".") and d not in SKIP_DIRS)
         for name in sorted(files):
             if name.endswith(".py"):
                 yield Path(root, name)

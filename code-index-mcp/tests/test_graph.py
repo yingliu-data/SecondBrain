@@ -22,7 +22,7 @@ def test_node_ids(repo):
     assert method["code"] == "    def double(self, a):\n        return self.calculate_sum(a, a)"
     assert method["end"] == method["start"] + 1
     assert "tests/test_x.py:only_in_tests" in nodes and "foo_test.py:only_in_foo_test" in nodes
-    assert not any(nid.startswith(".venv") for nid in nodes)
+    assert not any(nid.split("/")[0] in (".venv", "venv") for nid in nodes)
     assert json.loads(json.dumps(graph)) == graph
 
 

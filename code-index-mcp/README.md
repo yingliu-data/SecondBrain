@@ -20,7 +20,8 @@ CODE_INDEX_TOKEN=<token> uv run python -m code_index.server --host 0.0.0.0 --por
 
 The gateway container reaches the host only on a non-loopback address, hence
 `--host 0.0.0.0` (the default is `127.0.0.1`). The server reads any `.py` file the
-host user can read, so set `CODE_INDEX_TOKEN`: without it, requests are not checked.
+host user can read, so on any host but loopback it does not start without
+`CODE_INDEX_TOKEN`; on loopback without it, requests are not checked.
 
 ## Gateway entry
 

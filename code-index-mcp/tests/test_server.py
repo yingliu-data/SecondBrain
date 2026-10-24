@@ -6,6 +6,8 @@ import contextlib
 import json
 import shutil
 import socket
+import sys
+import threading
 
 import httpx
 import pytest
@@ -15,6 +17,7 @@ from mcp.client.streamable_http import streamable_http_client
 
 from code_index.graph import build_graph
 from code_index.index import index_dir
+from code_index import server as code_index_server
 from code_index.server import create_app
 
 TOKEN = "test-token"
@@ -26,8 +29,9 @@ async def url():
     sock.bind(("127.0.0.1", 0))
     server = uvicorn.Server(uvicorn.Config(create_app(token=TOKEN), log_level="warning", lifespan="on"))
     task = asyncio.create_task(server.serve(sockets=[sock]))
-    while not server.started:
-        await asyncio.sleep(0.01)
+    async with asyncio.timeout(5):
+        while not server.started:
+            await asyncio.sleep(0.01)
     yield f"http://127.0.0.1:{sock.getsockname()[1]}/mcp"
     server.should_exit = True
     await asyncio.wait_for(task, 5)
@@ -61,6 +65,37 @@ async def test_refuses_without_token(url):
     """Plan step 3: with CODE_INDEX_TOKEN set, a request without the bearer token gets 401."""
     async with httpx.AsyncClient() as http:
         assert (await http.post(url, json={})).status_code == 401
+
+
+def test_open_host_needs_token(monkeypatch):
+    """Review request 1: on a host other than loopback, the server does not start without a token."""
+    monkeypatch.delenv("CODE_INDEX_TOKEN", raising=False)
+    monkeypatch.setattr(sys, "argv", ["code_index.server", "--host", "0.0.0.0"])
+    monkeypatch.setattr(code_index_server.uvicorn, "run", lambda *a, **k: pytest.fail("the server started"))
+    with pytest.raises(SystemExit):
+        code_index_server.main()
+
+
+async def test_build_does_not_block_other_calls(url, monkeypatch):
+    """Review request 2: a build runs in a worker thread, so other calls are answered meanwhile."""
+    started, release = threading.Event(), threading.Event()
+
+    def slow_build(repo_path):
+        started.set()
+        release.wait(5)
+        return {}
+    monkeypatch.setattr(code_index_server, "build_and_save", slow_build)
+    build = asyncio.create_task(call(url, "build_index", repo_path="x"))
+    try:
+        async with asyncio.timeout(3):
+            while not started.is_set():
+                await asyncio.sleep(0.01)
+            async with session(url) as s:
+                assert len((await s.list_tools()).tools) == 4
+        assert not build.done()
+    finally:
+        release.set()
+    assert (await build) == (False, {})
 
 
 async def test_build_saves_index(url, repo):
@@ -143,9 +178,10 @@ async def test_stale_until_rebuild(url, repo):
 
 @pytest.mark.parametrize("damage", [
     lambda folder: (folder / "graph.json").write_text('{"nodes": {'),
+    lambda folder: (folder / "graph.json").write_text("{}"),
     lambda folder: shutil.rmtree(folder / "bm25"),
     lambda folder: (folder / "manifest.json").unlink(),
-], ids=["graph-truncated", "bm25-deleted", "manifest-deleted"])
+], ids=["graph-truncated", "graph-empty", "bm25-deleted", "manifest-deleted"])
 async def test_damaged_index(url, repo, damage):
     """Criterion 17: a missing or damaged index part gives an error that asks for a rebuild."""
     await call(url, "build_index", repo_path=str(repo))

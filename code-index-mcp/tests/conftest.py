@@ -118,6 +118,7 @@ FILES = {
     """,
     "broken.py": "def oops(:\n",
     ".venv/hidden.py": "def hidden():\n    pass\n",
+    "venv/installed.py": "def installed():\n    pass\n",
 }
 
 
