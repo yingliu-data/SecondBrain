@@ -50,7 +50,7 @@ def test_atlas_embeds_each_chunk_once_and_searches(live_store, repo, monkeypatch
     down the answer still comes by keyword."""
     sync(live_store, "code", repo)
     chunks = live_store.chunks.count_documents({})
-    assert chunks == 20
+    assert chunks == live_store.nodes.count_documents({"type": {"$in": ["class", "function"]}})
 
     def ready(index):
         status = next((i for i in live_store.chunks.list_search_indexes() if i["name"] == index), {})
@@ -65,6 +65,7 @@ def test_atlas_embeds_each_chunk_once_and_searches(live_store, repo, monkeypatch
 
     wait_until(lambda: live_store.keyword_names("calculate", {"is_latest": True}), "the nodes index")
     assert search(live_store, "calculate", detail="fold")["layer"] == 3
+    assert search(live_store, "calculate", history=True, detail="fold")["layer"] == 3
     found = search(live_store, "the sum of two numbers", detail="fold")
     assert found["layer"] == 4 and SUM in {r["id"] for r in found["results"]}
 

@@ -3,10 +3,10 @@
 One database holds four collections shared by every source (`code`, and
 `docs` later): `files` (one manifest row per indexed file), `nodes` (one
 document per version of a directory, file, class, function or section),
-`edges` (between logical IDs, with the file they were parsed from) and
-`chunks` (the text MongoDB embeds, one per node version). A node's logical
-ID `nid` is `<source>/<path>` for a file or `<source>/<path>:<name>` for an
-entity, and its `_id` is `<nid>@v<n>`.
+`edges` (between logical IDs, or between version IDs for `supersedes`, with
+the file they were parsed from) and `chunks` (the text MongoDB embeds, one
+per node version). A node's logical ID `nid` is `<source>/<path>` for a file
+or `<source>/<path>:<name>` for an entity, and its `_id` is `<nid>@v<n>`.
 
 Credentials are `MONGODB_USERNAME`, `MONGODB_PASSWORD`, `MONGODB_HOST` and
 `MONGODB_DB`, from the environment or from a `.env` in the current folder or
@@ -43,6 +43,8 @@ INDEXES = [
     ("nodes", ["is_latest", "source"], {}),
     ("nodes", ["path"], {}),
     ("nodes", ["created_at"], {}),
+    ("nodes", ["superseded_at"], {}),
+    ("nodes", ["removed_at"], {}),
     ("edges", ["src"], {}),
     ("edges", ["dst"], {}),
     ("edges", ["src_path"], {}),
@@ -100,7 +102,7 @@ def node(nid: str, *, type: str, source: str, path: str, title: str, heading_pat
 
 
 def edge(edge_type: str, src: str, dst: str, *, src_path: str, ambiguous: bool = False) -> dict:
-    """One edge between logical IDs, found again by the file it was parsed from."""
+    """One edge between logical IDs (version IDs for `supersedes`), found again by the file it was parsed from."""
     return {
         "type": edge_type,
         "src": src,
@@ -204,6 +206,7 @@ def _native_filter(match: dict) -> dict:
 
 
 def _search_stage(index: str, query: str, paths: list[str], match: dict) -> dict:
-    filters = [{"equals": {"path": key, "value": value}} for key, value in _native_filter(match).items()]
-    return {"$search": {"index": index, "compound": {"must": [{"text": {"query": query, "path": paths}}],
-                                                      "filter": filters}}}
+    compound: dict = {"must": [{"text": {"query": query, "path": paths}}]}
+    if filters := [{"equals": {"path": key, "value": value}} for key, value in _native_filter(match).items()]:
+        compound["filter"] = filters
+    return {"$search": {"index": index, "compound": compound}}

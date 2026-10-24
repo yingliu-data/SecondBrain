@@ -25,7 +25,8 @@ class or function is its own.
 
 Four variables, in `.env` at the repository root (see `.env.example`) or in the
 environment: `MONGODB_USERNAME`, `MONGODB_PASSWORD`, `MONGODB_HOST` (the cluster host
-alone, the URI is built from it) and `MONGODB_DB`. The indexer needs read and write;
+alone, the part after `@` in the connection string that Atlas shows under Clusters,
+Connect; the URI is built from it) and `MONGODB_DB`. The indexer needs read and write;
 give the server a read-only Atlas user (Database Access, role `read` on the database)
 in the environment it starts from, since the same variables serve both.
 

@@ -35,7 +35,8 @@ def test_missing_variable_is_named(monkeypatch):
 
 def test_ensure_indexes_creates_the_named_indexes(store):
     store.ensure_indexes()
-    assert {"nid_1", "names_1", "is_latest_1_source_1", "path_1", "created_at_1"} <= set(store.nodes.index_information())
+    assert {"nid_1", "names_1", "is_latest_1_source_1", "path_1", "created_at_1", "superseded_at_1", "removed_at_1"} <= set(
+        store.nodes.index_information())
     assert {"src_1", "dst_1", "src_path_1", "type_1_active_1"} <= set(store.edges.index_information())
     assert store.files.index_information()["source_1_path_1"]["unique"]
     assert "nid_1" in store.chunks.index_information()

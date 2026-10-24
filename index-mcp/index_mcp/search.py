@@ -18,14 +18,13 @@ import logging
 import re
 from datetime import datetime, timezone
 
-from index_mcp.store import Store, query_filter
+from index_mcp.store import OVERFETCH, Store, query_filter
 
 log = logging.getLogger(__name__)
 
 PREVIEW_LINES = 5
 PAGE_LINES = 200
 RRF_K = 60   # the usual constant of reciprocal rank fusion
-VERSION_SUFFIX = re.compile(r"@v\d+$")
 DEF_LINE = re.compile(r"\s*(async\s+)?(def|class)\s")
 TIMESTAMPS = ("created_at", "superseded_at", "removed_at")
 CHUNK_FIELDS = ("is_latest", "source", "path")
@@ -78,11 +77,12 @@ def _moment(text: str | None) -> datetime | None:
 
 def _content(store: Store, query: str, match: dict, limit: int) -> list[dict]:
     """Layer 4: chunks by keyword and by vector, fused by reciprocal rank, mapped to their
-    node versions; keyword results alone when vector search fails."""
+    node versions; keyword results alone when vector search fails. Chunks carry only
+    CHUNK_FIELDS, so both halves over-fetch and the other filters apply to the nodes."""
     chunk_match = {key: match[key] for key in CHUNK_FIELDS if key in match}
-    rankings = [store.keyword_text(query, chunk_match, limit)]
+    rankings = [store.keyword_text(query, chunk_match, limit * OVERFETCH)]
     try:
-        rankings.append(store.vector(query, chunk_match, limit))
+        rankings.append(store.vector(query, chunk_match, limit * OVERFETCH))
     except Exception as exc:
         log.warning("vector search failed, keyword results only: %s", exc)
     scores: dict[str, float] = {}
@@ -128,31 +128,38 @@ def _preview(node: dict) -> str:
     return "\n".join(lines[:PREVIEW_LINES])
 
 
-def logical_id(node_id: str) -> str:
-    """A version ID or a logical ID -> the logical ID."""
-    return VERSION_SUFFIX.sub("", node_id)
-
-
 def traverse(store: Store, start_ids: list[str], *, direction: str = "out", hops: int = 1,
              node_types: list[str] | None = None, edge_types: list[str] | None = None,
              max_fanout: int = 20) -> dict:
-    """The latest nodes within `hops` active edges of `start_ids`, one indexed query per hop
-    and at most `max_fanout` edges per node. `direction` is out, in or both."""
-    frontier = {logical_id(node_id) for node_id in start_ids}
-    nodes = {doc["nid"]: doc for doc in store.nodes.find({"nid": {"$in": list(frontier)}, "is_latest": True})}
+    """The nodes within `hops` active edges of `start_ids`, one indexed query per hop and at
+    most `max_fanout` edges per node. `direction` is out, in or both. An ID is a logical one
+    (its latest version) or a version ID; a `supersedes` edge joins two version IDs."""
+    nodes = _nodes_by_id(store, set(start_ids), None)
+    known = frontier = _keys(nodes)
     edges: list[dict] = []
     for _ in range(hops):
         found = [(edge, _ends(edge, frontier, direction)[1]) for edge in _hop(store, frontier, direction, edge_types, max_fanout)]
-        query = {"nid": {"$in": list({other for _, other in found} - nodes.keys())}, "is_latest": True}
-        if node_types:
-            query["type"] = {"$in": list(node_types)}
-        reached = {doc["nid"]: doc for doc in store.nodes.find(query)}
+        reached = _nodes_by_id(store, {other for _, other in found} - known, node_types)
         nodes.update(reached)
-        edges += [{"type": edge["type"], "src": edge["src"], "dst": edge["dst"]} for edge, other in found if other in nodes]
-        frontier = set(reached)
+        known |= _keys(reached)
+        edges += [{"type": edge["type"], "src": edge["src"], "dst": edge["dst"]} for edge, other in found if other in known]
+        frontier = _keys(reached)
         if not frontier:
             break
     return {"nodes": [render(doc, "fold") for doc in nodes.values()], "edges": edges}
+
+
+def _nodes_by_id(store: Store, ids: set[str], node_types: list[str] | None) -> dict[str, dict]:
+    """The nodes the IDs name, by version ID: a version ID as it was, a logical ID its latest version."""
+    query: dict = {"$or": [{"_id": {"$in": list(ids)}}, {"nid": {"$in": list(ids)}, "is_latest": True}]}
+    if node_types:
+        query["type"] = {"$in": list(node_types)}
+    return {doc["_id"]: doc for doc in store.nodes.find(query)}
+
+
+def _keys(nodes: dict[str, dict]) -> set[str]:
+    """Both IDs of each node, which is what an edge end may hold."""
+    return {key for doc in nodes.values() for key in (doc["_id"], doc["nid"])}
 
 
 def _hop(store: Store, frontier: set[str], direction: str, edge_types: list[str] | None, max_fanout: int) -> list[dict]:
@@ -236,13 +243,17 @@ def _page(lines: list[str], first: int, page: int) -> dict:
 
 def by_time(store: Store, time_range: list[str | None], *, scope: str | None = None,
             node_types: list[str] | None = None, limit: int = 50) -> list[dict]:
-    """The nodes added, superseded or removed in `time_range`, newest change first."""
+    """The nodes added, superseded or removed in `time_range`, newest change first: the top
+    `limit` of each timestamp's indexed query, merged, hold the top `limit` overall."""
     window = between(time_range)
     match = node_filter(scope=scope, node_types=node_types, history=True)
-    match["$or"] = [{field: window} for field in TIMESTAMPS]
-    changed = sorted(store.nodes.find(match), key=_changed_at, reverse=True)[:limit]
+    changed: dict[str, dict] = {}
+    for field in TIMESTAMPS:
+        for node in store.nodes.find({**match, field: window}, {"text": 0}).sort(field, -1).limit(limit):
+            changed[node["_id"]] = node
+    newest = sorted(changed.values(), key=_changed_at, reverse=True)[:limit]
     return [{**render(node, "fold"), "changed_at": _changed_at(node).isoformat(timespec="seconds")}
-            for node in changed]
+            for node in newest]
 
 
 def _changed_at(node: dict) -> datetime:

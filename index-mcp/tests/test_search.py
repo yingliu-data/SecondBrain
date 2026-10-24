@@ -78,6 +78,9 @@ def test_layer4_content(indexed):
     assert found["results"][0]["text"] == "def calculate_sum(a, b):\n    return a + b"
     assert search(indexed, "a + b", path_prefix="pkg/sub")["results"] == []
     assert search(indexed, "a + b", node_types=["class"])["results"] == []
+    # The first chunk for this query is a function's; the node type filter still finds the class.
+    found = search(indexed, "calculate_sum(a, b)", node_types=["class"], limit=1, detail="fold")
+    assert (found["layer"], ids(found)) == (4, [f"code/{UTILS}:MathUtils@v1"])
 
 
 def test_vector_failure_falls_back(indexed, caplog):
@@ -132,6 +135,18 @@ def test_traverse_two_hops_with_fanout(indexed):
     assert traverse(indexed, [SUM], node_types=["directory"])["edges"] == []
 
 
+def test_traverse_supersedes_between_versions(indexed, repo):
+    """A `supersedes` edge joins version IDs: from the latest version it reaches the superseded
+    one, which is not a latest node, and from a version ID `in` reaches the newer one."""
+    edit_sum(repo)
+    sync(indexed, "code", repo)
+    walk = traverse(indexed, [SUM], edge_types=["supersedes"])
+    assert [(n["id"], n["status"]) for n in walk["nodes"]] == [(f"{SUM}@v2", "latest"), (f"{SUM}@v1", "superseded")]
+    assert walk["edges"] == [{"type": "supersedes", "src": f"{SUM}@v2", "dst": f"{SUM}@v1"}]
+    back = traverse(indexed, [f"{SUM}@v1"], direction="in", edge_types=["supersedes"])
+    assert {n["id"] for n in back["nodes"]} == {f"{SUM}@v1", f"{SUM}@v2"}
+
+
 def test_retrieve_text_lines_and_newest(indexed, repo):
     """Criterion: RetrieveEntity gives the text with its line range, a superseded version points
     to the newest one, and `context_lines` widens a method with lines of its class."""
@@ -173,5 +188,6 @@ def test_by_time(indexed, repo):
     files = by_time(indexed, [before, None], node_types=["file"])
     assert [(c["id"], c["status"], c["location"]) for c in files] == [("code/pkg/shapes.py@v1", "removed", "pkg/shapes.py:1-3")]
     assert by_time(indexed, [None, "2000-01-01"]) == []
+    assert [c["id"] for c in by_time(indexed, [before, None], limit=1)] == [changed[0]["id"]]
     with pytest.raises(ValueError, match="start or an end"):
         by_time(indexed, [None, None])
