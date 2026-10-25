@@ -8,7 +8,8 @@ IDs for `supersedes`, with the source and file they were parsed from) and
 `chunks` (the text MongoDB embeds, one per node version). A node's logical ID
 `nid` is `<source>/<path>` for a file, `<source>/<path>:<name>` for a code
 entity and `<source>/<path>#<heading path>` for a Markdown section, and its
-`_id` is `<nid>@v<n>`.
+`_id` is `<nid>@v<n>`. A fifth, `sessions`, holds one record per indexed chat
+session: its cursor and its lease (see `memory`).
 
 Credentials are `MONGODB_USERNAME`, `MONGODB_PASSWORD`, `MONGODB_HOST` and
 `MONGODB_DB`, from the environment or else from a `.env` in the current folder
@@ -159,6 +160,7 @@ class Store:
         self.nodes = self.db["nodes"]
         self.edges = self.db["edges"]
         self.chunks = self.db["chunks"]
+        self.sessions = self.db["sessions"]
 
     @classmethod
     def connect(cls) -> Store:
