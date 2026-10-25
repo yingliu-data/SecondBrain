@@ -11,8 +11,9 @@ one conditional update and skips the session when another run holds it.
 Every write is an upsert on a fixed ID (`<source>/<session>` for the session,
 `<session ID>:turn-<n>` for a turn) or on an edge's type and ends, so a run
 that stops part-way leaves the cursor where it was, and the next run writes
-the same turns again without inserting anything twice. The cursor moves and
-the lease is released last.
+the same turns again without inserting anything twice. The memory files the
+session wrote or removed are indexed, or marked removed, by the indexer's own
+versioning, and only those. The cursor moves and the lease is released last.
 """
 from __future__ import annotations
 
@@ -23,7 +24,7 @@ from typing import NamedTuple
 
 from pymongo import ReturnDocument, UpdateOne
 
-from ast_everything.indexer import valid_source
+from ast_everything.indexer import index_files, remove_files, valid_source
 from ast_everything.store import Store, chunk, edge, node, now
 
 LEASE_S = 10 * 60
@@ -38,9 +39,11 @@ class Turn(NamedTuple):
 
 
 def index_session(store: Store, source: str, session: str, title: str, turns: list[Turn],
-                  lease_s: float = LEASE_S) -> Counter | None:
+                  lease_s: float = LEASE_S, memory_root: Path | None = None,
+                  memory_files: dict[str, str] | None = None) -> Counter | None:
     """Index the turns of `session` (its path in `source`, as `sessions/<tenant>/<id>`) that come
-    after its cursor. None when another run holds the session's lease."""
+    after its cursor, and the `<slug>.md` files of `memory_files` ({slug: "write" | "remove"})
+    under `memory_root`. None when another run holds the session's lease."""
     sid = f"{valid_source(source)}/{session}"
     record = _take_lease(store, source, sid, lease_s)
     if record is None:
@@ -55,6 +58,8 @@ def index_session(store: Store, source: str, session: str, title: str, turns: li
                      chunks_inserted=_upsert(store.chunks, chunks, ("_id",)),
                      edges_inserted=_upsert(store.edges, _edges(sid, source, session, cursor, turn_nodes),
                                             ("type", "src", "dst")))
+    if memory_files:
+        counts.update(_index_memory(store, source, memory_root, memory_files))
     _commit(store, sid, max([cursor, *(turn.n for turn in new)]))
     return counts
 
@@ -110,6 +115,15 @@ def _upsert(collection, docs: list[dict], keys: tuple[str, ...]) -> int:
                      {"$setOnInsert": {k: v for k, v in doc.items() if k != "_id"}}, upsert=True)
            for doc in docs]
     return collection.bulk_write(ops, ordered=False).upserted_count
+
+
+def _index_memory(store: Store, source: str, root: Path, files: dict[str, str]) -> Counter:
+    """Index the written files that exist, and mark the others removed."""
+    paths = [root / f"{slug}.md" for slug in files]
+    written = [path for path, op in zip(paths, files.values()) if op == "write" and path.is_file()]
+    counts = index_files(store, source, root, written)
+    counts["nodes_removed"] += remove_files(store, source, [path.name for path in paths if path not in written])
+    return counts
 
 
 def _commit(store: Store, sid: str, last: int) -> None:

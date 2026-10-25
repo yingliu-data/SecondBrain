@@ -111,3 +111,44 @@ def test_held_lease_skips(store, monkeypatch):
     assert run(store, 1, 2, 3, 4) is None
     assert counts(store) == before
     assert store.sessions.find_one({"_id": SID})["status"] == "indexing"
+
+
+def write_memory(root, slug: str, body: str) -> None:
+    root.mkdir(exist_ok=True)
+    (root / f"{slug}.md").write_text(f"---\nname: {slug}\ndescription: about {slug}\ntype: user\n---\n\n{body}\n")
+
+
+def run_with_memory(store, root, files: dict[str, str]):
+    return index_session(store, SOURCE, SESSION, TITLE, turns(1), memory_root=root, memory_files=files)
+
+
+def test_dirty_files_only(store, tmp_path):
+    """Criterion 4: a memory file the session wrote gets the doc converter's next version and a
+    `supersedes` edge; a file it did not touch keeps its manifest row, even when it changed on disk."""
+    root = tmp_path / "memory"
+    write_memory(root, "editor", "Uses vim.")
+    write_memory(root, "language", "Writes Python.")
+    run_with_memory(store, root, {"editor": "write", "language": "write"})
+    untouched = store.files.find_one({"path": "language.md"})
+    write_memory(root, "editor", "Uses helix now.")
+    write_memory(root, "language", "Writes Rust.")
+    result = run_with_memory(store, root, {"editor": "write"})
+    assert result["files"] == 1
+    doc = store.nodes.find_one({"nid": f"{SOURCE}/editor.md", "is_latest": True})
+    assert doc["_id"] == f"{SOURCE}/editor.md@v2"
+    assert store.edges.find_one({"type": "supersedes", "src": doc["_id"], "dst": f"{SOURCE}/editor.md@v1"})
+    assert store.files.find_one({"path": "language.md"}) == untouched
+
+
+def test_forgotten_file_is_marked_removed(store, tmp_path):
+    """Criterion 4: a file the session forgot gets `removed_at` on its nodes and its manifest row,
+    and nothing is deleted."""
+    root = tmp_path / "memory"
+    write_memory(root, "editor", "Uses vim.")
+    run_with_memory(store, root, {"editor": "write"})
+    before = counts(store)
+    (root / "editor.md").unlink()
+    result = run_with_memory(store, root, {"editor": "remove"})
+    assert result["nodes_removed"] > 0 and counts(store) == before
+    assert all(doc["removed_at"] and not doc["is_latest"] for doc in store.nodes.find({"path": "editor.md"}))
+    assert store.files.find_one({"path": "editor.md"})["removed_at"] is not None
