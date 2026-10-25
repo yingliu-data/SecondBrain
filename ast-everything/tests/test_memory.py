@@ -152,3 +152,16 @@ def test_forgotten_file_is_marked_removed(store, tmp_path):
     assert result["nodes_removed"] > 0 and counts(store) == before
     assert all(doc["removed_at"] and not doc["is_latest"] for doc in store.nodes.find({"path": "editor.md"}))
     assert store.files.find_one({"path": "editor.md"})["removed_at"] is not None
+
+
+def test_removed_file_written_again_is_kept(store, tmp_path):
+    """Criterion 4 (review request 1): a file this session removed but a later session wrote
+    again is on disk, so it is indexed, not marked removed."""
+    root = tmp_path / "memory"
+    write_memory(root, "editor", "Uses vim.")
+    run_with_memory(store, root, {"editor": "write"})
+    write_memory(root, "editor", "Uses helix now.")
+    result = run_with_memory(store, root, {"editor": "remove"})
+    assert result["nodes_removed"] == 0
+    assert store.nodes.find_one({"nid": f"{SOURCE}/editor.md", "is_latest": True})["_id"] == f"{SOURCE}/editor.md@v2"
+    assert store.files.find_one({"path": "editor.md"})["removed_at"] is None

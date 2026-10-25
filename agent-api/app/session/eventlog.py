@@ -30,6 +30,8 @@ from pathlib import Path
 from ast_everything.memory import Turn
 from protocol.replay import iter_runs
 
+from app.user.memory import _VALID_SLUG
+
 _ERROR_TRACE = {
     "transient": "llm_error", "overflow": "llm_error", "budget": "llm_error",
     "limit": "loop_exhausted", "protocol": "error", "fatal": "error",
@@ -178,11 +180,12 @@ def _said(ev: dict, compactions: set) -> tuple[str, str] | None:
 
 
 def memory_changes(session_root: Path | str) -> dict[str, str]:
-    """{slug: its last op} of the session's `memory` events of the user scope."""
+    """{slug: its last op} of the session's `memory` events of the user scope. A slug the memory
+    store would refuse is left out: the guest writes the log, and a slug becomes a path."""
     changes: dict[str, str] = {}
     for events in iter_runs(Path(session_root)):
         for ev in events:
             b = ev.get("body") or {}
-            if ev.get("type") == "memory" and b.get("scope") == "user":
+            if ev.get("type") == "memory" and b.get("scope") == "user" and _VALID_SLUG.fullmatch(b["slug"]):
                 changes[b["slug"]] = b["op"]
     return changes

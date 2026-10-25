@@ -12,7 +12,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from datetime import datetime
 from pathlib import Path
 
 from ast_everything.indexer import source_name
@@ -36,10 +35,6 @@ def memory_source(user: str) -> str:
 def _newest_write(session_root: Path) -> float:
     """The mtime of the newest segment of the session's runs (0 with none); the host log is not one."""
     return max((path.stat().st_mtime for path in session_root.glob("events/r*/*.jsonl")), default=0.0)
-
-
-def _seconds(moment: datetime | None) -> float:
-    return moment.timestamp() if moment else 0.0
 
 
 class MemoryIndexer:
@@ -80,17 +75,21 @@ class MemoryIndexer:
 
     def _index(self, user: str, tenant: str, session_id: str) -> None:
         """Index the session unless its log is no newer than its last index (a trigger that
-        fired with another, which got there first)."""
+        fired with another, which got there first). The record keeps `log_mtime`, the newest
+        log write read before the turns, so a turn written during the run is indexed next."""
         session = self.sessions.get(user, tenant, session_id)
         if session is None:
             return
         source, path = memory_source(user), f"sessions/{tenant}/{session_id}"
-        record = self._store().sessions.find_one({"_id": f"{source}/{path}"})
-        if _newest_write(session.root) <= _seconds((record or {}).get("indexed_at")):
+        record = self._store().sessions.find_one({"_id": f"{source}/{path}"}) or {}
+        newest = _newest_write(session.root)
+        if newest <= record.get("log_mtime", 0):
             return
-        index_session(self._store(), source, path,
-                      session.read_meta().get("title") or session_id, session_turns(session.root),
-                      memory_root=Path(USERS_ROOT) / user / "memory", memory_files=memory_changes(session.root))
+        counts = index_session(self._store(), source, path,
+                               session.read_meta().get("title") or session_id, session_turns(session.root),
+                               memory_root=Path(USERS_ROOT) / user / "memory", memory_files=memory_changes(session.root))
+        if counts is not None:
+            self._store().sessions.update_one({"_id": f"{source}/{path}"}, {"$set": {"log_mtime": newest}})
 
     async def check(self, idle_s: float) -> None:
         """Index each session of the tenants whose log is idle for `idle_s` and newer than its last index."""
@@ -100,7 +99,7 @@ class MemoryIndexer:
 
     def _due(self, user: str, tenant: str, idle_s: float) -> list[str]:
         source = memory_source(user)
-        indexed = {doc["_id"]: _seconds(doc["indexed_at"]) for doc in self._store().sessions.find({"source": source})}
+        indexed = {doc["_id"]: doc.get("log_mtime", 0) for doc in self._store().sessions.find({"source": source})}
         idle_since = time.time() - idle_s
         due = []
         for meta in self.sessions.list_for_tenant(user, tenant):

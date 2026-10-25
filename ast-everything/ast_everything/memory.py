@@ -12,12 +12,14 @@ Every write is an upsert on a fixed ID (`<source>/<session>` for the session,
 `<session ID>:turn-<n>` for a turn) or on an edge's type and ends, so a run
 that stops part-way leaves the cursor where it was, and the next run writes
 the same turns again without inserting anything twice. The memory files the
-session wrote or removed are indexed, or marked removed, by the indexer's own
-versioning, and only those. The cursor moves and the lease is released last.
+session wrote or removed are indexed when on disk, or marked removed when gone,
+by the indexer's own versioning, and only those. The cursor moves and the lease
+is released last.
 """
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Iterable
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import NamedTuple
@@ -40,10 +42,10 @@ class Turn(NamedTuple):
 
 def index_session(store: Store, source: str, session: str, title: str, turns: list[Turn],
                   lease_s: float = LEASE_S, memory_root: Path | None = None,
-                  memory_files: dict[str, str] | None = None) -> Counter | None:
+                  memory_files: Iterable[str] | None = None) -> Counter | None:
     """Index the turns of `session` (its path in `source`, as `sessions/<tenant>/<id>`) that come
-    after its cursor, and the `<slug>.md` files of `memory_files` ({slug: "write" | "remove"})
-    under `memory_root`. None when another run holds the session's lease."""
+    after its cursor, and the `<slug>.md` files under `memory_root` of the slugs the session wrote or
+    removed (`memory_files`). None when another run holds the session's lease."""
     sid = f"{valid_source(source)}/{session}"
     record = _take_lease(store, source, sid, lease_s)
     if record is None:
@@ -117,12 +119,13 @@ def _upsert(collection, docs: list[dict], keys: tuple[str, ...]) -> int:
     return collection.bulk_write(ops, ordered=False).upserted_count
 
 
-def _index_memory(store: Store, source: str, root: Path, files: dict[str, str]) -> Counter:
-    """Index the written files that exist, and mark the others removed."""
-    paths = [root / f"{slug}.md" for slug in files]
-    written = [path for path, op in zip(paths, files.values()) if op == "write" and path.is_file()]
-    counts = index_files(store, source, root, written)
-    counts["nodes_removed"] += remove_files(store, source, [path.name for path in paths if path not in written])
+def _index_memory(store: Store, source: str, root: Path, slugs: Iterable[str]) -> Counter:
+    """Index the files that exist, and mark the others removed: the disk decides, since a later
+    session may have written again a file this one removed."""
+    paths = [root / f"{slug}.md" for slug in slugs]
+    present = [path for path in paths if path.is_file()]
+    counts = index_files(store, source, root, present)
+    counts["nodes_removed"] += remove_files(store, source, [path.name for path in paths if path not in present])
     return counts
 
 

@@ -73,3 +73,12 @@ def test_memory_changes_are_the_last_user_op(session):
     compact(log)
     store(session, log.events)
     assert memory_changes(session.root) == {"editor": "remove", "language": "write"}
+
+
+def test_memory_changes_leave_out_a_bad_slug(session):
+    """Criterion 4 (review request 2): a slug that is not a memory store slug never becomes a path."""
+    log = LogBuilder().start().tool_task("in_1", "remember this", "noted")
+    memory(log, "user", "write", "../../secret")
+    memory(log, "user", "write", "editor")
+    store(session, log.events)
+    assert memory_changes(session.root) == {"editor": "write"}

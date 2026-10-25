@@ -1532,7 +1532,10 @@ class Workers:
 
     def _closed(self, key: str) -> None:
         if self.on_closed is not None:
-            self.on_closed(key)
+            try:
+                self.on_closed(key)
+            except Exception:   # the hook never breaks eviction or close
+                logger.exception("session %s: on_closed failed", key)
 
     async def shutdown(self, park_s: float = HARNESS_SHUTDOWN_PARK_S) -> None:
         """Every Worker closed; first (park_s > 0) every running guest is

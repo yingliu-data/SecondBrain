@@ -153,3 +153,22 @@ async def test_guest_tenant_skipped(indexer, runs, tmp_path):
     assert indexer.closed(session_key("u", "guest", "s1")) is None
     await indexer.check(0)
     assert runs == []
+
+
+@pytest.mark.asyncio
+async def test_turns_written_during_a_run_are_indexed_next(indexer, runs, tmp_path, monkeypatch):
+    """Criterion 2 (review request 4): a log write that lands after a run read the turns, but
+    before it committed, makes the next trigger index the session again."""
+    session = chat(indexer, tmp_path)
+    age(session, 60)
+    read = memory_index.session_turns
+
+    def read_then_write(root):
+        turns = read(root)
+        age(session, 0)
+        return turns
+    monkeypatch.setattr(memory_index, "session_turns", read_then_write)
+    await indexer.closed(KEY)
+    monkeypatch.setattr(memory_index, "session_turns", read)
+    await indexer.check(0)
+    assert runs == ["sessions/t/s1", "sessions/t/s1"]

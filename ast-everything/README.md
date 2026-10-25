@@ -72,9 +72,10 @@ are found by ID, by traversal, or through their section.
 
 Edges: `contains` (the session to each turn) and `precedes` (each turn to the next).
 Each turn is chunked, split at paragraphs past about 500 words, each part headed by
-the session title. The user memory files the session wrote are indexed with the
-Markdown parser, as `memory-<user>/<slug>.md`, and the ones it removed are marked
-removed; no other file is read.
+the session title. The user memory files the session wrote or removed are indexed
+with the Markdown parser, as `memory-<user>/<slug>.md`, when they are on disk, and
+marked removed when they are gone (another session may have written one again); no
+other file is read.
 
 The session's record in `sessions` holds the cursor `indexed_through_turn` (a run
 indexes only the turns after it), `last_turn`, `indexed_at`, `status`, and a lease
@@ -86,7 +87,7 @@ agent-api runs it on the host ([memory_index.py](../agent-api/app/host/memory_in
 from the session's event log, when `MEMORY_INDEX` is on (default off): when a session's
 Worker closes (idle eviction, `HARNESS_WORKER_EVICT_S`), when its log has not changed for
 30 minutes (checked every 5), and at startup for every session changed since its last
-index. The guest tenant is not indexed. A failed run is a warning, and the next check
+index (the record's `log_mtime`: the newest log write read before the turns). The guest tenant is not indexed. A failed run is a warning, and the next check
 tries again. Every turn goes to Atlas and is embedded there, billed per token; to stop,
 turn `MEMORY_INDEX` off and restart agent-api (the nodes stay in the store).
 
