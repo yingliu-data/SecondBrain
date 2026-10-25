@@ -97,7 +97,9 @@ nodes stay in the store).
 
 The agent's tools show a user only their own memory source: an unscoped search leaves
 out the other users' `memory-*` sources (those with session records), `ast_sources` does
-not list them, and a `scope` or an ID in one of them is refused.
+not list them, and a `scope` or an ID in one of them is refused. This hides the index, but
+it is no access boundary: `ast_index(path=...)` reads any folder on the host, another
+user's memory folder too, into a new source that is not hidden.
 
 ## Credentials
 
@@ -153,9 +155,9 @@ users' memory sources.
 a value outside its bounds is refused with an error that names the argument. When
 MongoDB is down or the credentials are wrong, the tool answers with an error that says so.
 
-The first index job creates the ordinary indexes and the three Atlas Search indexes of
-[ast_everything/atlas/](ast_everything/atlas/). The vector index embeds every new chunk
-with `voyage-4`, which Atlas bills per token.
+The first index job, and the memory index's first run, create the ordinary indexes and
+the three Atlas Search indexes of [ast_everything/atlas/](ast_everything/atlas/). The
+vector index embeds every new chunk with `voyage-4`, which Atlas bills per token.
 
 ## From the command line
 

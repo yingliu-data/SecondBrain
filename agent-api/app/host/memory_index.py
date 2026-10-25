@@ -51,7 +51,10 @@ class MemoryIndexer:
 
     def _store(self) -> Store:
         if self.store is None:
-            self.store = self.connect()
+            store = self.connect()
+            store.ensure_indexes()
+            store.ensure_search_indexes()
+            self.store = store
         return self.store
 
     def closed(self, key: str) -> asyncio.Task | None:

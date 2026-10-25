@@ -205,3 +205,11 @@ async def test_a_failing_session_gives_its_slot_back(indexer, runs, tmp_path, mo
     await indexer.index("u", "t", "s1")
     await indexer.check(0)
     assert runs == ["sessions/t/s2"]
+
+
+@pytest.mark.asyncio
+async def test_the_first_run_creates_the_indexes(indexer, mongo, tmp_path):
+    """Review round 4, request 3: the indexer creates the store's indexes before it writes."""
+    chat(indexer, tmp_path)
+    await indexer.closed(KEY)
+    assert "nid_1" in mongo.nodes.index_information() and "src_1" in mongo.edges.index_information()

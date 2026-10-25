@@ -75,14 +75,15 @@ def test_vector_stage_takes_the_limit_as_is_within_the_cap(store):
 
 def test_a_hidden_source_is_matched_after_the_search_stage(store):
     """Issue #56, review round 2, request 1: a `$nin` on `source` is no Atlas Search filter;
-    the `$match` after the stage applies it."""
+    the `$match` after the stage applies it. Review round 4, request 2: `$vectorSearch` filters
+    on it before its limit, so hidden chunks that rank higher take no candidate."""
     pipelines = []
     store.chunks.aggregate = lambda pipeline: pipelines.append(pipeline) or []
     match = {"is_latest": True, "source": {"$nin": ["memory-bob"]}}
     Store.vector(store, "q", match, 10)
     Store.keyword_text(store, "q", match, 10)
     vector, keyword = pipelines
-    assert vector[0]["$vectorSearch"]["filter"] == {"is_latest": True}
+    assert vector[0]["$vectorSearch"]["filter"] == match
     assert keyword[0]["$search"]["compound"]["filter"] == [{"equals": {"path": "is_latest", "value": True}}]
     assert vector[1] == keyword[1] == {"$match": match}
 

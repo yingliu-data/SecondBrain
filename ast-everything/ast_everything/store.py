@@ -195,14 +195,15 @@ class Store:
         return self._run(self.chunks, stage, match, limit)
 
     def vector(self, query: str, match: dict, limit: int = 10) -> list[dict]:
-        """Layer 4, semantic half: `$vectorSearch` over chunk text, embedded by Atlas, within `match`."""
+        """Layer 4, semantic half: `$vectorSearch` over chunk text, embedded by Atlas, within `match`.
+        Its filter also takes a `source` operator (`$nin`), since its `limit` cuts before the `$match`."""
         stage = {"$vectorSearch": {
             "index": "chunks_vector",
             "path": "text",
             "query": query,
             "numCandidates": min(limit * 10, MAX_CANDIDATES),
             "limit": limit,
-            "filter": _native_filter(match),
+            "filter": {key: match[key] for key in ("is_latest", "source") if key in match},
         }}
         return self._run(self.chunks, stage, match, limit)
 
