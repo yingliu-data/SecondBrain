@@ -183,8 +183,11 @@ async def test_vendor_error_then_next_turn(local_chat, upstream):
 def run_cli(tmp_path, upstream, *args, **env) -> subprocess.Popen:
     config = tmp_path / "config.json"
     config.write_text(json.dumps({"llm": {"vendor": "vllm", "model": "m"}}))
+    env_file = tmp_path / "empty.env"                # not the repo .env
+    env_file.write_text("")
     return subprocess.Popen(
-        [sys.executable, "-m", "app.cli", "--config", str(config), *args], cwd=AGENT_API,
+        [sys.executable, "-m", "app.cli", "--config", str(config), "--env-file", str(env_file), *args],
+        cwd=AGENT_API,
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         env={**os.environ, "LLM_URL": upstream.url, "SESSIONS_ROOT": str(tmp_path / "sessions"),
              "USERS_ROOT": str(tmp_path / "users"), "TENANTS_FILE": str(tmp_path / "none.json"), **env})
@@ -228,3 +231,47 @@ def test_cli_refuses_bad_config(tmp_path, upstream, args, env, named):
     assert proc.returncode == 2
     assert named in err and "session:" not in out
     assert guests(tmp_path) == [] and upstream.requests == []
+
+
+async def test_commands_and_continuation(local_chat, upstream):
+    """/session, /new, an unknown command and /quit are handled by the chat,
+    not sent to the agent; a line ending in a backslash continues on the next."""
+    upstream.responses = [{"content": "got it"}]
+    out = Out()
+    await cli.chat_loop(FakeTenant(), "s1", lines("/session", "/new", "/nope", "line one \\", "line two",
+                                                   "/quit", "never sent"), out)
+    shown = text_of(out)
+    assert "session: s1" in shown and "unknown command /nope" in shown
+    new_id = shown.split("session: ")[2].split("\n")[0]
+    assert new_id != "s1"
+    assert "got it" in shown and "never sent" not in json.dumps(upstream.requests)
+    user = [m for m in upstream.requests[0]["messages"] if m["role"] == "user"]
+    assert "line one \nline two" in json.dumps(user[-1]["content"]).replace("\\n", "\n")
+    assert len(upstream.requests) == 1
+
+
+async def test_tool_result_and_footer(local_chat, upstream):
+    """A tool's result is shown after its call (events come in batches, maybe
+    after the reply's text), on a line of its own; each input ends with a
+    footer of its time."""
+    upstream.responses = [tool_call(("get_calendar_events", {"day": "today"})), {"content": "done"}]
+    out = Out()
+    await cli.chat_loop(FakeTenant(), "s1", lines("look"), out)
+    shown = text_of(out).splitlines()
+    call = shown.index('[tool] get_calendar_events({"day": "today"})')
+    assert any(line.startswith("  ↳ error: device-side call timed out") for line in shown[call + 1:])
+    assert any(line.startswith("(") and line.endswith(")") and "s" in line for line in shown)
+
+
+def test_env_file(tmp_path, monkeypatch):
+    """The env file's values are trimmed and unquoted, comments and blank lines
+    skipped, and a variable already set wins."""
+    env = tmp_path / ".env"
+    env.write_text("# a comment\n\nCLI_T_A= padded \nCLI_T_B=\"quoted\"\nexport CLI_T_C=c\nCLI_T_D=file\n")
+    monkeypatch.setenv("CLI_T_D", "set")
+    for k in ("CLI_T_A", "CLI_T_B", "CLI_T_C"):
+        monkeypatch.delenv(k, raising=False)
+    cli._load_env_file(env)
+    assert [os.environ[k] for k in ("CLI_T_A", "CLI_T_B", "CLI_T_C", "CLI_T_D")] == ["padded", "quoted", "c", "set"]
+    for k in ("CLI_T_A", "CLI_T_B", "CLI_T_C"):
+        monkeypatch.delenv(k)
