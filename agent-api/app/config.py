@@ -160,6 +160,9 @@ SESSION_BACKEND = _setting("SESSION_BACKEND", "dir")
 SESSION_DB_PATH = _setting("SESSION_DB_PATH", "data/conversations.db")
 SESSIONS_ROOT = _setting("SESSIONS_ROOT", "data/sessions")   # dir backend
 USERS_ROOT = _setting("USERS_ROOT", "data/users")            # user-scope memory/profile
+# Index closed and idle chat sessions into the ast-everything memory graph (app/host/memory_index.py):
+# their turns go to MongoDB Atlas (the MONGODB_* settings)
+MEMORY_INDEX = _flag("MEMORY_INDEX", False)
 # ast_index skill: where `ast_index(git_url=...)` keeps its clones
 AST_REPOS_DIR = _setting("AST_REPOS_DIR", "data/ast-everything/repos")
 

@@ -137,3 +137,26 @@ async def test_a_parked_session_with_a_device_call_or_a_question_is_not_evicted(
             assert evicted == [] and workers.get(KEY) is w and not w.closed
     finally:
         await workers.shutdown(park_s=0)
+
+
+@pytest.mark.asyncio
+async def test_a_raising_on_closed_hook_breaks_no_eviction_or_close(tmp_path):
+    """Issue #56, review request 3: an `on_closed` hook that raises is logged; every evicted
+    Worker is still closed, and so is one closed by key."""
+    store = DirStore(tmp_path / "sessions")
+    workers = Workers(sandbox_factory=lambda: FakeSandbox([]), sessions=store, evict_s=0,
+                      device_calls=DeviceCalls(), **worker_kwargs())
+
+    def boom(key):
+        raise ValueError(key)
+    workers.on_closed = boom
+    tenant = FakeTenant()
+    try:
+        evicted = [await workers.open(tenant, sid, FakeRegistry()) for sid in ("s1", "s2")]
+        assert len(await workers.evict_idle(grace_s=0)) == 2
+        assert all(w.closed for w in evicted)
+        w = await workers.open(tenant, "s3", FakeRegistry())
+        await workers.close(session_key("u", "t", "s3"))
+        assert w.closed and workers.get(session_key("u", "t", "s3")) is None
+    finally:
+        await workers.shutdown(park_s=0)

@@ -8,7 +8,8 @@ IDs for `supersedes`, with the source and file they were parsed from) and
 `chunks` (the text MongoDB embeds, one per node version). A node's logical ID
 `nid` is `<source>/<path>` for a file, `<source>/<path>:<name>` for a code
 entity and `<source>/<path>#<heading path>` for a Markdown section, and its
-`_id` is `<nid>@v<n>`.
+`_id` is `<nid>@v<n>`. A fifth, `sessions`, holds one record per indexed chat
+session: its cursor and its lease (see `memory`).
 
 Credentials are `MONGODB_USERNAME`, `MONGODB_PASSWORD`, `MONGODB_HOST` and
 `MONGODB_DB`, from the environment or else from a `.env` in the current folder
@@ -159,6 +160,7 @@ class Store:
         self.nodes = self.db["nodes"]
         self.edges = self.db["edges"]
         self.chunks = self.db["chunks"]
+        self.sessions = self.db["sessions"]
 
     @classmethod
     def connect(cls) -> Store:
@@ -193,14 +195,15 @@ class Store:
         return self._run(self.chunks, stage, match, limit)
 
     def vector(self, query: str, match: dict, limit: int = 10) -> list[dict]:
-        """Layer 4, semantic half: `$vectorSearch` over chunk text, embedded by Atlas, within `match`."""
+        """Layer 4, semantic half: `$vectorSearch` over chunk text, embedded by Atlas, within `match`.
+        Its filter also takes a `source` operator (`$nin`), since its `limit` cuts before the `$match`."""
         stage = {"$vectorSearch": {
             "index": "chunks_vector",
             "path": "text",
             "query": query,
             "numCandidates": min(limit * 10, MAX_CANDIDATES),
             "limit": limit,
-            "filter": _native_filter(match),
+            "filter": {key: match[key] for key in ("is_latest", "source") if key in match},
         }}
         return self._run(self.chunks, stage, match, limit)
 
@@ -209,8 +212,8 @@ class Store:
 
 
 def _native_filter(match: dict) -> dict:
-    """The part of `match` a search stage filters on itself; the rest is matched after it."""
-    return {key: match[key] for key in ("is_latest", "source") if key in match}
+    """The part of `match` a search stage filters on itself (equal values); the rest is matched after it."""
+    return {key: match[key] for key in ("is_latest", "source") if key in match and not isinstance(match[key], dict)}
 
 
 def _search_stage(index: str, query: str, paths: list[str], match: dict) -> dict:

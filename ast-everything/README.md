@@ -1,24 +1,27 @@
 # ast-everything
 
-A library that turns Python and Markdown files into AST-style nodes and edges in a
-MongoDB Atlas store, versioned and add-only, and searches them, so an agent finds
-code and documents without reading every file. It is a member of the uv workspace;
-agent-api offers it to agents as the host tools of its `ast_index` skill
+A library that turns Python and Markdown files, and the agent's chat sessions, into
+AST-style nodes and edges in a MongoDB Atlas store, versioned and add-only, and
+searches them, so an agent finds code, documents and past conversations without
+reading every file. It is a member of the uv workspace, and it stands alone: copy the
+folder into another project and any Python agent can use its tools (see "The agent's
+tools"). agent-api offers them to its agents as the host tools of its `ast_index` skill
 ([agent-api/app/skills/ast_index/](../agent-api/app/skills/ast_index/)), which hold
 the Atlas credentials, so the guest never sees them.
 
 ## The store
 
-One database (`MONGODB_DB`, default `secondbrain`) with four collections shared by
+One database (`MONGODB_DB`, default `secondbrain`) with five collections shared by
 every source. A source is one indexed project, folder or document set, and its name
 heads every ID, so two sources never share a node:
 
 - `files`: one manifest row per indexed file (hash, size, mtime, versions,
   `removed_at`, `skipped_reason`);
 - `nodes`: one document per version of a node;
-- `edges`: `contains`, `imports`, `invokes`, `inherits`, `links_to`, and `supersedes`
-  between versions, each with the source and file it was parsed from;
-- `chunks`: the text Atlas embeds, one per version of a chunked node.
+- `edges`: `contains`, `imports`, `invokes`, `inherits`, `links_to`, `precedes`, and
+  `supersedes` between versions, each with the source and file it was parsed from;
+- `chunks`: the text Atlas embeds, one per version of a chunked node;
+- `sessions`: one record per indexed chat session (see "Session memory").
 
 A version's ID is `<id>@v<n>`. Indexing is add-only: a changed node gets a new version
 and a `supersedes` edge, a removed file or node gets `removed_at`, a restored file
@@ -58,6 +61,46 @@ Edges: `contains` (document, sections, subsections, blocks, list items) and `lin
 by relative link). Documents and sections are chunked; blocks are not embedded and
 are found by ID, by traversal, or through their section.
 
+## Session memory
+
+[memory.py](ast_everything/memory.py) indexes one chat session at a time into the source
+`memory-<user>`: `index_session(store, source, session, title, turns, memory_root=, memory_files=)`.
+
+| Node | ID | Text |
+|---|---|---|
+| `session` | `memory-<user>/sessions/<tenant>/<session_id>` | the session's title |
+| `turn` | `<session>:turn-<n>` | what was said; `said_by` (`user` or `assistant`) and `at` |
+
+Edges: `contains` (the session to each turn) and `precedes` (each turn to the next).
+Each turn is chunked, split at paragraphs past about 500 words, each part headed by
+the session title. The user memory files the session wrote or removed are indexed
+with the Markdown parser, as `memory-<user>/<slug>.md`, when they are on disk, and
+marked removed when they are gone (another session may have written one again); no
+other file is read.
+
+The session's record in `sessions` holds the cursor `indexed_through_turn` (a run
+indexes only the turns after it), `last_turn`, `indexed_at`, `status`, and a lease
+`lock_until` (10 minutes) that one run takes with a conditional update: a second run
+of the same session meanwhile skips it. Every write is an upsert on a fixed ID, so a
+run that stops part-way is completed by the next one, and a second run inserts nothing.
+
+agent-api runs it on the host ([memory_index.py](../agent-api/app/host/memory_index.py)),
+from the session's event log, when `MEMORY_INDEX` is on (default off): when a session's
+Worker closes (idle eviction, `HARNESS_WORKER_EVICT_S`), when its log has not changed for
+30 minutes (checked every 5), and at startup for every session changed since its last
+index (the record's `log_mtime`: the newest log write read before the turns). A check
+indexes at most 20 sessions and logs the size of a larger backlog, so the first start
+drains past sessions over the next checks. The guest tenant is not indexed. A failed run
+is a warning, and the next check tries again, after the sessions that did not fail. Every
+turn goes to Atlas and is embedded there, billed per token; to stop, turn `MEMORY_INDEX` off and restart agent-api (the
+nodes stay in the store).
+
+The agent's tools show a user only their own memory source: an unscoped search leaves
+out the other users' `memory-*` sources (those with session records), `ast_sources` does
+not list them, and a `scope` or an ID in one of them is refused. This hides the index, but
+it is no access boundary: `ast_index(path=...)` reads any folder on the host, another
+user's memory folder too, into a new source that is not hidden.
+
 ## Credentials
 
 Four variables, from the environment or else from `.env` at the repository root (see
@@ -68,16 +111,32 @@ environment, and the local sandbox strips `MONGODB_*` from the guest's environme
 Indexing needs a user with `readWrite` on the database. Atlas must allow the host's IP
 (Network Access): an IP it does not allow fails with `TLSV1_ALERT_INTERNAL_ERROR`.
 
-## The agent's tools (`ast_index` skill)
+## The agent's tools
 
-- `ast_index(path | workspace_path | git_url, name, wait_s)`: indexes a folder or one
-  file on the host, in the session's workspace (as of the end of the last task), or a
-  git repo cloned under `AST_REPOS_DIR` (default `data/ast-everything/repos`), as the
-  source `name` (default: made from the folder or repo name). It runs in the background
-  and returns a `job_id`; one job per source runs at a time. `wait_s` (0 to 120) waits
-  for the job in the same call and answers with its counts, at most
-  `HARNESS_HOST_TOOL_TIMEOUT_S` less 5 seconds (55 by default). In the agent-api
-  container a host path is visible only when mounted.
+[tools.py](ast_everything/tools.py) holds the tool definitions (OpenAI function format)
+and runs them, so any Python agent can offer them once the `MONGODB_*` variables are set:
+
+```python
+from ast_everything.tools import AstTools
+
+tools = AstTools()                                    # MONGODB_* from the environment or .env
+tools.definitions                                     # give these to the model
+answer = tools.call("ast_search", {"query": "setup"})  # JSON text, or "Error: ..."
+```
+
+`AstTools` also takes `repos_dir` (where git clones go; default `AST_REPOS_DIR`, else
+`data/ast-everything/repos`), `workspace` (a function that returns the folder
+`workspace_path` resolves in, or None) and `hidden` (a function that takes the store and
+returns the sources the caller may not read). `call` blocks; an async agent runs it in a
+thread. agent-api's `ast_index` skill gives the session's workspace and hides the other
+users' memory sources.
+
+- `ast_index(path | workspace_path | git_url, name)`: indexes a folder or one file on
+  the host, in the session's workspace (as of the end of the last task), or a git repo
+  cloned under `repos_dir`, as the source `name` (default: made from the folder or repo
+  name; a name starting with `memory-` is refused). It runs in the background and
+  returns a `job_id`; one job per source runs at a time. In the agent-api container a
+  host path is visible only when mounted.
 - `ast_index_status(job_id)`: the job's state (`running`, `done`, `failed`), its counts
   or its error.
 - `ast_sources()`: the indexed sources with their file counts.
@@ -96,9 +155,9 @@ Indexing needs a user with `readWrite` on the database. Atlas must allow the hos
 a value outside its bounds is refused with an error that names the argument. When
 MongoDB is down or the credentials are wrong, the tool answers with an error that says so.
 
-The first index job creates the ordinary indexes and the three Atlas Search indexes of
-[ast_everything/atlas/](ast_everything/atlas/). The vector index embeds every new chunk
-with `voyage-4`, which Atlas bills per token.
+The first index job, and the memory index's first run, create the ordinary indexes and
+the three Atlas Search indexes of [ast_everything/atlas/](ast_everything/atlas/). The
+vector index embeds every new chunk with `voyage-4`, which Atlas bills per token.
 
 ## From the command line
 

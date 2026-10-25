@@ -250,6 +250,12 @@ def _write_edges(store: Store, source: str, rel: str, edges: set[tuple[str, str,
         store.edges.insert_many(new)
 
 
+def remove_files(store: Store, source: str, rels: list[str]) -> int:
+    """Mark each of the files at `rels` that is indexed and not removed yet as removed; the nodes removed."""
+    present = store.files.distinct("path", {"source": source, "path": {"$in": rels}, "removed_at": None})
+    return sum(_remove_file(store, source, rel) for rel in present)
+
+
 def _remove_file(store: Store, source: str, rel: str) -> int:
     """A file that is gone: its latest nodes, its parsed edges, the edges into it and its manifest
     row are marked removed."""

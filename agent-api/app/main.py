@@ -7,6 +7,7 @@ from app.auth.guest import guest_manager
 from app.tenants import create_tenant_registry
 from app.routes import chat, tool_result, skills, health, sessions, guest
 from app.gateway import events as gateway_events
+from app.config import MEMORY_INDEX
 
 # ── Logging ──────────────────────────────────────────────────
 logging.basicConfig(
@@ -102,6 +103,29 @@ async def _start_temporal():
 async def _stop_temporal():
     from app.host import temporal
     await temporal.stop()
+
+
+_memory_index_task = None
+
+
+@app.on_event("startup")
+async def _start_memory_index():
+    # MEMORY_INDEX: a closed or idle session goes into the memory graph
+    global _memory_index_task
+    if MEMORY_INDEX:
+        import asyncio
+        from app.host.memory_index import MemoryIndexer
+        indexer = MemoryIndexer(chat.sessions, tenant_registry.all_tenants())
+        chat.workers.on_closed = indexer.closed
+        _memory_index_task = asyncio.get_running_loop().create_task(indexer.run(), name="memory-index")
+
+
+@app.on_event("shutdown")
+async def _stop_memory_index():
+    # before _stop_harness_workers: the Workers it closes start no index run
+    chat.workers.on_closed = None
+    if _memory_index_task is not None:
+        _memory_index_task.cancel()
 
 
 @app.on_event("shutdown")
