@@ -112,7 +112,9 @@ TOOLS = [
         "Find nodes in the index: by exact ID (`proj/pkg/utils.py:MathUtils.double`, `proj/docs/a.md#setup`), "
         "else by name (a file, class, function or heading), else by keyword over names, else by content "
         "(keyword and meaning). The first layer with hits answers. `node_types`: directory, file, class, "
-        "function, document, section, paragraph, list, list_item, table, code, quote, html. `history` also "
+        "function, document, section, paragraph, list, list_item, table, code, quote, html, session, turn. "
+        "Past chat sessions (session and turn nodes) and the user's memory files are the source "
+        "`memory-<user>`; every source is searched unless `scope` names one. `history` also "
         "shows superseded and removed versions. `detail`: fold (ID, type, location, status), preview "
         "(adds the first lines), full (adds the text).",
         {"query": {"type": "string"}, "scope": SCOPE, "node_types": STR_LIST,
@@ -122,8 +124,9 @@ TOOLS = [
     _function(
         "ast_traverse",
         "The nodes within `hops` edges of `start_ids` (IDs from ast_search), and those edges. Edge types: "
-        "contains, imports, invokes, inherits, links_to, supersedes. `out` follows edges from the start, "
-        "`in` edges into it, `both` either way; at most `max_fanout` edges per node.",
+        "contains, imports, invokes, inherits, links_to, precedes (a turn to the next), supersedes. `out` "
+        "follows edges from the start, `in` edges into it, `both` either way; at most `max_fanout` edges "
+        "per node.",
         {"start_ids": STR_LIST, "direction": {"type": "string", "enum": list(DIRECTIONS)},
          "hops": {"type": "integer", "minimum": 1, "maximum": 5}, "node_types": STR_LIST,
          "edge_types": STR_LIST, "max_fanout": {"type": "integer", "minimum": 1, "maximum": 100}},

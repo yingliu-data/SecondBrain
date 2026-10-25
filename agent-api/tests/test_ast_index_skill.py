@@ -6,12 +6,14 @@ import asyncio
 import json
 import subprocess
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import mongomock
 import pytest
 
 from ast_everything import store as store_module
+from ast_everything.memory import Turn, index_session
 from ast_everything.store import Store
 
 from app.skills import base
@@ -102,6 +104,27 @@ def test_index_a_host_folder_then_search_traverse_and_retrieve(skill, project):
     [main] = json.loads(call(skill, "ast_retrieve", ids=["proj/app.py:main"]))["results"]
     assert (main["lines"], main["text"]) == ([1, 2], "def main():\n    return helper()")
     assert json.loads(call(skill, "ast_search", query="nothing-like-it"))["message"] == "no layer matched"
+
+
+def test_memory_source_is_searchable(skill, mongo, project):
+    """Criterion 5 of issue #56 (plan step 5): an indexed chat session is found by ID, by name and
+    by time, in every source by default and with `scope` set to the memory source; ast_traverse walks
+    from the session to its turns and from one turn to the next."""
+    index(skill, path=str(project))
+    at = datetime(2026, 10, 24, tzinfo=timezone.utc)
+    index_session(mongo, "memory-u", "sessions/t/s1", "Choosing an editor",
+                  [Turn(1, "user", at, "Which editor?"), Turn(2, "assistant", at, "Try helix.")])
+    session = "memory-u/sessions/t/s1"
+    assert json.loads(call(skill, "ast_search", query="s1"))["results"][0]["id"] == f"{session}@v1"
+    found = json.loads(call(skill, "ast_search", query=f"{session}:turn-2", scope="memory-u", detail="full"))
+    assert [(r["type"], r["text"]) for r in found["results"]] == [("turn", "Try helix.")]
+    assert json.loads(call(skill, "ast_search", query="main", scope="memory-u"))["results"] == []
+    recent = json.loads(call(skill, "ast_search_by_time", time_range=["2026-01-01", None], node_types=["turn"]))
+    assert len(recent["results"]) == 2
+    walked = json.loads(call(skill, "ast_traverse", start_ids=[session], hops=2, edge_types=["contains", "precedes"]))
+    assert {(e["type"], e["src"], e["dst"]) for e in walked["edges"]} == {
+        ("contains", session, f"{session}:turn-1"), ("contains", session, f"{session}:turn-2"),
+        ("precedes", f"{session}:turn-1", f"{session}:turn-2")}
 
 
 def test_index_one_file_under_a_given_name(skill, project):

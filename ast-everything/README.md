@@ -1,24 +1,26 @@
 # ast-everything
 
-A library that turns Python and Markdown files into AST-style nodes and edges in a
-MongoDB Atlas store, versioned and add-only, and searches them, so an agent finds
-code and documents without reading every file. It is a member of the uv workspace;
+A library that turns Python and Markdown files, and the agent's chat sessions, into
+AST-style nodes and edges in a MongoDB Atlas store, versioned and add-only, and
+searches them, so an agent finds code, documents and past conversations without
+reading every file. It is a member of the uv workspace;
 agent-api offers it to agents as the host tools of its `ast_index` skill
 ([agent-api/app/skills/ast_index/](../agent-api/app/skills/ast_index/)), which hold
 the Atlas credentials, so the guest never sees them.
 
 ## The store
 
-One database (`MONGODB_DB`, default `secondbrain`) with four collections shared by
+One database (`MONGODB_DB`, default `secondbrain`) with five collections shared by
 every source. A source is one indexed project, folder or document set, and its name
 heads every ID, so two sources never share a node:
 
 - `files`: one manifest row per indexed file (hash, size, mtime, versions,
   `removed_at`, `skipped_reason`);
 - `nodes`: one document per version of a node;
-- `edges`: `contains`, `imports`, `invokes`, `inherits`, `links_to`, and `supersedes`
-  between versions, each with the source and file it was parsed from;
-- `chunks`: the text Atlas embeds, one per version of a chunked node.
+- `edges`: `contains`, `imports`, `invokes`, `inherits`, `links_to`, `precedes`, and
+  `supersedes` between versions, each with the source and file it was parsed from;
+- `chunks`: the text Atlas embeds, one per version of a chunked node;
+- `sessions`: one record per indexed chat session (see "Session memory").
 
 A version's ID is `<id>@v<n>`. Indexing is add-only: a changed node gets a new version
 and a `supersedes` edge, a removed file or node gets `removed_at`, a restored file
@@ -57,6 +59,36 @@ Edges: `contains` (document, sections, subsections, blocks, list items) and `lin
 (from a block to a section of the same file by `#anchor`, or to another indexed file
 by relative link). Documents and sections are chunked; blocks are not embedded and
 are found by ID, by traversal, or through their section.
+
+## Session memory
+
+[memory.py](ast_everything/memory.py) indexes one chat session at a time into the source
+`memory-<user>`: `index_session(store, source, session, title, turns, memory_root=, memory_files=)`.
+
+| Node | ID | Text |
+|---|---|---|
+| `session` | `memory-<user>/sessions/<tenant>/<session_id>` | the session's title |
+| `turn` | `<session>:turn-<n>` | what was said; `said_by` (`user` or `assistant`) and `at` |
+
+Edges: `contains` (the session to each turn) and `precedes` (each turn to the next).
+Each turn is chunked, split at paragraphs past about 500 words, each part headed by
+the session title. The user memory files the session wrote are indexed with the
+Markdown parser, as `memory-<user>/<slug>.md`, and the ones it removed are marked
+removed; no other file is read.
+
+The session's record in `sessions` holds the cursor `indexed_through_turn` (a run
+indexes only the turns after it), `last_turn`, `indexed_at`, `status`, and a lease
+`lock_until` (10 minutes) that one run takes with a conditional update: a second run
+of the same session meanwhile skips it. Every write is an upsert on a fixed ID, so a
+run that stops part-way is completed by the next one, and a second run inserts nothing.
+
+agent-api runs it on the host ([memory_index.py](../agent-api/app/host/memory_index.py)),
+from the session's event log, when `MEMORY_INDEX` is on (default off): when a session's
+Worker closes (idle eviction, `HARNESS_WORKER_EVICT_S`), when its log has not changed for
+30 minutes (checked every 5), and at startup for every session changed since its last
+index. The guest tenant is not indexed. A failed run is a warning, and the next check
+tries again. Every turn goes to Atlas and is embedded there, billed per token; to stop,
+turn `MEMORY_INDEX` off and restart agent-api (the nodes stay in the store).
 
 ## Credentials
 

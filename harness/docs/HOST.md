@@ -103,7 +103,8 @@ calls from the fold, so the result is accepted and wakes the guest.
   question park, no attached stream and no background work is closed and
   dropped (`workflow{kind: evicted}`; its threads, proxy and folded state
   released; a parked VM's process is stopped, its snapshot stays). The next
-  request rebuilds it from disk.
+  request rebuilds it from disk. `Workers.on_closed` is called with the key of
+  each Worker closed (with `MEMORY_INDEX`, the memory index of the session).
 - **Plumbing** (listeners, LLM proxy, accept thread, Sides, pump) is made
   on the first use that needs a guest; a task makes it only once it holds
   its slot of the cap. The LLM proxy and the gateway relay of every session
