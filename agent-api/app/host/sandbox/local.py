@@ -106,6 +106,43 @@ def _cmdline(pid: int) -> str:
         return ""
 
 
+def _argv(pid: int) -> list[str]:
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as fh:
+            return fh.read().decode("utf-8", "replace").split("\0")
+    except OSError:
+        return []
+
+
+def _stray_guests(session_dir: Path) -> list[int]:
+    """The guest processes still connected to `session_dir` (`--connect
+    unix:{session_dir}/ipc`) that no sandbox object holds: a host that ended
+    without stopping its guest leaves one, and it would take the next run's
+    link with its old cseq and seq. Nothing without /proc."""
+    connect = f"unix:{session_dir / 'ipc'}"
+    try:
+        names = os.listdir("/proc")
+    except OSError:
+        return []
+    pids = []
+    for name in names:
+        if name.isdigit() and int(name) != os.getpid():
+            argv = _argv(int(name))
+            if "guest.main" in argv and connect in argv and not _is_zombie(int(name)):
+                pids.append(int(name))
+    return pids
+
+
+def _kill_stray(pid: int) -> None:
+    stray = _Frozen(pid)
+    stray.kill()
+    _signal_group(pid, signal.SIGCONT)       # a frozen one dies only once it runs
+    try:
+        stray.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        logger.warning("stray guest pid=%s did not exit", pid)
+
+
 def _signal_group(pid: int, sig: int) -> None:
     try:
         os.killpg(pid, sig)
@@ -137,6 +174,9 @@ class LocalSandbox(Sandbox):
             return
         session_dir = Path(session_dir)
         self.session_dir = session_dir
+        for pid in _stray_guests(session_dir):   # one guest per session, as one VM
+            logger.warning("stopping stray guest pid=%s of %s", pid, session_dir)
+            _kill_stray(pid)
         log_dir = session_dir / "guest"
         log_dir.mkdir(parents=True, exist_ok=True)
         workspace = session_dir / "vm" / "workspace"     # private: see the module doc

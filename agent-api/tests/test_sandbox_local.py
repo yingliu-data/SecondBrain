@@ -175,6 +175,43 @@ def test_restore_base_replaces_a_stale_frozen_guest(guest_root, session_dir):
         sb.stop()
 
 
+def test_start_stops_a_stray_guest_of_the_session(guest_root, session_dir, tmp_path):
+    """A guest left running by a host that ended without stopping it would take
+    the next run's link; a start stops it, and leaves other sessions' guests."""
+    other_dir = tmp_path / "sessions" / "owner" / "default_l2"
+    other_dir.mkdir(parents=True)
+    other = LocalSandbox(guest_root=guest_root)
+    other.start(other_dir)
+    old = LocalSandbox(guest_root=guest_root)
+    old.start(session_dir)
+    _wait_ticks(session_dir, 1)
+    stray, old.proc = old.proc.pid, None            # the host that started it is gone
+    sb = LocalSandbox(guest_root=guest_root)
+    try:
+        sb.start(session_dir)
+        assert _gone(stray), "stray guest survived the start"
+        assert sb.is_alive() and sb.proc.pid != stray
+        assert other.is_alive()
+    finally:
+        sb.stop()
+        other.stop()
+
+
+def test_start_stops_a_frozen_stray_guest(guest_root, session_dir):
+    old = LocalSandbox(guest_root=guest_root)
+    old.start(session_dir)
+    _wait_ticks(session_dir, 1)
+    stray = old.proc.pid
+    old.snapshot(session_dir / "vm" / "snapshot")
+    old._frozen = None                              # forgotten while frozen
+    sb = LocalSandbox(guest_root=guest_root)
+    try:
+        sb.start(session_dir)
+        assert _gone(stray), "frozen stray guest survived the start"
+    finally:
+        sb.stop()
+
+
 def test_restore_while_running_is_an_error(guest_root, session_dir):
     sb = LocalSandbox(guest_root=guest_root)
     sb.start(session_dir)
