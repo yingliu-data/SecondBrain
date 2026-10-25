@@ -2,6 +2,8 @@
 
   read_trace(session_root, since=, limit=) -> list[row]   the trace viewer's rows
   trace_rows(runs) -> list[row]                           the same from runs in memory
+  session_turns(session_root) -> list[Turn]               the conversation, for the memory index
+  memory_changes(session_root) -> {slug: op}              the user memory files it wrote or removed
 
 The event log is canonical; `history.jsonl` and `logs/trace.jsonl` are no
 longer written (the projections kept for one release are retired). Trace
@@ -25,6 +27,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
+from ast_everything.memory import Turn
 from protocol.replay import iter_runs
 
 _ERROR_TRACE = {
@@ -145,3 +148,41 @@ def read_trace(session_root: Path | str, *, since: datetime | None = None,
         if len(kept) < len(rows) or (limit is not None and len(out) >= limit):
             break
     return _last(out, limit)
+
+
+def session_turns(session_root: Path | str) -> list[Turn]:
+    """The conversation of every run, oldest first, numbered from 1: the text of each new
+    input (`user`) and each text answer with no tool calls (`assistant`), at its event's
+    ts. The summary of a compaction turn is not a turn."""
+    turns: list[Turn] = []
+    for events in iter_runs(Path(session_root)):
+        compactions = {ev["body"].get("turn_id") for ev in events
+                       if ev.get("type") == "turn_start" and ev["body"].get("type") == "compaction"}
+        for ev in events:
+            if said := _said(ev, compactions):
+                turns.append(Turn(len(turns) + 1, said[0], parse_ts(ev.get("ts")), said[1]))
+    return turns
+
+
+def _said(ev: dict, compactions: set) -> tuple[str, str] | None:
+    """(said_by, text) when the event is a turn of the conversation."""
+    b = ev.get("body") or {}
+    if ev.get("type") == "input" and b.get("dedupe") == "new" and b.get("text"):
+        return "user", b["text"]
+    msg = b.get("message") or {}
+    text = msg.get("content")
+    if (ev.get("type") == "llm_response" and not msg.get("tool_calls") and b.get("turn_id") not in compactions
+            and isinstance(text, str) and text.strip()):
+        return "assistant", text
+    return None
+
+
+def memory_changes(session_root: Path | str) -> dict[str, str]:
+    """{slug: its last op} of the session's `memory` events of the user scope."""
+    changes: dict[str, str] = {}
+    for events in iter_runs(Path(session_root)):
+        for ev in events:
+            b = ev.get("body") or {}
+            if ev.get("type") == "memory" and b.get("scope") == "user":
+                changes[b["slug"]] = b["op"]
+    return changes
