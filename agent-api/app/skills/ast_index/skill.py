@@ -2,7 +2,8 @@
 AST-style nodes and edges in MongoDB, and the search over them.
 
 This skill gives the tools the session's workspace (`workspace_path`: the host copy,
-synced when a task ends) and hides the other users' memory sources. The MongoDB
+synced when a task ends), hides the other users' memory sources and refuses a `path` in
+USERS_ROOT or SESSIONS_ROOT (any user's memory files and session workspaces). The MongoDB
 credentials are agent-api's (`ast_everything.store.settings`: the environment, else the
 repo `.env`); the guest never sees them.
 """
@@ -11,11 +12,11 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+from ast_everything.memory import memory_source
 from ast_everything.store import Store
 from ast_everything.tools import AstTools
 
-from app.config import AST_REPOS_DIR
-from app.host.memory_index import memory_source
+from app.config import AST_REPOS_DIR, SESSIONS_ROOT, USERS_ROOT
 from app.skills.base import BaseSkill, get_current_session, get_current_user_id
 
 
@@ -39,7 +40,8 @@ class AstIndexSkill(BaseSkill):
     keywords = ["index", "ast", "parse", "mongodb", "codebase", "markdown", "search code"]
 
     def __init__(self, connect=Store.connect, repos_dir: str | Path = AST_REPOS_DIR):
-        self.tools = AstTools(connect, repos_dir, workspace=_workspace, hidden=_other_users_memory)
+        self.tools = AstTools(connect, repos_dir, workspace=_workspace, hidden=_other_users_memory,
+                              private_roots=(USERS_ROOT, SESSIONS_ROOT))
 
     def get_tool_definitions(self) -> list[dict]:
         return self.tools.definitions

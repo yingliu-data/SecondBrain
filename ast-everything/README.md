@@ -102,7 +102,9 @@ new chunk with `voyage-4`, which Atlas bills per token.
 - `workspace`: a function that returns the folder `workspace_path` resolves in, or
   None (the default, which leaves `workspace_path` unusable);
 - `hidden`: a function that takes the store and returns the sources the caller may not
-  read (default none).
+  read (default none);
+- `private_roots`: folders an `ast_index(path=...)` may neither be in nor hold, such as
+  other users' data (default none).
 
 The tools:
 
@@ -111,7 +113,8 @@ The tools:
   the source `name` (default: made from the folder or repo name; a name starting with
   `memory-` is refused). It runs in the background, in this process, and returns a
   `job_id`; one job per source runs at a time, and jobs are forgotten on restart
-  (indexing again is cheap: unchanged files are skipped).
+  (indexing again is cheap: unchanged files are skipped). A job's `target` keeps a git
+  URL without its credentials (`https://***@host/...`), and so does its `error`.
 - `ast_index_status(job_id)`: the job's state (`running`, `done`, `failed`), its counts
   or its error.
 - `ast_sources()`: the indexed sources with their file counts.
@@ -130,9 +133,11 @@ The tools:
 a value outside its bounds is refused with an error that names the argument. When
 MongoDB is down or the credentials are wrong, the tool answers with an error that says so.
 
-`ast_index(path=...)` reads any folder the process can read. `hidden` hides sources
-from the read tools, but it is no access boundary: an agent that must not read the
-whole machine needs a process that can read only what it may.
+`ast_index(path=...)` reads any folder the process can read that is neither in nor
+above one of `private_roots`.
+`hidden` hides sources from the read tools, and `private_roots` keeps folders out of
+new sources, but neither is a sandbox: an agent that must not read the whole machine
+needs a process that can read only what it may.
 
 ## The store
 
@@ -233,10 +238,11 @@ depends on it (`ast-everything = { workspace = true }`). The credentials come fr
 so the credentials stay on the host and the guest never sees them. The skill gives
 `AstTools` the session's workspace (as of the end of the last task) and hides the other
 users' memory sources (those with session records): an unscoped search leaves them out,
-`ast_sources` does not list them, and a `scope` or an ID in one of them is refused. As
-above, this is no access boundary: `ast_index(path=...)` reads any folder on the host,
-another user's memory folder too, into a new source that is not hidden. In the
-agent-api container a host path is visible only when mounted.
+`ast_sources` does not list them, and a `scope` or an ID in one of them is refused. Its
+`private_roots` are `USERS_ROOT` and `SESSIONS_ROOT`, so `ast_index(path=...)` cannot
+index any user's memory files or session workspace (the session's own workspace is
+reached through `workspace_path`). In the agent-api container a host path is visible
+only when mounted.
 
 **The memory index.** agent-api runs `index_session` on the host
 ([memory_index.py](../agent-api/app/host/memory_index.py)), from the session's event

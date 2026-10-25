@@ -14,6 +14,14 @@ from protocol.ports import PORTS
 CONFIG_FILE = os.environ.get("CONFIG_FILE", "data/config.json")
 
 
+def is_host_secret(name: str) -> bool:
+    """A host secret, kept out of the config file and the guest's env: the API key, the
+    gateway bearer and other tokens (CF_TUNNEL_TOKEN), the LLM vendor keys, the email
+    skill's accounts (their passwords) and the MongoDB credentials (the ast_index skill's)."""
+    return (name in ("API_SECRET_KEY", "EMAIL_ACCOUNTS") or name.endswith(("_API_KEY", "_TOKEN", "_PASSWORD", "_SECRET"))
+            or name.startswith("MONGODB_"))
+
+
 def load_config_file(path: str) -> dict:
     """The JSON object in `path`, {} when there is no file. ValueError names the
     file or the field when it is not valid or holds a secret."""
@@ -35,7 +43,7 @@ def load_config_file(path: str) -> dict:
         if key not in ("vendor", "model", "url", "api_key_env"):
             raise ValueError(f"{path}: llm.{key}: not one of vendor, model, url, api_key_env")
     for name in data.get("settings", {}):
-        if name in ("API_SECRET_KEY", "INTERNAL_TOKEN") or name.endswith("_API_KEY"):
+        if is_host_secret(name):
             raise ValueError(f"{path}: settings.{name}: a secret stays in the env")
     return data
 

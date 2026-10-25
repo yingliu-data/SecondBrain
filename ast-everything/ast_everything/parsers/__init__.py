@@ -35,12 +35,16 @@ def parse(source: str, rel: str, data: bytes):
 
 def iter_files(root: Path):
     """The files under `root` that a parser reads, in a stable order, without the folders
-    that `_skip_dir` names."""
+    that `_skip_dir` names. A symlink is read only when its target is under `root` too: one
+    out of it (into another user's data, say) would read past the check on the root alone.
+    A symlinked folder is not walked (os.walk follows none)."""
+    resolved = Path(root).resolve()
     for folder, dirs, files in os.walk(root):
         dirs[:] = sorted(d for d in dirs if not _skip_dir(Path(folder, d)))
         for name in sorted(files):
-            if parser_for(name):
-                yield Path(folder, name)
+            path = Path(folder, name)
+            if parser_for(name) and path.resolve().is_relative_to(resolved):
+                yield path
 
 
 def _skip_dir(path: Path) -> bool:

@@ -59,17 +59,13 @@ def _file_settings(path: str) -> dict:
 
 
 def _load_env_file(path: Path) -> None:
-    """The file's KEY=VALUE lines into the environment, values trimmed and one
-    pair of quotes dropped (as docker compose reads it); a variable already set
-    wins."""
-    for line in path.read_text().splitlines():
-        key, sep, value = line.strip().partition("=")
-        key, value = key.strip().removeprefix("export "), value.strip()
-        if not sep or not key or key.startswith("#"):
-            continue
-        if len(value) > 1 and value[0] == value[-1] and value[0] in "'\"":
-            value = value[1:-1]
-        os.environ.setdefault(key, value)
+    """The file's KEY=VALUE lines into the environment, read by python-dotenv
+    (as ast_everything.store reads it: quotes dropped, inline `# comments`
+    ignored, as docker compose does); a variable already set wins."""
+    from dotenv import dotenv_values
+    for key, value in dotenv_values(path).items():
+        if value is not None:
+            os.environ.setdefault(key, value)
 
 
 def _local_env(config_file: str) -> None:

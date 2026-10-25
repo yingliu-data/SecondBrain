@@ -135,6 +135,23 @@ def test_bad_index_input_is_refused(tools, args, message):
     assert answer.startswith("Error:") and message in answer
 
 
+def test_a_path_in_a_private_root_is_refused(store, tmp_path, project):
+    tools = AstTools(lambda: store, tmp_path / "repos", private_roots=[tmp_path / "proj"])
+    for path in (project, project / "docs" / "guide.md", tmp_path / "other" / ".." / "proj", tmp_path):
+        assert call(tools, "ast_index", path=str(path)) == f"Error: path is in or holds a private folder: {path}"
+
+
+@pytest.mark.parametrize("url, shown", [
+    ("https://alice:ghp_secret@github.com/o/r.git", "https://***@github.com/o/r.git"),
+    ("https://ghp_secret@github.com/o/r.git", "https://***@github.com/o/r.git"),
+    ("ssh://git@github.com/o/r.git", "ssh://git@github.com/o/r.git"),
+    ("https://github.com/o/r.git", "https://github.com/o/r.git"),
+    ("git@github.com:o/r.git", "git@github.com:o/r.git"),
+])
+def test_a_git_url_password_is_not_in_the_job(url, shown):
+    assert tools_module._redacted(url) == shown
+
+
 def test_a_file_no_parser_reads_is_refused(tools, tmp_path):
     (tmp_path / "x.txt").write_text("text")
     assert "no parser for x.txt" in call(tools, "ast_index", path=str(tmp_path / "x.txt"))

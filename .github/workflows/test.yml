@@ -1,6 +1,6 @@
 name: Test
 
-# The four suites against the one workspace lock (root pyproject.toml +
+# The five suites against the one workspace lock (root pyproject.toml +
 # uv.lock), one job per suite and Python version, plus a guest-image smoke
 # test, a lint job (ruff, config in the root pyproject.toml) and a lock
 # check (uv.lock matches every pyproject.toml). Each suite is
@@ -23,7 +23,7 @@ on:
   workflow_call:
     inputs:
       suites:
-        description: 'JSON list of suites to run (default: all four, plus guest.pyz)'
+        description: 'JSON list of suites to run (default: all five, plus guest.pyz)'
         type: string
         required: false
 
@@ -43,7 +43,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: ${{ fromJSON(inputs.suites || '["harness", "flows", "agent-api", "mcp-gateway"]') }}
+        suite: ${{ fromJSON(inputs.suites || '["harness", "flows", "agent-api", "mcp-gateway", "ast-everything"]') }}
         # 3.12 = the images (python:3.12-slim) and requires-python's floor
         python: ['3.12', '3.13']
     env:

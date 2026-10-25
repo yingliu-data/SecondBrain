@@ -222,9 +222,15 @@ def test_restore_while_running_is_an_error(guest_root, session_dir):
         sb.stop()
 
 
-def test_guest_environment_has_no_mongodb_credentials(guest_root, session_dir, monkeypatch):
-    """The host's MONGODB_* variables (the ast_index skill's) never reach the guest's shell."""
+HOST_SECRETS = ("OPENAI_API_KEY", "API_SECRET_KEY", "INTERNAL_TOKEN", "CF_TUNNEL_TOKEN", "EMAIL_ACCOUNTS")
+
+
+def test_guest_environment_has_no_host_secrets(guest_root, session_dir, monkeypatch):
+    """The host's MONGODB_* variables (the ast_index skill's), the LLM vendor keys, the API
+    key, the tokens (gateway bearer, tunnel) and the email accounts never reach the guest's shell."""
     monkeypatch.setenv("MONGODB_PASSWORD", "secret")
+    for name in HOST_SECRETS:
+        monkeypatch.setenv(name, "secret")
     monkeypatch.setenv("SB_TEST_VISIBLE", "1")
     (guest_root / "guest" / "main.py").write_text(
         "import json, os, sys, time\n"
@@ -241,5 +247,6 @@ def test_guest_environment_has_no_mongodb_credentials(guest_root, session_dir, m
             time.sleep(0.02)
         names = json.loads(out.read_text())
         assert "SB_TEST_VISIBLE" in names and not any(n.startswith("MONGODB_") for n in names)
+        assert not set(HOST_SECRETS) & set(names)
     finally:
         sb.stop()

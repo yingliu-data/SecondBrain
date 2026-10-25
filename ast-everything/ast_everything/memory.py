@@ -26,11 +26,17 @@ from typing import NamedTuple
 
 from pymongo import ReturnDocument, UpdateOne
 
-from ast_everything.indexer import index_files, remove_files, valid_source
+from ast_everything.indexer import index_files, remove_files, source_name, valid_source
 from ast_everything.store import Store, chunk, edge, node, now
 
+MEMORY_PREFIX = "memory-"   # reserved for `memory_source`: an index tool's source never has it
 LEASE_S = 10 * 60
 CHUNK_WORDS = 500
+
+
+def memory_source(user: str) -> str:
+    """The source of a user's sessions and memory files."""
+    return source_name(f"{MEMORY_PREFIX}{user}")
 
 
 class Turn(NamedTuple):

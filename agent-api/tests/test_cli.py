@@ -267,11 +267,14 @@ def test_env_file(tmp_path, monkeypatch):
     """The env file's values are trimmed and unquoted, comments and blank lines
     skipped, and a variable already set wins."""
     env = tmp_path / ".env"
-    env.write_text("# a comment\n\nCLI_T_A= padded \nCLI_T_B=\"quoted\"\nexport CLI_T_C=c\nCLI_T_D=file\n")
+    env.write_text("# a comment\n\nCLI_T_A= padded \nCLI_T_B=\"quoted\"\nexport CLI_T_C=c\nCLI_T_D=file\n"
+                   "CLI_T_E=value   # an inline comment\nCLI_T_F=          # an empty value\n")
     monkeypatch.setenv("CLI_T_D", "set")
-    for k in ("CLI_T_A", "CLI_T_B", "CLI_T_C"):
+    names = ("CLI_T_A", "CLI_T_B", "CLI_T_C", "CLI_T_E", "CLI_T_F")
+    for k in names:
         monkeypatch.delenv(k, raising=False)
     cli._load_env_file(env)
-    assert [os.environ[k] for k in ("CLI_T_A", "CLI_T_B", "CLI_T_C", "CLI_T_D")] == ["padded", "quoted", "c", "set"]
-    for k in ("CLI_T_A", "CLI_T_B", "CLI_T_C"):
+    assert [os.environ[k] for k in ("CLI_T_A", "CLI_T_B", "CLI_T_C", "CLI_T_D", "CLI_T_E", "CLI_T_F")] == [
+        "padded", "quoted", "c", "set", "value", ""]
+    for k in names:
         monkeypatch.delenv(k)

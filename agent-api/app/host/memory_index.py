@@ -15,12 +15,12 @@ import logging
 import time
 from pathlib import Path
 
-from ast_everything.indexer import source_name
-from ast_everything.memory import index_session
+from ast_everything.memory import index_session, memory_source
 from ast_everything.store import Store
 
 from app.config import USERS_ROOT
 from app.session.eventlog import memory_changes, session_turns
+from app.session.ids import session_key
 from app.tenants.registry import GUEST_TENANT
 
 logger = logging.getLogger(__name__)
@@ -30,8 +30,9 @@ CHECK_EVERY_S = 5 * 60
 MAX_PER_CHECK = 20   # sessions one check indexes; a backlog (the first start) drains over the next checks
 
 
-def memory_source(user: str) -> str:
-    return source_name(f"memory-{user}")
+def _session_path(tenant: str, session_id: str) -> str:
+    """The session's path in its memory source; `<source>/<path>` is its record's `_id`."""
+    return f"sessions/{tenant}/{session_id}"
 
 
 def _newest_write(session_root: Path) -> float:
@@ -52,8 +53,7 @@ class MemoryIndexer:
     def _store(self) -> Store:
         if self.store is None:
             store = self.connect()
-            store.ensure_indexes()
-            store.ensure_search_indexes()
+            store.prepare()
             self.store = store
         return self.store
 
@@ -68,7 +68,7 @@ class MemoryIndexer:
         return task
 
     async def index(self, user: str, tenant: str, session_id: str) -> None:
-        key = f"{user}/{tenant}/{session_id}"
+        key = session_key(user, tenant, session_id)
         if key in self._running:
             return
         self._running.add(key)
@@ -88,7 +88,7 @@ class MemoryIndexer:
         session = self.sessions.get(user, tenant, session_id)
         if session is None:
             return
-        source, path = memory_source(user), f"sessions/{tenant}/{session_id}"
+        source, path = memory_source(user), _session_path(tenant, session_id)
         record = self._store().sessions.find_one({"_id": f"{source}/{path}"}) or {}
         newest = _newest_write(session.root)
         if newest <= record.get("log_mtime", 0):
@@ -105,7 +105,7 @@ class MemoryIndexer:
         failure first, so they cannot hold every slot."""
         due = [(tenant, session_id) for tenant in self.tenants
                for session_id in await asyncio.to_thread(self._due, tenant.user, tenant.name, idle_s)]
-        due.sort(key=lambda item: self._failed.get(f"{item[0].user}/{item[0].name}/{item[1]}", 0.0))
+        due.sort(key=lambda item: self._failed.get(session_key(item[0].user, item[0].name, item[1]), 0.0))
         if len(due) > MAX_PER_CHECK:
             logger.warning("memory index: %d sessions due, %d indexed now, the rest at the next checks",
                            len(due), MAX_PER_CHECK)
@@ -119,7 +119,7 @@ class MemoryIndexer:
         due = []
         for meta in self.sessions.list_for_tenant(user, tenant):
             newest = _newest_write(meta["root"])
-            if 0 < newest <= idle_since and newest > indexed.get(f"{source}/sessions/{tenant}/{meta['session_id']}", 0):
+            if 0 < newest <= idle_since and newest > indexed.get(f"{source}/{_session_path(tenant, meta['session_id'])}", 0):
                 due.append(meta["session_id"])
         return due
 

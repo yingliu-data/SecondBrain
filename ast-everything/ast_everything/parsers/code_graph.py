@@ -84,16 +84,28 @@ def _child_id(parent: str, name: str) -> str:
     return f"{parent}{'.' if ':' in parent else ':'}{name}"
 
 
-def _add_file(graph: CodeGraph, rel: str, text: str) -> None:
-    # The line breaks that ast counts; str.splitlines also splits on \f, \x85 and others.
+def split_lines(text: str) -> list[str]:
+    """The file's lines, at the line breaks that ast counts (str.splitlines also splits on
+    \\f, \\x85 and others), without the empty one after a final break."""
     lines = re.split(r"\r\n|\r|\n", text)
     if not lines[-1]:
         lines.pop()
+    return lines
+
+
+def add_folder(graph, rel: str, child: str) -> None:
+    """The directory node of the file at `rel` and its `contains` edge to the file's node `child`."""
     folder = posixpath.dirname(rel) or "."
-    file, parent = nid_of(graph.source, rel), nid_of(graph.source, folder)
+    parent = nid_of(graph.source, folder)
     graph.nodes[parent] = _node("directory", posixpath.basename(folder), folder)
+    graph.edges.add(("contains", parent, child))
+
+
+def _add_file(graph: CodeGraph, rel: str, text: str) -> None:
+    lines = split_lines(text)
+    file = nid_of(graph.source, rel)
+    add_folder(graph, rel, file)
     graph.nodes[file] = _node("file", posixpath.basename(rel), rel, None, 1, len(lines))
-    graph.edges.add(("contains", parent, file))
     _add_defs(graph, file, graph.tree.body, lines)
     graph.nodes[file]["text"] = _own_text(graph, file, lines)
 

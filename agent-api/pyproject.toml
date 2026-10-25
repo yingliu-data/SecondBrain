@@ -10,6 +10,7 @@ dependencies = [
     "sse-starlette>=2.0",
     "pydantic>=2.0",
     "ddgs>=9.0",
+    "python-dotenv>=1.0",            # app.cli reads the repo .env
     "secondbrain-harness",
     "flows",
     "ast-everything",

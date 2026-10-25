@@ -54,6 +54,7 @@ INDEXES = [
     ("edges", ["type", "active"], {}),
     ("files", ["source", "path"], {"unique": True}),
     ("chunks", ["nid"], {}),
+    ("sessions", ["source"], {}),
 ]
 
 
@@ -167,6 +168,11 @@ class Store:
         values = settings()
         client = MongoClient(uri(values), serverSelectionTimeoutMS=SERVER_SELECTION_TIMEOUT_MS, tz_aware=True)
         return cls(client, values["MONGODB_DB"])
+
+    def prepare(self) -> None:
+        """The ordinary and the Atlas Search indexes, before a first index run."""
+        self.ensure_indexes()
+        self.ensure_search_indexes()
 
     def ensure_indexes(self) -> None:
         for collection, keys, options in INDEXES:

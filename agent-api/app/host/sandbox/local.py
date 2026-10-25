@@ -44,14 +44,19 @@ from pathlib import Path
 
 from protocol.clock import now_ms
 
-from app.config import HARNESS_GUEST_ROOT
+from app.config import HARNESS_GUEST_ROOT, LLM_API_KEY_ENV, is_host_secret
 from app.host.sandbox import Sandbox, SandboxError
 from app.host.sandbox.firecracker import _ms_since, _unlink, write_json
 
 logger = logging.getLogger("host.sandbox")
 
 LOCAL_SNAPSHOT_MARKER = "LOCAL_SNAPSHOT.json"
-GUEST_HIDDEN_ENV_PREFIXES = ("MONGODB_",)   # never in the guest process's environment
+
+
+def _guest_env_hidden(name: str) -> bool:
+    """Never in the guest process's environment (its bash tool can read it): the host
+    secrets, and the LLM key named in config (the :5010 proxy adds the key)."""
+    return is_host_secret(name) or name == LLM_API_KEY_ENV
 
 
 class _Frozen:
@@ -98,14 +103,6 @@ def _is_zombie(pid: int) -> bool:
         return False
 
 
-def _cmdline(pid: int) -> str:
-    try:
-        with open(f"/proc/{pid}/cmdline", "rb") as fh:
-            return fh.read().replace(b"\0", b" ").decode("utf-8", "replace")
-    except OSError:
-        return ""
-
-
 def _argv(pid: int) -> list[str]:
     try:
         with open(f"/proc/{pid}/cmdline", "rb") as fh:
@@ -133,14 +130,15 @@ def _stray_guests(session_dir: Path) -> list[int]:
     return pids
 
 
-def _kill_stray(pid: int) -> None:
-    stray = _Frozen(pid)
-    stray.kill()
-    _signal_group(pid, signal.SIGCONT)       # a frozen one dies only once it runs
+def _kill_frozen(proc) -> bool:
+    """SIGKILL a possibly stopped guest (Popen or _Frozen); False when it did not exit."""
+    proc.kill()
+    _signal_group(proc.pid, signal.SIGCONT)   # a frozen one dies only once it runs
     try:
-        stray.wait(timeout=5)
+        proc.wait(timeout=5)
     except subprocess.TimeoutExpired:
-        logger.warning("stray guest pid=%s did not exit", pid)
+        return False
+    return True
 
 
 def _signal_group(pid: int, sig: int) -> None:
@@ -176,7 +174,8 @@ class LocalSandbox(Sandbox):
         self.session_dir = session_dir
         for pid in _stray_guests(session_dir):   # one guest per session, as one VM
             logger.warning("stopping stray guest pid=%s of %s", pid, session_dir)
-            _kill_stray(pid)
+            if not _kill_frozen(_Frozen(pid)):
+                logger.warning("stray guest pid=%s did not exit", pid)
         log_dir = session_dir / "guest"
         log_dir.mkdir(parents=True, exist_ok=True)
         workspace = session_dir / "vm" / "workspace"     # private: see the module doc
@@ -188,8 +187,7 @@ class LocalSandbox(Sandbox):
             "--workspace", str(workspace),
             *self.extra_args,
         ]
-        # The host's MongoDB credentials are for the ast_index skill, not the guest.
-        env = {k: v for k, v in os.environ.items() if not k.startswith(GUEST_HIDDEN_ENV_PREFIXES)}
+        env = {k: v for k, v in os.environ.items() if not _guest_env_hidden(k)}
         env["PYTHONPATH"] = str(self.guest_root) + (
             os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
         env.setdefault("PYTHONUNBUFFERED", "1")
@@ -204,12 +202,7 @@ class LocalSandbox(Sandbox):
     def stop(self) -> None:
         frozen, self._frozen = self._frozen, None
         if frozen is not None and frozen.poll() is None:
-            frozen.kill()                       # SIGKILL works on a stopped process
-            _signal_group(frozen.pid, signal.SIGCONT)
-            try:
-                frozen.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                pass
+            _kill_frozen(frozen)
         proc, self.proc = self.proc, None
         if proc is not None and proc.poll() is None:
             proc.terminate()
@@ -290,6 +283,6 @@ class LocalSandbox(Sandbox):
         if self._frozen is not None and self._frozen.pid == pid:
             return self._frozen if self._frozen.poll() is None else None
         cand = _Frozen(pid)
-        if cand.poll() is not None or "guest.main" not in _cmdline(pid):
+        if cand.poll() is not None or "guest.main" not in _argv(pid):
             return None
         return cand

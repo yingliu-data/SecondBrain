@@ -32,7 +32,7 @@ from urllib.parse import unquote, urlsplit
 
 from markdown_it import MarkdownIt
 
-from ast_everything.parsers.code_graph import Lookup, nid_of
+from ast_everything.parsers.code_graph import Lookup, add_folder, nid_of, split_lines
 
 BLOCKS = {
     "paragraph_open": ("paragraph", "p"),
@@ -100,11 +100,8 @@ class _Builder:
 
     def __init__(self, graph: MarkdownTree, text: str):
         self.graph = graph
-        lines = re.split(r"\r\n|\r|\n", text)
-        if lines and not lines[-1]:
-            lines.pop()
-        self.lines = lines
-        self.front = _front_matter_end(lines)
+        self.lines = split_lines(text)
+        self.front = _front_matter_end(self.lines)
         self.doc = nid_of(graph.source, graph.rel)
         self.stack: list[tuple[int, str, list[str]]] = []   # (level, section ID, heading path)
         self.counts: dict[str, Counter] = {}
@@ -112,12 +109,9 @@ class _Builder:
 
     def run(self) -> None:
         graph, rel = self.graph, self.graph.rel
-        folder = posixpath.dirname(rel) or "."
-        parent = nid_of(graph.source, folder)
-        graph.nodes[parent] = _node("directory", posixpath.basename(folder), folder)
+        add_folder(graph, rel, self.doc)
         name = posixpath.basename(rel)
         graph.nodes[self.doc] = _node("document", name, rel, [], [name.lower()], 1, len(self.lines), "")
-        graph.edges.add(("contains", parent, self.doc))
         # Front matter is not Markdown: blank it so markdown-it keeps the line numbers.
         body = [""] * self.front + self.lines[self.front:]
         tokens = _md.parse("\n".join(body))
@@ -150,20 +144,11 @@ class _Builder:
             self.stack.pop()
         parent = self._parent()
         heading_path = [*(self.stack[-1][2] if self.stack else []), title]
-        base = f"{self.doc}#" + "/".join(slug(t) for t in heading_path)
-        nid, n = base, 0
-        while nid in self.graph.nodes:
-            n += 1
-            nid = f"{base}-{n}"
+        nid = _unique(f"{self.doc}#" + "/".join(slug(t) for t in heading_path), self.graph.nodes)
         start = token.map[0] + 1
         self.graph.nodes[nid] = _node("section", title, self.graph.rel, heading_path, [title.lower()], start, start, "")
         self.graph.edges.add(("contains", parent, nid))
-        anchor = base_anchor = slug(title)
-        n = 0
-        while anchor in self.graph.anchors:
-            n += 1
-            anchor = f"{base_anchor}-{n}"
-        self.graph.anchors[anchor] = nid
+        self.graph.anchors[_unique(slug(title), self.graph.anchors)] = nid
         self.stack.append((level, nid, heading_path))
         self.sections.append((nid, start))
 
@@ -203,6 +188,15 @@ class _Builder:
             start, end = _trimmed(self.lines, start - 1, stop)
             self.graph.nodes[nid].update(start_line=start, end_line=end,
                                          text="\n".join(self.lines[start - 1:end]))
+
+
+def _unique(base: str, taken) -> str:
+    """`base`, or `base-1`, `base-2`, … the first that is not in `taken` (as GitHub numbers anchors)."""
+    name, n = base, 0
+    while name in taken:
+        n += 1
+        name = f"{base}-{n}"
+    return name
 
 
 def _node(kind: str, title: str, path: str, heading_path: list[str] | None = None, names: list[str] | None = None,

@@ -49,7 +49,7 @@ def test_sync_writes_shared_schema(store, repo):
     assert store.chunks.find_one({"nid": f"code/{SHAPES}:Shape"})["text"] == f"code/{SHAPES}:Shape\nclass Shape:\n    pass"
     assert store.files.count_documents({"source": "code", "hash": {"$ne": None}}) == 10
     row = store.files.find_one({"path": UTILS})
-    assert row["size"] == (repo / UTILS).stat().st_size and len(row["versions"]) == 1 and row["lock_until"] is None
+    assert row["size"] == (repo / UTILS).stat().st_size and len(row["versions"]) == 1
 
 
 def test_unchanged_sync_inserts_nothing(store, repo):

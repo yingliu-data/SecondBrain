@@ -159,7 +159,7 @@ def _parse_changed(store: Store, source: str, root: Path, paths: list[Path], row
 def _manifest(source: str, path: Path, rel: str, data: bytes) -> dict:
     stat = path.stat()
     return {"path": rel, "source": source, "hash": hashlib.sha256(data).hexdigest(), "size": stat.st_size,
-            "mtime": stat.st_mtime, "removed_at": None, "lock_until": None, "skipped_reason": None}
+            "mtime": stat.st_mtime, "removed_at": None, "skipped_reason": None}
 
 
 NODE_STATE = {"text": 0, "names": 0, "heading_path": 0}   # what `_write_nodes` needs of a stored node
@@ -281,8 +281,7 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     source = valid_source(args.source) if args.source else source_name(args.folder.resolve().name)
     store = Store.connect()
-    store.ensure_indexes()
-    store.ensure_search_indexes()
+    store.prepare()
     print(f"source: {source}")
     for name, count in sync(store, source, args.folder).items():
         print(f"{name.replace('_', ' ')}: {count}")

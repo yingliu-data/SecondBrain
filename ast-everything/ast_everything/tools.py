@@ -13,7 +13,9 @@ timeout, so it runs as a background job in this process and `ast_index_status` r
 it; one job per source runs at a time, and the jobs are forgotten on restart (indexing
 again is cheap: unchanged files are skipped). The read tools answer from the store
 through `ast_everything.search`. A source the agent's `hidden` names is neither listed,
-searched nor read, and the `memory-` prefix is kept for `ast_everything.memory`.
+searched nor read, and the `memory-` prefix is kept for `ast_everything.memory`. A `path`
+in or above one of the agent's `private_roots` (such as other users' data) is refused, and
+a git URL's credentials never reach a job's `target` or `error`.
 """
 from __future__ import annotations
 
@@ -33,6 +35,7 @@ from urllib.parse import urlsplit
 from pymongo.errors import OperationFailure, PyMongoError
 
 from ast_everything.indexer import index_files, source_name, sync, valid_source
+from ast_everything.memory import MEMORY_PREFIX
 from ast_everything.parsers import parser_for
 from ast_everything.search import by_time, retrieve, search, sources, traverse
 from ast_everything.store import Store
@@ -44,7 +47,6 @@ GIT_TIMEOUT_S = 600
 GIT_SCHEMES = ("https", "ssh")
 DETAILS = ("fold", "preview", "full")
 DIRECTIONS = ("out", "in", "both")
-MEMORY_PREFIX = "memory-"
 
 
 class ToolError(Exception):
@@ -154,17 +156,20 @@ class AstTools:
     """The tools over one store. `connect` makes the store (default: `Store.connect`, the
     MONGODB_* variables); `repos_dir` holds the git clones (default: `AST_REPOS_DIR`, else
     `data/ast-everything/repos`); `workspace()` is the folder `workspace_path` resolves in,
-    or None; `hidden(store)` names the sources the caller may not read."""
+    or None; `hidden(store)` names the sources the caller may not read; `private_roots` are
+    folders a `path` may neither be in nor hold."""
 
     definitions = TOOLS
 
     def __init__(self, connect: Callable[[], Store] = Store.connect, repos_dir: str | Path | None = None,
                  workspace: Callable[[], str | Path | None] = lambda: None,
-                 hidden: Callable[[Store], Iterable[str]] = lambda store: ()):
+                 hidden: Callable[[Store], Iterable[str]] = lambda store: (),
+                 private_roots: Iterable[str | Path] = ()):
         self._connect = connect
         self.repos_dir = Path(repos_dir or os.environ.get("AST_REPOS_DIR") or "data/ast-everything/repos")
         self._workspace = workspace
         self._hidden_sources = hidden
+        self._private_roots = [Path(root).resolve() for root in private_roots]
         self._store: Store | None = None
         self._indexes_ready = False
         self._lock = threading.Lock()
@@ -194,8 +199,7 @@ class AstTools:
         store = self.store()
         with self._lock:
             if not self._indexes_ready:
-                store.ensure_indexes()
-                store.ensure_search_indexes()
+                store.prepare()
                 self._indexes_ready = True
         return store
 
@@ -217,7 +221,8 @@ class AstTools:
             for job in self.jobs.values():
                 if job.source == source and job.state == "running":
                     return {**job.view(), "note": "an index of this source is already running"}
-            job = Job(id=uuid.uuid4().hex[:12], source=source, target=value)
+            job = Job(id=uuid.uuid4().hex[:12], source=source,
+                      target=_redacted(value) if key == "git_url" else value)
             self.jobs[job.id] = job
         threading.Thread(target=self._run_job, args=(job, target, prepare),
                          name=f"ast-index-{job.id}", daemon=True).start()
@@ -244,6 +249,9 @@ class AstTools:
             path = Path(value).expanduser()
             if not path.is_absolute():
                 raise ToolError(f"path must be absolute: {value}")
+            path = path.resolve()
+            if any(path.is_relative_to(root) or root.is_relative_to(path) for root in self._private_roots):
+                raise ToolError(f"path is in or holds a private folder: {value}")
         else:
             workspace = self._workspace()
             if workspace is None:
@@ -253,7 +261,6 @@ class AstTools:
             path = (workspace / relative).resolve()
             if not path.is_relative_to(workspace):
                 raise ToolError(f"workspace_path is outside the workspace: {value}")
-        path = path.resolve()
         if not path.exists():
             raise ToolError(f"no such file or folder: {value}")
         if path.is_file() and parser_for(path.name) is None:
@@ -282,7 +289,8 @@ class AstTools:
             done = subprocess.run(command, env=env, capture_output=True, text=True, timeout=GIT_TIMEOUT_S)
             if done.returncode != 0:
                 verb = "clone" if "clone" in command else command[3]
-                raise RuntimeError(f"git {verb} failed: {(done.stderr or done.stdout).strip()[-500:]}")
+                output = (done.stderr or done.stdout).replace(url, _redacted(url)).strip()[-500:]
+                raise RuntimeError(f"git {verb} failed: {output}")
 
     def _ast_index_status(self, args: dict) -> dict:
         job_id = args.get("job_id")
@@ -342,6 +350,18 @@ class AstTools:
         return {"results": by_time(self.store(), _time_range(args, required=True), scope=args.get("scope"),
                                    node_types=_strings(args, "node_types"), limit=_int(args, "limit", 50, 1, 100),
                                    hide=self._hidden(args.get("scope")))}
+
+
+def _redacted(url: str) -> str:
+    """`url` without the user info that may hold a password or token (`https://user:token@host`,
+    `https://token@host`); an ssh user name alone (`ssh://git@host`) stays."""
+    parts = urlsplit(url)
+    if not parts.scheme or "@" not in parts.netloc:
+        return url
+    user, _, host = parts.netloc.rpartition("@")
+    if parts.scheme == "ssh" and ":" not in user:
+        return url
+    return parts._replace(netloc=f"***@{host}").geturl()
 
 
 def _source(name, default: str) -> str:

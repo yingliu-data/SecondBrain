@@ -9,6 +9,7 @@ on:
       - 'harness/guest/**'
       - 'harness/pyproject.toml'
       - 'flows/**'
+      - 'ast-everything/**'
       - 'docker-compose.yml'
       - 'pyproject.toml'                          # workspace root + the one lock
       - 'uv.lock'
@@ -23,6 +24,7 @@ on:
       - 'harness/guest/**'
       - 'harness/pyproject.toml'
       - 'flows/**'
+      - 'ast-everything/**'
       - 'docker-compose.yml'
       - 'pyproject.toml'                          # workspace root + the one lock
       - 'uv.lock'

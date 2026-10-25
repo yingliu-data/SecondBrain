@@ -155,11 +155,12 @@ def traverse(store: Store, start_ids: list[str], *, direction: str = "out", hops
 
 
 def _nodes_by_id(store: Store, ids: set[str], node_types: list[str] | None) -> dict[str, dict]:
-    """The nodes the IDs name, by version ID: a version ID as it was, a logical ID its latest version."""
+    """The nodes the IDs name, by version ID: a version ID as it was, a logical ID its latest version.
+    Without their text: a walk renders them folded."""
     query: dict = {"$or": [{"_id": {"$in": list(ids)}}, {"nid": {"$in": list(ids)}, "is_latest": True}]}
     if node_types:
         query["type"] = {"$in": list(node_types)}
-    return {doc["_id"]: doc for doc in store.nodes.find(query)}
+    return {doc["_id"]: doc for doc in store.nodes.find(query, {"text": 0})}
 
 
 def _keys(nodes: dict[str, dict]) -> set[str]:

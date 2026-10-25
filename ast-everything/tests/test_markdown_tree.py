@@ -143,6 +143,19 @@ def test_walk_finds_python_and_markdown_files(folder):
     assert [p.relative_to(folder).as_posix() for p in iter_files(folder)] == ["README.markdown", "app.py", "docs/guide.md"]
 
 
+def test_walk_reads_no_symlink_out_of_the_root(folder, tmp_path):
+    """A link to a file or folder outside the root (another user's memory) is not read; a
+    link that stays inside it is."""
+    private = tmp_path / "private"
+    private.mkdir()
+    (private / "secret.md").write_text("# secret\n")
+    (folder / "leak.md").symlink_to(private / "secret.md")
+    (folder / "leaks").symlink_to(private, target_is_directory=True)
+    (folder / "guide-link.md").symlink_to(folder / "docs" / "guide.md")
+    assert [p.relative_to(folder).as_posix() for p in iter_files(folder)] == [
+        "README.markdown", "app.py", "guide-link.md", "docs/guide.md"]
+
+
 def test_sync_indexes_markdown_and_python_together(store, folder):
     counts = sync(store, "proj", folder)
     assert (counts["files"], counts["skipped"]) == (3, 0)
