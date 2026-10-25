@@ -1377,6 +1377,7 @@ class Workers:
         self.evict_s = evict_s
         self.worker_kwargs = worker_kwargs
         self._reaper: asyncio.Task | None = None
+        self.on_closed: Callable[[str], object] | None = None   # called with the key of each Worker closed
 
     def _new(self, tenant, session_id: str, registry) -> Worker:
         """A Worker built from disk (folds its log: run off the loop)."""
@@ -1520,12 +1521,18 @@ class Workers:
             # awaited directly (not gathered): close() marks the Worker closed
             # before its first yield, so no evicted Worker is ever seen open
             await w.close("evict")
+            self._closed(key)
         return [k for k, _ in gone]
 
     async def close(self, key: str) -> None:
         w = self._workers.pop(key, None)
         if w is not None:
             await w.close()
+            self._closed(key)
+
+    def _closed(self, key: str) -> None:
+        if self.on_closed is not None:
+            self.on_closed(key)
 
     async def shutdown(self, park_s: float = HARNESS_SHUTDOWN_PARK_S) -> None:
         """Every Worker closed; first (park_s > 0) every running guest is
