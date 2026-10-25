@@ -106,26 +106,33 @@ async def _stop_temporal():
 
 
 _memory_index_task = None
+_memory_indexer = None
 
 
 @app.on_event("startup")
 async def _start_memory_index():
-    # MEMORY_INDEX: a closed or idle session goes into the memory graph
-    global _memory_index_task
+    # MEMORY_INDEX: a closed or idle session and a memory file written go into the memory graph,
+    # and each input recalls from it
+    global _memory_index_task, _memory_indexer
     if MEMORY_INDEX:
         import asyncio
-        from app.host.memory_index import MemoryIndexer
-        indexer = MemoryIndexer(chat.sessions, tenant_registry.all_tenants())
-        chat.workers.on_closed = indexer.closed
-        _memory_index_task = asyncio.get_running_loop().create_task(indexer.run(), name="memory-index")
+        from app.host import memory_index
+        _memory_indexer = memory_index.MemoryIndexer(chat.sessions, tenant_registry.all_tenants())
+        memory_index.activate(_memory_indexer)
+        chat.workers.on_closed = _memory_indexer.closed
+        _memory_index_task = asyncio.get_running_loop().create_task(_memory_indexer.run(), name="memory-index")
 
 
 @app.on_event("shutdown")
 async def _stop_memory_index():
     # before _stop_harness_workers: the Workers it closes start no index run
+    from app.host import memory_index
+    memory_index.activate(None)
     chat.workers.on_closed = None
     if _memory_index_task is not None:
         _memory_index_task.cancel()
+    if _memory_indexer is not None:
+        _memory_indexer.close()
 
 
 @app.on_event("shutdown")

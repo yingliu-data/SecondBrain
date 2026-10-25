@@ -171,6 +171,10 @@ USERS_ROOT = _setting("USERS_ROOT", "data/users")            # user-scope memory
 # Index closed and idle chat sessions into the ast-everything memory graph (app/host/memory_index.py):
 # their turns go to MongoDB Atlas (the MONGODB_* settings)
 MEMORY_INDEX = _flag("MEMORY_INDEX", False)
+# With MEMORY_INDEX: each input also recalls up to this many nodes of the user's memory graph
+# (other sessions' turns, memory files) whose vector score (0 to 1) reaches the minimum; 0 = none
+MEMORY_RECALL_LIMIT = _setting("MEMORY_RECALL_LIMIT", 2, int)
+MEMORY_RECALL_MIN_SCORE = _setting("MEMORY_RECALL_MIN_SCORE", 0.8, float)
 # ast_index skill: where `ast_index(git_url=...)` keeps its clones
 AST_REPOS_DIR = _setting("AST_REPOS_DIR", "data/ast-everything/repos")
 
@@ -252,7 +256,7 @@ HARNESS_SPILL_THRESHOLD = _setting("HARNESS_SPILL_THRESHOLD", DEFAULT_LIMITS["sp
 # knob: the store finds a seq's segment by it). The guest outlives a settle
 # (one long-lived guest per session, one log run); the idle timer parks it.
 # Snapshots, park and resume
-HARNESS_SESSION_IDLE_S = _setting("HARNESS_SESSION_IDLE_S", 1800, float)  # idle -> park + snapshot + destroy
+HARNESS_SESSION_IDLE_S = _setting("HARNESS_SESSION_IDLE_S", 300, float)  # idle -> park + snapshot + destroy
 # An idle Worker (no task, VM none or parked, no adopted device call, no
 # question park, no attached stream) is dropped from memory after this long
 # (its threads and folded state released); the next request rebuilds it from

@@ -13,7 +13,9 @@ from pathlib import Path
 from protocol.canonical import sha256_hex
 
 from app.config import USERS_ROOT
-from app.skills.base import BaseSkill, get_current_session, get_current_user_id
+from app.host import memory_index
+from app.skills.base import (BaseSkill, get_current_session, get_current_session_id, get_current_tenant,
+                             get_current_user_id)
 from app.user.memory import MemoryStore
 
 logger = logging.getLogger("skills.remember")
@@ -149,6 +151,7 @@ class RememberSkill(BaseSkill):
         # records it in the `memory` event
         digest = sha256_hex(rec.body.strip())
         logger.info(f"remember scope={scope} slug={rec.slug} type={rec.type}")
+        _index(scope, rec.slug)
         return json.dumps(
             {"status": "ok", "scope": scope, "slug": rec.slug, "type": rec.type,
              "sha256": digest}
@@ -165,7 +168,18 @@ class RememberSkill(BaseSkill):
             return "Error: missing required field 'slug'"
         ok = store.remove(slug)
         logger.info(f"forget scope={scope} slug={slug} ok={ok}")
+        if ok:
+            _index(scope, slug)
         return json.dumps(
             {"status": "ok" if ok else "not_found", "scope": scope, "slug": slug,
              "sha256": ""}
         )
+
+
+def _index(scope: str, slug: str) -> None:
+    """The memory graph follows the file at once (MEMORY_INDEX), in the background."""
+    session = get_current_session()
+    # the session id is read from the session's meta: only a session-scope file needs it
+    session_id = get_current_session_id() if scope == "session" else ""
+    memory_index.memory_written(get_current_user_id(), get_current_tenant(), session_id,
+                                session.memory if session is not None else None, scope, slug)

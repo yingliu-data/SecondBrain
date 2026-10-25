@@ -28,6 +28,7 @@ from app.config import (HARNESS_GUEST_ROOT, HARNESS_MAX_CONCURRENT_TASKS, HARNES
                         HARNESS_SHUTDOWN_PARK_S, HARNESS_WORKER_EVICT_S)
 from app.gateway.client import GatewayError, fetch_session_tools
 from app.host import hello as hello_mod
+from app.host import memory_index
 from app.host.adopted import AdoptedCalls
 from app.host.admission import Admission
 from app.host.bulk_server import BulkServer
@@ -577,7 +578,10 @@ class Worker(VMLifecycle):
                                       self.settings.system_prompt)
 
     def attachments(self, text: str) -> list[dict]:
-        return hello_mod.attachments(self.tenant, self.session, self.user, text)
+        """The memory files recalled by description, then the memory graph's nearest nodes."""
+        recalled = hello_mod.attachments(self.tenant, self.session, self.user, text)
+        return recalled + memory_index.recall(self.user, self.tenant.name, self.session_id, text,
+                                              [item["slug"] for item in recalled])
 
     def answer_wait_for(self, driver: str | None) -> int:
         return hello_mod.answer_wait_for(self.tenant, driver)

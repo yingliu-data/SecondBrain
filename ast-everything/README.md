@@ -81,9 +81,9 @@ As a library, the modules can be used directly:
 | Module | What it does |
 |---|---|
 | [store.py](ast_everything/store.py) | `Store.connect()`, the collections, `ensure_indexes`, `ensure_search_indexes` |
-| [indexer.py](ast_everything/indexer.py) | `sync(store, source, folder)`, `index_files`, `remove_files` |
-| [search.py](ast_everything/search.py) | `search`, `traverse`, `retrieve`, `by_time`, `sources` |
-| [memory.py](ast_everything/memory.py) | `index_session`, chat sessions as nodes |
+| [indexer.py](ast_everything/indexer.py) | `sync(store, source, folder)`, `index_files` (with a path `prefix`, so several folders share a source), `remove_files` |
+| [search.py](ast_everything/search.py) | `search`, `recall`, `traverse`, `retrieve`, `by_time`, `sources` |
+| [memory.py](ast_everything/memory.py) | `index_session`, `index_memory`, `sync_memory`: chat sessions and memory files as nodes |
 | [tools.py](ast_everything/tools.py) | `AstTools`, the agent tools over all of the above |
 | [parsers/](ast_everything/parsers/) | `parse`, `iter_files`, the Python and Markdown parsers (no database needed) |
 
@@ -194,9 +194,10 @@ are found by ID, by traversal, or through their section.
 ## Session memory
 
 [memory.py](ast_everything/memory.py) indexes one chat session at a time into a source
-named `memory-<user>`: `index_session(store, source, session, title, turns,
-memory_root=, memory_files=)`. The caller reads the turns from whatever log its agent
-keeps and passes them as `Turn(n, said_by, at, text)`.
+named `memory-<user>` (`memory_source(user)`; the `memory-` prefix is reserved, and an
+index tool refuses it): `index_session(store, source, session, title, turns, memory=[...])`.
+The caller reads the turns from whatever log its agent keeps and passes them as
+`Turn(n, said_by, at, text)`.
 
 | Node | ID | Text |
 |---|---|---|
@@ -205,10 +206,29 @@ keeps and passes them as `Turn(n, said_by, at, text)`.
 
 Edges: `contains` (the session to each turn) and `precedes` (each turn to the next).
 Each turn is chunked, split at paragraphs past about 500 words, each part headed by
-the session title. The memory files the session wrote or removed (the slugs in
-`memory_files`, as `<slug>.md` under `memory_root`) are indexed with the Markdown
-parser, as `memory-<user>/<slug>.md`, when they are on disk, and marked removed when
-they are gone (another session may have written one again); no other file is read.
+the session title.
+
+Memory files are Markdown files `<slug>.md` in folders, each folder named by a
+`MemoryFiles(root, slugs, prefix)`: its files sit at `<prefix><slug>.md` in the source, so
+the user's folder (prefix `""`: `memory-<user>/<slug>.md`) and a session's own (prefix
+`sessions/<tenant>/<id>/memory/`, beside its turns) share one source. They are indexed
+with the Markdown parser:
+- `index_session(..., memory=[...])`: the files the session wrote or removed;
+- `index_memory(store, source, files)`: some files of one folder, such as the one just
+  written;
+- `sync_memory(store, source, files)`: the folder's files at that prefix become exactly
+  `files.slugs`, and the others are marked removed (for files no session names, such as
+  ones written by hand).
+
+A file on disk is indexed and one that is gone is marked removed (another session may
+have written it again), and a symlink is never read.
+
+`recall(store, query, scope=, limit=, min_score=, exclude_paths=)` in
+[search.py](ast_everything/search.py) brings back the latest nodes nearest a text by
+meaning, each with the `score` Atlas gives its best chunk (0 to 1). It uses vector search
+alone, because keyword search matches common words, and it keeps only chunks scoring
+`min_score` or more. It is for recall nobody asked for, such as an agent's context for a new
+message, and `exclude_paths` leaves out a file or a folder (the current session).
 
 The session's record in `sessions` holds the cursor `indexed_through_turn` (a run
 indexes only the turns after it), `last_turn`, `indexed_at`, `status`, and a lease
@@ -255,6 +275,24 @@ sessions over the next checks. The guest tenant is not indexed. A failed run is 
 warning, and the next check tries again, after the sessions that did not fail. Every
 turn goes to Atlas and is embedded there, billed per token; to stop, turn
 `MEMORY_INDEX` off and restart agent-api (the nodes stay in the store).
+
+Memory files are indexed from three places:
+- **On write:** a file `remember` writes or `forget` removes is indexed straight away,
+  in the background.
+- **With its session:** the files the session wrote or removed, both the user's
+  (`{USERS_ROOT}/<user>/memory/`) and the session's own (its `remember(scope=session)` files
+  and compaction summaries).
+- **By each check:** `sync_memory` over each user's memory folder, which covers files
+  written by hand or before the index was on. A missing folder changes nothing.
+
+A user's indexing runs under one lock in agent-api.
+
+**Recall.** For each new message, after the memory files recalled by description, the
+Worker adds up to `MEMORY_RECALL_LIMIT` (2) nodes of the user's graph that `recall` finds
+with a score of `MEMORY_RECALL_MIN_SCORE` (0.8) or more. These are turns of other sessions
+and memory files, never the current session's and never a file already recalled. Recall
+gives up after 2 s or on any error, and the message goes without it. Tune the minimum
+score against real queries: Atlas's score depends on the embedding model.
 
 **Tests.** `uv sync --all-packages` at the repository root, then `uv run pytest -n auto`
 in `ast-everything/`, a separate run from the other members, as in CI.

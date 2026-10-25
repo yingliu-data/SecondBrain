@@ -32,7 +32,7 @@ running → parking → parked → booting ...).
 | boot | A fresh session restores the BASE snapshot when the sandbox has one, else a rootfs start; `hello{resume: false}`. The guest's `session_start.harness_version` is checked against the host's `HARNESS_VERSION`: a mismatch logs a `harness_skew{guest, host}` host event (warn only). |
 | park | Control `park{reason}`, wait for the acked `parked`, close the guest's :5000/:5001/:5011 listeners (held gateway calls keep running), `sandbox.snapshot({session}/vm/snapshot)`, write `vm/parked.json` for a restarted worker. A guest that parks itself on a question is adopted the same way. |
 | wake | The next task, `ui_response` or `side_result` of a parked session restores the session snapshot (no hello; `seq`/`cseq` continue) and sends the held controls, `ui_response` first. Fallback: base restore + `hello{resume: true}` + log return. |
-| idle | `HARNESS_SESSION_IDLE_S` (1800) after a settle: park, snapshot, destroy. |
+| idle | `HARNESS_SESSION_IDLE_S` (300) after a settle: park, snapshot, destroy. |
 | death | Link down and sandbox not alive mid-task: base restore + `hello{resume: true}`; the guest pulls the acked log on :5001 and marks open calls `lost`, and the worker cancels them (a late `side_result` is dropped and logged as an `input{dedupe: late}` host event; the lost state is read from the run's fold, so this holds after an agent-api restart too). `HARNESS_MAX_RESUMES` (1) per task, then the task fails. A dropped link is told apart off the pump: the worker waits for the guest to exit (`Sandbox.wait_exit`) or reconnect, whichever comes first (at most 2 s), instead of a fixed sleep. |
 
 After an agent-api restart, `POST /api/v1/tool-result` for an unknown call id

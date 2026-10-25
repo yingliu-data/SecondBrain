@@ -138,7 +138,7 @@ def test_importer_follows_a_target_that_appears_or_goes(store, repo, monkeypatch
     assert {(kind, src, target) for kind, src in into_target} <= active_from_main()
     assert store.edges.count_documents({"src_path": "main.py", "active": False}) == 2
     reshaped = []
-    monkeypatch.setattr(indexer, "_resolve_importers", lambda store, source, root, nids, indexed, types: reshaped.append(nids))
+    monkeypatch.setattr(indexer, "_resolve_importers", lambda store, source, root, nids, indexed, types, prefix: reshaped.append(nids))
     edit(repo, UTILS, "    return a + b\n", "    return b + a\n")
     run(store, repo)
     assert reshaped == [set()]

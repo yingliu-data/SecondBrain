@@ -202,19 +202,25 @@ class Store:
 
     def vector(self, query: str, match: dict, limit: int = 10) -> list[dict]:
         """Layer 4, semantic half: `$vectorSearch` over chunk text, embedded by Atlas, within `match`.
-        Its filter also takes a `source` operator (`$nin`), since its `limit` cuts before the `$match`."""
+        Its filter also takes a `source` operator (`$nin`) and a `path` that is not a `$regex` (a
+        value, `$in`, `$nin`), since its `limit` cuts before the `$match`."""
+        vector_filter = {key: match[key] for key in ("is_latest", "source") if key in match}
+        path = match.get("path")
+        if path is not None and not (isinstance(path, dict) and "$regex" in path):
+            vector_filter["path"] = path
         stage = {"$vectorSearch": {
             "index": "chunks_vector",
             "path": "text",
             "query": query,
             "numCandidates": min(limit * 10, MAX_CANDIDATES),
             "limit": limit,
-            "filter": {key: match[key] for key in ("is_latest", "source") if key in match},
+            "filter": vector_filter,
         }}
-        return self._run(self.chunks, stage, match, limit)
+        # each chunk with its `score`, the similarity Atlas gives (0 to 1, higher is nearer)
+        return self._run(self.chunks, stage, match, limit, {"$addFields": {"score": {"$meta": "vectorSearchScore"}}})
 
-    def _run(self, collection, stage: dict, match: dict, limit: int) -> list[dict]:
-        return list(collection.aggregate([stage, {"$match": match}, {"$limit": limit}]))
+    def _run(self, collection, stage: dict, match: dict, limit: int, *more: dict) -> list[dict]:
+        return list(collection.aggregate([stage, *more, {"$match": match}, {"$limit": limit}]))
 
 
 def _native_filter(match: dict) -> dict:

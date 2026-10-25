@@ -12,7 +12,7 @@ from pathlib import Path
 import mongomock
 import pytest
 
-from ast_everything.memory import Turn, index_session
+from ast_everything.memory import MemoryFiles, Turn, index_session
 from ast_everything.store import Store
 
 from app.skills import base
@@ -121,7 +121,7 @@ def test_another_users_memory_is_hidden(skill, mongo, tmp_path, monkeypatch):
     (memory / "editor.md").write_text("# Editor\n\nUses vim.\n")
     index_session(mongo, "memory-u", "sessions/t/s1", "Choosing an editor",
                   [Turn(1, "user", datetime(2026, 10, 24, tzinfo=timezone.utc), "Which editor?")],
-                  memory_root=memory, memory_files=["editor"])
+                  memory=[MemoryFiles(memory, ["editor"])])
     monkeypatch.setattr(skill_module, "get_current_user_id", lambda: "bob")
     assert json.loads(call(skill, "ast_search", query="s1"))["results"] == []
     assert json.loads(call(skill, "ast_search", query="memory-u/editor.md"))["results"] == []

@@ -85,7 +85,8 @@ def test_a_hidden_source_is_matched_after_the_search_stage(store):
     vector, keyword = pipelines
     assert vector[0]["$vectorSearch"]["filter"] == match
     assert keyword[0]["$search"]["compound"]["filter"] == [{"equals": {"path": "is_latest", "value": True}}]
-    assert vector[1] == keyword[1] == {"$match": match}
+    assert vector[1] == {"$addFields": {"score": {"$meta": "vectorSearchScore"}}}
+    assert vector[2] == keyword[1] == {"$match": match}
 
 
 def test_node_builder_sets_every_common_field():

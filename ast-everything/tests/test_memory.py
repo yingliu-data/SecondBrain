@@ -7,7 +7,8 @@ import pytest
 
 from conftest import NODE_FIELDS
 from ast_everything import memory
-from ast_everything.memory import Turn, index_session
+from ast_everything.memory import MemoryFiles, Turn, index_memory, index_session, sync_memory
+from ast_everything.search import recall
 from ast_everything.store import now
 
 SOURCE = "memory-alice"
@@ -132,7 +133,7 @@ def write_memory(root, slug: str, body: str) -> None:
 
 
 def run_with_memory(store, root, files: dict[str, str]):
-    return index_session(store, SOURCE, SESSION, TITLE, turns(1), memory_root=root, memory_files=files)
+    return index_session(store, SOURCE, SESSION, TITLE, turns(1), memory=[MemoryFiles(root, files)])
 
 
 def test_dirty_files_only(store, tmp_path):
@@ -178,3 +179,59 @@ def test_removed_file_written_again_is_kept(store, tmp_path):
     assert result["nodes_removed"] == 0
     assert store.nodes.find_one({"nid": f"{SOURCE}/editor.md", "is_latest": True})["_id"] == f"{SOURCE}/editor.md@v2"
     assert store.files.find_one({"path": "editor.md"})["removed_at"] is None
+
+
+def test_a_session_folder_is_indexed_under_the_session(store, tmp_path):
+    """A session's own memory (its compaction summaries) is indexed under the session's path,
+    beside the user's memory file of the same slug, and neither touches the other."""
+    user, own = tmp_path / "user", tmp_path / "session"
+    write_memory(user, "notes", "User notes.")
+    write_memory(own, "notes", "Session notes.")
+    index_session(store, SOURCE, SESSION, TITLE, turns(1),
+                  memory=[MemoryFiles(user, ["notes"]), MemoryFiles(own, ["notes"], f"{SESSION}/memory/")])
+    assert store.nodes.find_one({"nid": f"{SOURCE}/notes.md", "is_latest": True})
+    assert store.nodes.find_one({"nid": f"{SID}/memory/notes.md", "is_latest": True})
+    (own / "notes.md").unlink()
+    index_memory(store, SOURCE, MemoryFiles(own, ["notes"], f"{SESSION}/memory/"))
+    assert store.files.find_one({"path": f"{SESSION}/memory/notes.md"})["removed_at"] is not None
+    assert store.files.find_one({"path": "notes.md"})["removed_at"] is None
+
+
+def test_a_symlinked_memory_file_is_not_read(store, tmp_path):
+    root, elsewhere = tmp_path / "memory", tmp_path / "elsewhere"
+    write_memory(elsewhere, "secret", "Not mine.")
+    root.mkdir()
+    (root / "secret.md").symlink_to(elsewhere / "secret.md")
+    assert index_memory(store, SOURCE, MemoryFiles(root, ["secret"]))["files"] == 0
+    assert store.nodes.count_documents({}) == 0
+
+
+def test_sync_makes_the_folder_the_index(store, tmp_path):
+    """A file no session's events name (written by hand) is indexed, and an indexed one that is gone
+    is marked removed; a session's files under their own prefix are left alone."""
+    root = tmp_path / "memory"
+    write_memory(root, "editor", "Uses vim.")
+    write_memory(root, "language", "Writes Python.")
+    sync_memory(store, SOURCE, MemoryFiles(root, ["editor", "language"]))
+    index_session(store, SOURCE, SESSION, TITLE, turns(1), memory=[MemoryFiles(root, ["editor"], f"{SESSION}/memory/")])
+    (root / "language.md").unlink()
+    write_memory(root, "hand", "Written by hand.")
+    result = sync_memory(store, SOURCE, MemoryFiles(root, ["editor", "hand"]))
+    assert result["nodes_removed"] > 0
+    live = set(store.files.distinct("path", {"removed_at": None}))
+    assert live == {"editor.md", "hand.md", f"{SESSION}/memory/editor.md"}
+
+
+def test_recall_by_score_without_the_excluded_paths(store, tmp_path):
+    """Recall keeps the nodes whose chunks score `min_score` or more, best first, and leaves out a
+    path excluded and anything under an excluded folder (the current session)."""
+    root = tmp_path / "memory"
+    write_memory(root, "editor", "Uses vim for everything.")
+    sync_memory(store, SOURCE, MemoryFiles(root, ["editor"]))
+    index_session(store, SOURCE, SESSION, TITLE, [Turn(1, "user", AT, "I set up vim today")])
+    found = recall(store, "vim", scope=SOURCE, limit=5)
+    assert {doc["path"] for doc in found} == {"editor.md", SESSION} and all(doc["score"] == 1.0 for doc in found)
+    assert {doc["path"] for doc in recall(store, "vim", scope=SOURCE, exclude_paths=[SESSION])} == {"editor.md"}
+    assert recall(store, "vim", scope=SOURCE, exclude_paths=["editor.md", f"{SESSION}/"]) == []
+    store.vector_score = 0.5
+    assert recall(store, "vim", scope=SOURCE, min_score=0.8) == []

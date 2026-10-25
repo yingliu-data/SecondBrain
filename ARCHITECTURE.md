@@ -56,7 +56,9 @@ library's `ast_everything.tools`, wrapped by
 [agent-api/app/skills/ast_index/](agent-api/app/skills/ast_index/)), so the
 Atlas credentials stay in agent-api and the guest never sees them (see its README).
 With `MEMORY_INDEX` on, agent-api also indexes each closed or idle chat session (its
-turns and the user memory files it wrote) into the source `memory-<user>`.
+turns, and the user and session memory files it wrote, compaction summaries included) and
+each memory file `remember` writes into the source `memory-<user>`, and each new message
+recalls the nearest of them (other sessions' turns, memory files) into its context.
 
 ## 2. Hard rules (the design depends on them)
 
@@ -143,7 +145,7 @@ prefix ([ASYNC-TOOLS.md](harness/docs/ASYNC-TOOLS.md)).
 | `llm_proxy.py` · `gateway_forwarder.py` · `http_clients.py` | `:5010` → the LLM vendor (key, path and body rules; budgets, usage) · `:5011` → mcp-gateway (identity headers, held calls) · shared HTTP clients |
 | `sides.py` · `adopted.py` | host and device tool execution · device calls adopted after a restart |
 | `admission.py` | the concurrency cap shared by both drivers |
-| `memory_index.py` | `MEMORY_INDEX`: closed and idle sessions into the ast-everything memory graph |
+| `memory_index.py` | `MEMORY_INDEX`: sessions and memory files into the ast-everything memory graph, and the recall from it |
 | `activities.py` · `temporal.py` | Temporal activity bodies · Temporal connection supervisor |
 | `stream.py` · `sanitize.py` | events → SSE for clients · tool-result sanitising |
 | `sandbox/` | `firecracker.py` (microVMs, snapshots), `local.py` (guest as a subprocess, for tests and no-KVM boxes), `base_snapshot.py` (build the shared base snapshot) |

@@ -23,7 +23,7 @@ Who provides what (three workstreams):
 |---|---|---|
 | `sandbox/firecracker.py` `restore/snapshot/has_snapshot`, base build, `harness-init`, agent-api image (firecracker + mkfs.ext4), compose env + devices + `vm/` and `image/out` volumes | sandbox + image | done, unit-tested (`tests/test_sandbox_firecracker.py`, `test_sandbox_snapshot.py`, `test_sandbox_local.py`) |
 | guest `--idle-wait vsock`, `--mount-workspace DEV`, park/`parked`, log return | guest | done. Flags (`guest/main.py`): `--connect vsock --idle-wait vsock --mount-workspace /dev/vdb --log-dir /var/harness --workspace /workspace` (from `harness-init`; `--hello-timeout` 30, `--control-port` 5000, `--image-version`). Idle-wait is silent (no log line per poll); its end logs `idle-wait over: the host answered on :5000`. Then `hello for session <sid> (<user>/<tenant>)[ resume]`, on a resume `log return: N events through seq M`. Park: `checkpoint` + `parked{checkpoint_seq, reason, question_id?, wall_used_ms?, question_left_ms?}`; the wake writes `clock{kind: resumed}` first |
-| worker park/resume, `vm{op,source,ms}` host events, fallback chain | worker | done. Park triggers: the idle timer (`HARNESS_SESSION_IDLE_S`, 1800 s after a settle) and a question deadline when `answer_wait_s > 0` (the guest parks itself). Host log events: `vm{op: boot\|restore\|snapshot\|destroy, source: rootfs\|base\|session, ms, ready_ms, run, sandbox, ok?, error?, resume?, reason?}`, `workflow{kind: task_signal\|idle\|parked\|park_timeout\|resume\|heartbeat\|completed ...}`. No park endpoint or CLI |
+| worker park/resume, `vm{op,source,ms}` host events, fallback chain | worker | done. Park triggers: the idle timer (`HARNESS_SESSION_IDLE_S`, 300 s after a settle) and a question deadline when `answer_wait_s > 0` (the guest parks itself). Host log events: `vm{op: boot\|restore\|snapshot\|destroy, source: rootfs\|base\|session, ms, ready_ms, run, sandbox, ok?, error?, resume?, reason?}`, `workflow{kind: task_signal\|idle\|parked\|park_timeout\|resume\|heartbeat\|completed ...}`. No park endpoint or CLI |
 
 Host log records are `{"ts", "hseq", "session_id", "type", "body"}` lines in
 `{session}/events/host-000001.jsonl`; select by `.type` and read `.body`.
@@ -240,7 +240,7 @@ is in the agent-api log (`session <user>/default.<sid>: base restore failed
 ## 4. Exit 2: park and resume across an hour, same `seq`
 
 There is no park endpoint or CLI. A session parks (a) on the idle timer:
-`HARNESS_SESSION_IDLE_S` (default 1800 s) after a settle the worker sends
+`HARNESS_SESSION_IDLE_S` (default 300 s) after a settle the worker sends
 `park`, snapshots and destroys the VM; or (b) when a question's deadline
 (`HARNESS_QUESTION_TIMEOUT_S`, 300 s) passes with the tenant's
 `answer_wait_s > 0` (the default, 86400): the guest parks itself. For this

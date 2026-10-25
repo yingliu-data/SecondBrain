@@ -23,7 +23,7 @@ class WorkerSettings:
     hello_timeout_s: float = 30.0
     heartbeat_s: float = 15.0
     wall_clock_s: float = 600.0
-    session_idle_s: float | None = 1800.0
+    session_idle_s: float | None = 300.0
     park_timeout_s: float = 60.0
     max_resumes: int = 1
     park_grace_s: float = 30.0

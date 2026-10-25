@@ -165,6 +165,7 @@ class FakeStore(Store):
     and `vector` raises `vector_error` when a test sets it."""
 
     vector_error: Exception | None = None
+    vector_score = 1.0
 
     def ensure_search_indexes(self):
         pass
@@ -180,7 +181,7 @@ class FakeStore(Store):
     def vector(self, query, match, limit=10):
         if self.vector_error:
             raise self.vector_error
-        return self.keyword_text(query, match, limit)
+        return [{**doc, "score": self.vector_score} for doc in self.keyword_text(query, match, limit)]
 
     def _substring(self, collection, query, texts_of, match, limit):
         pattern = re.compile(re.escape(query), re.IGNORECASE)

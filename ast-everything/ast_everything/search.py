@@ -100,6 +100,30 @@ def _content(store: Store, query: str, match: dict, limit: int) -> list[dict]:
     return [nodes[node_id] for node_id in ordered if node_id in nodes][:limit]
 
 
+def recall(store: Store, query: str, *, scope: str, limit: int = 3, min_score: float = 0.0,
+           exclude_paths: list[str] | None = None) -> list[dict]:
+    """The latest nodes of `scope` nearest `query` by meaning, best first, each with `score`, its best
+    chunk's: what to bring back unasked, so by vector alone (a keyword search matches common words)
+    and only a chunk scoring `min_score` or more. A node at or under one of `exclude_paths` (a file,
+    or a folder such as a session's) is left out, the exact paths before the vector search's own
+    limit (a session's turns are at its path), so they cannot crowd out the rest. Vector search
+    failing raises."""
+    excluded = [path.rstrip("/") for path in exclude_paths or []]
+    match = node_filter(scope=scope)
+    chunk_match = {key: match[key] for key in CHUNK_FIELDS if key in match}
+    if excluded:
+        chunk_match["path"] = {"$nin": excluded}
+    best: dict[str, float] = {}
+    for found in store.vector(query, chunk_match, limit * OVERFETCH):
+        node_id, score = found["_id"].rsplit("#", 1)[0], found.get("score", 0.0)
+        if score >= min_score and score > best.get(node_id, -1.0):
+            best[node_id] = score
+    nodes = [doc for doc in store.nodes.find({**match, "_id": {"$in": list(best)}})
+             if not any(doc["path"] == path or doc["path"].startswith(path + "/") for path in excluded)]
+    nodes.sort(key=lambda doc: (-best[doc["_id"]], doc["_id"]))
+    return [{**doc, "score": best[doc["_id"]]} for doc in nodes[:limit]]
+
+
 def render(node: dict, detail: str = "preview") -> dict:
     out = {"id": node["_id"], "type": node["type"], "location": _location(node), "status": _status(node)}
     if node["heading_path"]:

@@ -72,14 +72,18 @@ def sync(store: Store, source: str, root: Path) -> Counter:
     return counts
 
 
-def index_files(store: Store, source: str, root: Path, paths: list[Path], *, rows: dict | None = None) -> Counter:
+def index_files(store: Store, source: str, root: Path, paths: list[Path], *, rows: dict | None = None,
+                prefix: str = "") -> Counter:
     """Index the files at `paths` (under `root`) that changed since their manifest row was written.
-    `rows` is the source's manifest by path, when the caller has read it already."""
+    `rows` is the source's manifest by path, when the caller has read it already (else only the
+    rows of `paths` are read). A file's path in the source is `prefix` + its path under `root`, so
+    folders from several places share a source."""
     valid_source(source)
     counts = Counter(files=0, unchanged=0, skipped=0, nodes_inserted=0, nodes_removed=0)
     if rows is None:
-        rows = _manifest_rows(store, source)
-    batch = _parse_changed(store, source, root, paths, rows, counts)
+        rels = [prefix + path.relative_to(root).as_posix() for path in paths]
+        rows = _manifest_rows(store, source, rels) if rels else {}
+    batch = _parse_changed(store, source, root, paths, rows, counts, prefix)
     reshaped: set[str] = set()
     manifests = []
     for graph, manifest in batch:
@@ -98,13 +102,15 @@ def index_files(store: Store, source: str, root: Path, paths: list[Path], *, row
         for graph, _ in batch:
             graph.resolve_edges(types.get)
             _write_edges(store, source, graph.rel, graph.edges)
-        _resolve_importers(store, source, root, reshaped, {graph.rel for graph, _ in batch}, types)
+        _resolve_importers(store, source, root, reshaped, {graph.rel for graph, _ in batch}, types, prefix)
         store.files.bulk_write(manifests, ordered=False)
     return counts
 
 
-def _manifest_rows(store: Store, source: str) -> dict[str, dict]:
-    return {row["path"]: row for row in store.files.find({"source": source}, {"versions": 0})}
+def _manifest_rows(store: Store, source: str, rels: list[str] | None = None) -> dict[str, dict]:
+    """The source's manifest by path: all of it, or the rows at `rels`."""
+    query = {"source": source} if rels is None else {"source": source, "path": {"$in": rels}}
+    return {row["path"]: row for row in store.files.find(query, {"versions": 0})}
 
 
 def _latest_types(store: Store, source: str) -> dict[str, str]:
@@ -113,15 +119,19 @@ def _latest_types(store: Store, source: str) -> dict[str, str]:
 
 
 def _resolve_importers(store: Store, source: str, root: Path, nids: set[str], indexed: set[str],
-                       types: dict[str, str]) -> None:
+                       types: dict[str, str], prefix: str = "") -> None:
     """Resolve again the edges of the files, other than `indexed`, that ever had an edge into
-    `nids`: an entity that appeared or went away changes what their imports, calls and links reach."""
+    `nids`: an entity that appeared or went away changes what their imports, calls and links reach.
+    Only the files under `root` (their path starts with `prefix`) are read; the others wait for
+    their own next index."""
     if not nids:
         return
     importers = set(store.edges.distinct("src_path", {"source": source, "dst": {"$in": list(nids)}}))
     for rel in sorted(importers - indexed):
+        if not rel.startswith(prefix):
+            continue
         try:
-            graph = parse(source, rel, (root / rel).read_bytes())
+            graph = parse(source, rel, (root / rel.removeprefix(prefix)).read_bytes())
         except (OSError, *PARSE_ERRORS):
             continue
         graph.resolve_edges(types.get)
@@ -129,13 +139,13 @@ def _resolve_importers(store: Store, source: str, root: Path, nids: set[str], in
 
 
 def _parse_changed(store: Store, source: str, root: Path, paths: list[Path], rows: dict[str, dict],
-                   counts: Counter) -> list:
+                   counts: Counter, prefix: str = "") -> list:
     """The parsed graph and the manifest row of each file whose hash is not the stored one.
     A file that does not parse gets a row with `skipped_reason` instead. An unchanged file's
     row is written only when its size or mtime moved."""
     batch, writes = [], []
     for path in paths:
-        rel = path.relative_to(root).as_posix()
+        rel = prefix + path.relative_to(root).as_posix()
         counts["files"] += 1
         data = path.read_bytes()
         manifest = _manifest(source, path, rel, data)

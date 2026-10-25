@@ -4,19 +4,27 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import time
+from pathlib import Path
+from types import SimpleNamespace
 
+import mongomock
 import pytest
 
 from app.host import memory_index
+from app.host import worker as worker_module
 from app.host.memory_index import IDLE_S, MemoryIndexer
 from app.host.sides import DeviceCalls
-from app.host.worker import Workers
+from app.host.worker import Worker, Workers
 from app.session.dir_store import DirStore
 from app.session.ids import session_key
+from app.skills import base
+from app.skills.remember import skill as remember_module
+from app.skills.remember.skill import RememberSkill
 from eventlog_fakes import HASH, LogBuilder, store
 from host_fakes import FakeRegistry, FakeSandbox, FakeTenant, users_root, worker_kwargs  # noqa: F401
-from test_ast_index_skill import mongo  # noqa: F401
+from test_ast_index_skill import MockStore, mongo  # noqa: F401
 
 KEY = session_key("u", "t", "s1")
 SESSION = "memory-u/sessions/t/s1"
@@ -213,3 +221,161 @@ async def test_the_first_run_creates_the_indexes(indexer, mongo, tmp_path):
     chat(indexer, tmp_path)
     await indexer.closed(KEY)
     assert "nid_1" in mongo.nodes.index_information() and "src_1" in mongo.edges.index_information()
+
+
+# ---------------------------------------------------------------- memory files and recall
+
+
+def write_memory(root: Path, slug: str, body: str) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    (root / f"{slug}.md").write_text(f"---\nname: {slug}\ndescription: about {slug}\ntype: user\n---\n\n{body}\n")
+
+
+def latest(mongo, nid: str):
+    return mongo.nodes.find_one({"nid": nid, "is_latest": True})
+
+
+@pytest.fixture
+def active(indexer):
+    memory_index.activate(indexer)
+    yield indexer
+    memory_index.activate(None)
+
+
+async def settled(indexer) -> None:
+    """Wait for the indexer's background tasks."""
+    while indexer._tasks:
+        await asyncio.gather(*indexer._tasks)
+
+
+@pytest.mark.asyncio
+async def test_session_memory_is_indexed_with_the_session(indexer, mongo, tmp_path):
+    """The session's own memory files (a compaction summary, `remember(scope=session)`) are indexed
+    under the session's path when the session is, beside the user's files."""
+    session = indexer.sessions.get_or_create("u", "t", "s1")
+    log = LogBuilder().start().tool_task("in_1", "keep a note", "noted")
+    log.emit("memory", {"scope": "session", "op": "write", "slug": "compaction-9", "sha256": HASH, "derived_from": "c1"})
+    store(session, log.events)
+    write_memory(session.memory, "compaction-9", "The user is choosing an editor.")
+    await indexer.closed(KEY)
+    assert latest(mongo, f"{SESSION}/memory/compaction-9.md")
+
+
+@pytest.mark.asyncio
+async def test_remember_and_forget_index_the_file_at_once(active, mongo, tmp_path, monkeypatch):
+    """1: a file `remember` writes is in the graph without waiting for the session to close; one
+    `forget` removes is marked removed; a session-scope one goes under the session."""
+    monkeypatch.setattr(remember_module, "USERS_ROOT", str(tmp_path / "users"))
+    session = active.sessions.get_or_create("u", "t", "s1")
+    base.set_current_context(session, "u", "t", "s1")
+    skill = RememberSkill()
+    note = {"name": "editor", "description": "the editor", "type": "user", "body": "Uses vim."}
+    await skill.execute("remember", {"slug": "editor", **note})
+    await skill.execute("remember", {"slug": "scratch", "scope": "session", **note})
+    await settled(active)
+    assert latest(mongo, "memory-u/editor.md") and latest(mongo, f"{SESSION}/memory/scratch.md")
+    await skill.execute("forget", {"slug": "editor"})
+    await settled(active)
+    assert mongo.files.find_one({"path": "editor.md"})["removed_at"] is not None
+
+
+def test_nothing_is_indexed_without_the_indexer_or_for_the_guest(active, tmp_path):
+    assert memory_index.memory_written("u", "guest", "s1", None, "user", "editor") is None
+    assert memory_index.memory_written("u", "t", "s1", None, "user", "../x") is None
+    memory_index.activate(None)
+    assert memory_index.memory_written("u", "t", "s1", None, "user", "editor") is None
+    assert memory_index.recall("u", "t", "s1", "editor") == []
+
+
+@pytest.mark.asyncio
+async def test_the_check_makes_the_folder_the_index(indexer, mongo, tmp_path):
+    """3: a file no session's events name (written by hand) is indexed by the check, one deleted is
+    marked removed, MEMORY.md is not a memory, and a folder that is gone changes nothing."""
+    root = tmp_path / "users" / "u" / "memory"
+    write_memory(root, "hand", "Written by hand.")
+    write_memory(root, "old", "To be deleted.")
+    (root / "MEMORY.md").write_text("- [hand](hand.md)\n")
+    await indexer.check(IDLE_S)
+    assert latest(mongo, "memory-u/hand.md") and latest(mongo, "memory-u/old.md")
+    assert not mongo.files.find_one({"path": "MEMORY.md"})
+    (root / "old.md").unlink()
+    await indexer.check(IDLE_S)
+    assert mongo.files.find_one({"path": "old.md"})["removed_at"] is not None
+    shutil.rmtree(root)
+    await indexer.check(IDLE_S)
+    assert mongo.files.find_one({"path": "hand.md"})["removed_at"] is None
+
+
+class RecallStore(MockStore):
+    """Vector search as a substring match with a fixed score (`delay_s` before it answers)."""
+
+    score = 0.9
+    delay_s = 0.0
+    error: Exception | None = None
+
+    def vector(self, query, match, limit=10):
+        time.sleep(self.delay_s)
+        if self.error:
+            raise self.error
+        return [{**doc, "score": self.score} for doc in self.chunks.find(match)
+                if query.lower() in doc["text"].lower()][:limit]
+
+
+@pytest.fixture
+def recalling(tmp_path, monkeypatch):
+    """An active indexer on a store whose vector search answers, with session s1 indexed."""
+    monkeypatch.setattr(memory_index, "USERS_ROOT", str(tmp_path / "users"))
+    mongo = RecallStore(mongomock.MongoClient(tz_aware=True), "test")
+    indexer = MemoryIndexer(DirStore(tmp_path / "sessions"), [FakeTenant()], connect=lambda: mongo)
+    memory_index.activate(indexer)
+    yield indexer, mongo
+    memory_index.activate(None)
+
+
+@pytest.mark.asyncio
+async def test_recall_brings_back_another_sessions_turns(recalling, tmp_path, monkeypatch):
+    """4: an input recalls the nodes of the user's graph nearest it: another session's turn, not the
+    current session's, not a memory file the description recall brought, not one scoring too low."""
+    indexer, mongo = recalling
+    chat(indexer, tmp_path)
+    await indexer.closed(KEY)
+    found = memory_index.recall("u", "t", "s2", "editor", ["editor"])
+    assert [(item["body"], item["source"]) for item in found] == [("remember my editor", "index")]
+    assert found[0]["title"] == "earlier conversation: s1 (user, 2026-10-07)" and found[0]["score"] == 0.9
+    assert {item["id"] for item in memory_index.recall("u", "t", "s2", "editor")} == {
+        f"{SESSION}:turn-1", "memory-u/editor.md"}
+    assert memory_index.recall("u", "t", "s1", "editor", ["editor"]) == []
+    assert memory_index.recall("u", "guest", "s2", "editor") == []
+    monkeypatch.setattr(memory_index, "MEMORY_RECALL_MIN_SCORE", 0.95)
+    assert memory_index.recall("u", "t", "s2", "editor", ["editor"]) == []
+
+
+@pytest.mark.asyncio
+async def test_recall_never_holds_up_or_fails_an_input(recalling, tmp_path, monkeypatch, caplog):
+    indexer, mongo = recalling
+    chat(indexer, tmp_path)
+    await indexer.closed(KEY)
+    monkeypatch.setattr(memory_index, "RECALL_TIMEOUT_S", 0.05)
+    mongo.delay_s = 0.5
+    started = time.monotonic()
+    assert memory_index.recall("u", "t", "s2", "editor") == []
+    assert time.monotonic() - started < 0.4 and "memory recall took over" in caplog.text
+    mongo.delay_s, mongo.error = 0.0, RuntimeError("no server")
+    assert memory_index.recall("u", "t", "s2", "editor") == []
+    assert "memory recall failed: RuntimeError: no server" in caplog.text
+
+
+def test_worker_attachments_add_the_graph_after_the_description_recall(monkeypatch):
+    """The worker's attachments: the description recall's, then the graph's, which skips the files
+    the first brought."""
+    monkeypatch.setattr(worker_module.hello_mod, "attachments",
+                        lambda tenant, session, user, text: [{"kind": "memory", "slug": "editor", "body": "Uses vim."}])
+    asked = []
+
+    def recall(user, tenant, session_id, text, skip_slugs):
+        asked.append((user, tenant, session_id, text, skip_slugs))
+        return [{"kind": "memory", "source": "index", "title": "t", "body": "b"}]
+    monkeypatch.setattr(memory_index, "recall", recall)
+    worker = SimpleNamespace(tenant=SimpleNamespace(name="t"), session=None, user="u", session_id="s2")
+    assert [item.get("slug") or item["title"] for item in Worker.attachments(worker, "editor")] == ["editor", "t"]
+    assert asked == [("u", "t", "s2", "editor", ["editor"])]

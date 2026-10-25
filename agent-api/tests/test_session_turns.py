@@ -63,16 +63,18 @@ def test_compaction_and_repeated_input_are_not_turns(session):
     assert said(session) == [("user", "hello"), ("assistant", "hi there")]
 
 
-def test_memory_changes_are_the_last_user_op(session):
-    """Criterion 4: the user-scope files the session wrote or removed, by their last op; a
-    session-scope file, such as a compaction summary, is left out."""
+def test_memory_changes_are_the_last_op_of_each_scope(session):
+    """Criterion 4: the files the session wrote or removed, by scope and their last op; a
+    compaction summary is a session-scope file."""
     log = LogBuilder().start().tool_task("in_1", "remember this", "noted")
     memory(log, "user", "write", "editor")
     memory(log, "user", "write", "language")
     memory(log, "user", "remove", "editor")
+    memory(log, "session", "write", "scratch")
     compact(log)
     store(session, log.events)
-    assert memory_changes(session.root) == {"editor": "remove", "language": "write"}
+    assert memory_changes(session.root) == {"user": {"editor": "remove", "language": "write"},
+                                            "session": {"scratch": "write", "summary": "write"}}
 
 
 def test_memory_changes_leave_out_a_bad_slug(session):
@@ -81,4 +83,4 @@ def test_memory_changes_leave_out_a_bad_slug(session):
     memory(log, "user", "write", "../../secret")
     memory(log, "user", "write", "editor")
     store(session, log.events)
-    assert memory_changes(session.root) == {"editor": "write"}
+    assert memory_changes(session.root) == {"user": {"editor": "write"}, "session": {}}

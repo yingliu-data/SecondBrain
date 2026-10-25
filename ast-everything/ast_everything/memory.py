@@ -15,9 +15,16 @@ the same turns again without inserting anything twice; a write that raises
 releases the lease at once. The memory files the session wrote or removed are
 indexed when on disk, or marked removed when gone, by the indexer's own
 versioning, and only those. The cursor moves and the lease is released last.
+
+Memory files live in folders (`MemoryFiles`: a folder of `<slug>.md` files and the
+path prefix they get in the source, so a user's folder and each session's share
+one source). `index_memory` indexes some of a folder's files, as one write or a
+session's index does; `sync_memory` makes the source hold exactly the folder's
+files, for files no session's events name (written by hand, or before indexing).
 """
 from __future__ import annotations
 
+import re
 from collections import Counter
 from collections.abc import Iterable
 from datetime import datetime, timedelta
@@ -46,12 +53,18 @@ class Turn(NamedTuple):
     text: str
 
 
+class MemoryFiles(NamedTuple):
+    """The `<slug>.md` files of `slugs` in the folder `root`, at `prefix<slug>.md` in the source."""
+    root: Path
+    slugs: Iterable[str]
+    prefix: str = ""
+
+
 def index_session(store: Store, source: str, session: str, title: str, turns: list[Turn],
-                  lease_s: float = LEASE_S, memory_root: Path | None = None,
-                  memory_files: Iterable[str] | None = None) -> Counter | None:
+                  lease_s: float = LEASE_S, memory: Iterable[MemoryFiles] = ()) -> Counter | None:
     """Index the turns of `session` (its path in `source`, as `sessions/<tenant>/<id>`) that come
-    after its cursor, and the `<slug>.md` files under `memory_root` of the slugs the session wrote or
-    removed (`memory_files`). None when another run holds the session's lease."""
+    after its cursor, and the memory files the session wrote or removed (`memory`, one entry per
+    folder). None when another run holds the session's lease."""
     sid = f"{valid_source(source)}/{session}"
     record = _take_lease(store, source, sid, lease_s)
     if record is None:
@@ -67,8 +80,8 @@ def index_session(store: Store, source: str, session: str, title: str, turns: li
                          chunks_inserted=_upsert(store.chunks, chunks, ("_id",)),
                          edges_inserted=_upsert(store.edges, _edges(sid, source, session, cursor, turn_nodes),
                                                 ("type", "src", "dst")))
-        if memory_files:
-            counts.update(_index_memory(store, source, memory_root, memory_files))
+        for files in memory:
+            counts.update(index_memory(store, source, files))
     except Exception:
         store.sessions.update_one({"_id": sid}, {"$set": {"status": "idle", "lock_until": None}})
         raise
@@ -129,13 +142,27 @@ def _upsert(collection, docs: list[dict], keys: tuple[str, ...]) -> int:
     return collection.bulk_write(ops, ordered=False).upserted_count
 
 
-def _index_memory(store: Store, source: str, root: Path, slugs: Iterable[str]) -> Counter:
+def index_memory(store: Store, source: str, files: MemoryFiles) -> Counter:
     """Index the files that exist, and mark the others removed: the disk decides, since a later
-    session may have written again a file this one removed."""
-    paths = [root / f"{slug}.md" for slug in slugs]
-    present = [path for path in paths if path.is_file()]
-    counts = index_files(store, source, root, present)
-    counts["nodes_removed"] += remove_files(store, source, [path.name for path in paths if path not in present])
+    session may have written again a file this one removed. A symlink is not read: a memory
+    folder holds the files its owner wrote."""
+    paths = [files.root / f"{slug}.md" for slug in files.slugs]
+    present = [path for path in paths if path.is_file() and not path.is_symlink()]
+    counts = index_files(store, source, files.root, present, prefix=files.prefix)
+    counts["nodes_removed"] += remove_files(store, source,
+                                            [files.prefix + path.name for path in paths if path not in present])
+    return counts
+
+
+def sync_memory(store: Store, source: str, files: MemoryFiles) -> Counter:
+    """Make the source's files at `prefix<name>.md` (no folder between) exactly `files.slugs`: index
+    those, and mark removed the indexed ones that are not among them."""
+    slugs = list(files.slugs)
+    counts = index_memory(store, source, files._replace(slugs=slugs))
+    wanted = {f"{files.prefix}{slug}.md" for slug in slugs}
+    pattern = "^" + re.escape(files.prefix) + r"[^/]+\.md$"
+    indexed = store.files.distinct("path", {"source": source, "path": {"$regex": pattern}, "removed_at": None})
+    counts["nodes_removed"] += remove_files(store, source, sorted(set(indexed) - wanted))
     return counts
 
 

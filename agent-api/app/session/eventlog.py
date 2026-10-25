@@ -3,7 +3,7 @@
   read_trace(session_root, since=, limit=) -> list[row]   the trace viewer's rows
   trace_rows(runs) -> list[row]                           the same from runs in memory
   session_turns(session_root) -> list[Turn]               the conversation, for the memory index
-  memory_changes(session_root) -> {slug: op}              the user memory files it wrote or removed
+  memory_changes(session_root) -> {scope: {slug: op}}     the memory files it wrote or removed
 
 The event log is canonical; `history.jsonl` and `logs/trace.jsonl` are no
 longer written (the projections kept for one release are retired). Trace
@@ -179,13 +179,15 @@ def _said(ev: dict, compactions: set) -> tuple[str, str] | None:
     return None
 
 
-def memory_changes(session_root: Path | str) -> dict[str, str]:
-    """{slug: its last op} of the session's `memory` events of the user scope. A slug the memory
-    store would refuse is left out: the guest writes the log, and a slug becomes a path."""
-    changes: dict[str, str] = {}
+def memory_changes(session_root: Path | str) -> dict[str, dict[str, str]]:
+    """{scope: {slug: its last op}} of the session's `memory` events: `user` (the user's memory
+    folder) and `session` (the session's own: `remember(scope=session)` and the compaction
+    summaries). A slug the memory store would refuse is left out: the guest writes the log, and
+    a slug becomes a path."""
+    changes: dict[str, dict[str, str]] = {"user": {}, "session": {}}
     for events in iter_runs(Path(session_root)):
         for ev in events:
             b = ev.get("body") or {}
-            if ev.get("type") == "memory" and b.get("scope") == "user" and VALID_SLUG.fullmatch(b["slug"]):
-                changes[b["slug"]] = b["op"]
+            if ev.get("type") == "memory" and b.get("scope") in changes and VALID_SLUG.fullmatch(b["slug"]):
+                changes[b["scope"]][b["slug"]] = b["op"]
     return changes
