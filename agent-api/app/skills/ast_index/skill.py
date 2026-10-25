@@ -98,7 +98,7 @@ TOOLS = [
         {"path": {"type": "string", "description": "an absolute path on the server"},
          "workspace_path": {"type": "string", "description": "a path relative to the session workspace"},
          "git_url": {"type": "string"},
-         "name": {"type": "string", "description": "the source name (default: made from the folder or repo name)"}}),
+         "name": {"type": "string", "description": "the source name, not starting with memory- (default: made from the folder or repo name)"}}),
     _function(
         "ast_index_status",
         "The state of an ast_index job (running, done or failed), its counts, or its error. "
@@ -349,9 +349,12 @@ class AstIndexSkill(BaseSkill):
 
 def _source(name, default: str) -> str:
     try:
-        return valid_source(name) if name else source_name(default)
+        source = valid_source(name) if name else source_name(default)
     except ValueError as exc:
         raise ToolError(str(exc)) from exc
+    if source.startswith("memory-"):
+        raise ToolError(f"source name {source!r}: the memory- prefix is kept for the memory index")
+    return source
 
 
 def _int(args: dict, name: str, default: int, low: int, high: int) -> int:

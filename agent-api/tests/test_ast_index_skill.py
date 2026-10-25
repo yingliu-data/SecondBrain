@@ -197,6 +197,7 @@ def test_a_failed_job_reports_its_error(skill, monkeypatch):
     ({"path": "/no/such/folder"}, "no such file"),
     ({"git_url": "ftp://host/repo"}, "https or ssh"),
     ({"path": "/tmp", "name": "a/b"}, "source name"),
+    ({"path": "/tmp", "name": "memory-alice"}, "memory- prefix"),
 ])
 def test_bad_index_input_is_refused(skill, args, message):
     answer = call(skill, "ast_index", **args)
