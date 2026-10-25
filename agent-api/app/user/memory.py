@@ -27,7 +27,7 @@ from pathlib import Path
 
 from protocol.fsio import atomic_write
 
-_VALID_SLUG = re.compile(r"^[a-z0-9_\-]{1,64}$")
+VALID_SLUG = re.compile(r"^[a-z0-9_\-]{1,64}$")
 _FM_RE = re.compile(r"\A---\n(.*?)\n---\n(.*)\Z", re.S)
 _VALID_TYPES = {"user", "feedback", "project", "reference"}
 
@@ -62,7 +62,7 @@ class MemoryStore:
         type: str,
         body: str,
     ) -> MemoryRecord:
-        if not _VALID_SLUG.match(slug):
+        if not VALID_SLUG.match(slug):
             raise ValueError(
                 f"invalid slug {slug!r}: use lowercase a-z, 0-9, _ or -, max 64 chars"
             )

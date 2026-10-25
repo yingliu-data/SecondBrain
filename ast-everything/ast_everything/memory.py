@@ -11,10 +11,10 @@ one conditional update and skips the session when another run holds it.
 Every write is an upsert on a fixed ID (`<source>/<session>` for the session,
 `<session ID>:turn-<n>` for a turn) or on an edge's type and ends, so a run
 that stops part-way leaves the cursor where it was, and the next run writes
-the same turns again without inserting anything twice. The memory files the
-session wrote or removed are indexed when on disk, or marked removed when gone,
-by the indexer's own versioning, and only those. The cursor moves and the lease
-is released last.
+the same turns again without inserting anything twice; a write that raises
+releases the lease at once. The memory files the session wrote or removed are
+indexed when on disk, or marked removed when gone, by the indexer's own
+versioning, and only those. The cursor moves and the lease is released last.
 """
 from __future__ import annotations
 
@@ -56,12 +56,16 @@ def index_session(store: Store, source: str, session: str, title: str, turns: li
                         names=[Path(session).name.lower()], start_line=None, end_line=None, text=title)
     turn_nodes = [_turn_node(sid, source, session, title, turn) for turn in new]
     chunks = [chunk(doc, f"{title}\n{part}", n) for doc in turn_nodes for n, part in enumerate(_parts(doc["text"]), 1)]
-    counts = Counter(turns=len(new), nodes_inserted=_upsert(store.nodes, [session_node, *turn_nodes], ("_id",)),
-                     chunks_inserted=_upsert(store.chunks, chunks, ("_id",)),
-                     edges_inserted=_upsert(store.edges, _edges(sid, source, session, cursor, turn_nodes),
-                                            ("type", "src", "dst")))
-    if memory_files:
-        counts.update(_index_memory(store, source, memory_root, memory_files))
+    try:
+        counts = Counter(turns=len(new), nodes_inserted=_upsert(store.nodes, [session_node, *turn_nodes], ("_id",)),
+                         chunks_inserted=_upsert(store.chunks, chunks, ("_id",)),
+                         edges_inserted=_upsert(store.edges, _edges(sid, source, session, cursor, turn_nodes),
+                                                ("type", "src", "dst")))
+        if memory_files:
+            counts.update(_index_memory(store, source, memory_root, memory_files))
+    except Exception:
+        store.sessions.update_one({"_id": sid}, {"$set": {"status": "idle", "lock_until": None}})
+        raise
     _commit(store, sid, max([cursor, *(turn.n for turn in new)]))
     return counts
 

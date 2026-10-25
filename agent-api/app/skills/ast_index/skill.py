@@ -35,7 +35,8 @@ from ast_everything.search import by_time, retrieve, search, sources, traverse
 from ast_everything.store import Store
 
 from app.config import AST_REPOS_DIR
-from app.skills.base import BaseSkill, get_current_session
+from app.host.memory_index import memory_source
+from app.skills.base import BaseSkill, get_current_session, get_current_user_id
 
 logger = logging.getLogger("skills.ast_index")
 
@@ -114,8 +115,9 @@ TOOLS = [
         "(keyword and meaning). The first layer with hits answers. `node_types`: directory, file, class, "
         "function, document, section, paragraph, list, list_item, table, code, quote, html, session, turn. "
         "Past chat sessions (session and turn nodes) and the user's memory files are the source "
-        "`memory-<user>`; every source is searched unless `scope` names one. `history` also "
-        "shows superseded and removed versions. `detail`: fold (ID, type, location, status), preview "
+        "`memory-<user>`; every source but other users' memory is searched unless `scope` names one. "
+        "`history` also shows superseded and removed versions. `detail`: fold (ID, type, location, "
+        "status), preview "
         "(adds the first lines), full (adds the text).",
         {"query": {"type": "string"}, "scope": SCOPE, "node_types": STR_LIST,
          "path_prefix": {"type": "string"}, "time_range": TIME_RANGE, "history": {"type": "boolean"},
@@ -293,8 +295,18 @@ class AstIndexSkill(BaseSkill):
         return job.view()
 
     # ------------------------------------------------------------ reading
+    def _hidden(self, *names: str | None) -> list[str]:
+        """The other users' memory sources (each has session records); a scope or an ID in
+        one of them is refused."""
+        own = memory_source(get_current_user_id())
+        hidden = [source for source in self.store().sessions.distinct("source") if source != own]
+        if any(name.split("/")[0] in hidden for name in names if name):
+            raise ToolError("another user's memory cannot be read")
+        return hidden
+
     def _ast_sources(self, args: dict) -> dict:
-        return {"sources": sources(self.store())}
+        hidden = self._hidden()
+        return {"sources": [row for row in sources(self.store()) if row["source"] not in hidden]}
 
     def _ast_search(self, args: dict) -> dict:
         query = args.get("query")
@@ -303,7 +315,7 @@ class AstIndexSkill(BaseSkill):
         result = search(self.store(), query, scope=args.get("scope"), node_types=_strings(args, "node_types"),
                         path_prefix=args.get("path_prefix"), time_range=_time_range(args, required=False),
                         history=bool(args.get("history")), detail=_choice(args, "detail", DETAILS, "preview"),
-                        limit=_int(args, "limit", 10, 1, 100))
+                        limit=_int(args, "limit", 10, 1, 100), hide=self._hidden(args.get("scope")))
         if result["layer"] is None:
             result["message"] = "no layer matched"
         return result
@@ -312,6 +324,7 @@ class AstIndexSkill(BaseSkill):
         start_ids = _strings(args, "start_ids")
         if not start_ids:
             raise ToolError("start_ids is required")
+        self._hidden(*start_ids)
         result = traverse(self.store(), start_ids, direction=_choice(args, "direction", DIRECTIONS, "out"),
                           hops=_int(args, "hops", 1, 1, 5), node_types=_strings(args, "node_types"),
                           edge_types=_strings(args, "edge_types"), max_fanout=_int(args, "max_fanout", 20, 1, 100))
@@ -323,13 +336,15 @@ class AstIndexSkill(BaseSkill):
         ids = _strings(args, "ids")
         if not ids:
             raise ToolError("ids is required")
+        self._hidden(*ids)
         return {"results": retrieve(self.store(), ids, detail=_choice(args, "detail", DETAILS, "full"),
                                     context_lines=_int(args, "context_lines", 0, 0, 100),
                                     page=_int(args, "page", 1, 1, 1_000_000))}
 
     def _ast_search_by_time(self, args: dict) -> dict:
         return {"results": by_time(self.store(), _time_range(args, required=True), scope=args.get("scope"),
-                                   node_types=_strings(args, "node_types"), limit=_int(args, "limit", 50, 1, 100))}
+                                   node_types=_strings(args, "node_types"), limit=_int(args, "limit", 50, 1, 100),
+                                   hide=self._hidden(args.get("scope")))}
 
 
 def _source(name, default: str) -> str:

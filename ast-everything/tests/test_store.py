@@ -73,6 +73,20 @@ def test_vector_stage_takes_the_limit_as_is_within_the_cap(store):
     assert stages[0]["filter"] == {"is_latest": True}
 
 
+def test_a_hidden_source_is_matched_after_the_search_stage(store):
+    """Issue #56, review round 2, request 1: a `$nin` on `source` is no Atlas Search filter;
+    the `$match` after the stage applies it."""
+    pipelines = []
+    store.chunks.aggregate = lambda pipeline: pipelines.append(pipeline) or []
+    match = {"is_latest": True, "source": {"$nin": ["memory-bob"]}}
+    Store.vector(store, "q", match, 10)
+    Store.keyword_text(store, "q", match, 10)
+    vector, keyword = pipelines
+    assert vector[0]["$vectorSearch"]["filter"] == {"is_latest": True}
+    assert keyword[0]["$search"]["compound"]["filter"] == [{"equals": {"path": "is_latest", "value": True}}]
+    assert vector[1] == keyword[1] == {"$match": match}
+
+
 def test_node_builder_sets_every_common_field():
     """Criterion: code and doc nodes share one schema; the ID is `<nid>@v<n>`."""
     doc = node("code/pkg/utils.py:MathUtils.double", type="function", source="code", path="pkg/utils.py",

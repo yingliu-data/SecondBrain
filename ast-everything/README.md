@@ -87,9 +87,16 @@ agent-api runs it on the host ([memory_index.py](../agent-api/app/host/memory_in
 from the session's event log, when `MEMORY_INDEX` is on (default off): when a session's
 Worker closes (idle eviction, `HARNESS_WORKER_EVICT_S`), when its log has not changed for
 30 minutes (checked every 5), and at startup for every session changed since its last
-index (the record's `log_mtime`: the newest log write read before the turns). The guest tenant is not indexed. A failed run is a warning, and the next check
-tries again. Every turn goes to Atlas and is embedded there, billed per token; to stop,
-turn `MEMORY_INDEX` off and restart agent-api (the nodes stay in the store).
+index (the record's `log_mtime`: the newest log write read before the turns). A check
+indexes at most 20 sessions and logs the size of a larger backlog, so the first start
+drains past sessions over the next checks. The guest tenant is not indexed. A failed run
+is a warning, and the next check tries again. Every turn goes to Atlas and is embedded
+there, billed per token; to stop, turn `MEMORY_INDEX` off and restart agent-api (the
+nodes stay in the store).
+
+The agent's tools show a user only their own memory source: an unscoped search leaves
+out the other users' `memory-*` sources (those with session records), `ast_sources` does
+not list them, and a `scope` or an ID in one of them is refused.
 
 ## Credentials
 

@@ -30,7 +30,7 @@ from pathlib import Path
 from ast_everything.memory import Turn
 from protocol.replay import iter_runs
 
-from app.user.memory import _VALID_SLUG
+from app.user.memory import VALID_SLUG
 
 _ERROR_TRACE = {
     "transient": "llm_error", "overflow": "llm_error", "budget": "llm_error",
@@ -186,6 +186,6 @@ def memory_changes(session_root: Path | str) -> dict[str, str]:
     for events in iter_runs(Path(session_root)):
         for ev in events:
             b = ev.get("body") or {}
-            if ev.get("type") == "memory" and b.get("scope") == "user" and _VALID_SLUG.fullmatch(b["slug"]):
+            if ev.get("type") == "memory" and b.get("scope") == "user" and VALID_SLUG.fullmatch(b["slug"]):
                 changes[b["slug"]] = b["op"]
     return changes

@@ -211,8 +211,8 @@ class Store:
 
 
 def _native_filter(match: dict) -> dict:
-    """The part of `match` a search stage filters on itself; the rest is matched after it."""
-    return {key: match[key] for key in ("is_latest", "source") if key in match}
+    """The part of `match` a search stage filters on itself (equal values); the rest is matched after it."""
+    return {key: match[key] for key in ("is_latest", "source") if key in match and not isinstance(match[key], dict)}
 
 
 def _search_stage(index: str, query: str, paths: list[str], match: dict) -> dict:

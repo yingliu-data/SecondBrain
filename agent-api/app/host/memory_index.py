@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 IDLE_S = 30 * 60
 CHECK_EVERY_S = 5 * 60
+MAX_PER_CHECK = 20   # sessions one check indexes; a backlog (the first start) drains over the next checks
 
 
 def memory_source(user: str) -> str:
@@ -92,10 +93,15 @@ class MemoryIndexer:
             self._store().sessions.update_one({"_id": f"{source}/{path}"}, {"$set": {"log_mtime": newest}})
 
     async def check(self, idle_s: float) -> None:
-        """Index each session of the tenants whose log is idle for `idle_s` and newer than its last index."""
-        for tenant in self.tenants:
-            for session_id in await asyncio.to_thread(self._due, tenant.user, tenant.name, idle_s):
-                await self.index(tenant.user, tenant.name, session_id)
+        """Index each session of the tenants whose log is idle for `idle_s` and newer than its last
+        index, at most `MAX_PER_CHECK`."""
+        due = [(tenant, session_id) for tenant in self.tenants
+               for session_id in await asyncio.to_thread(self._due, tenant.user, tenant.name, idle_s)]
+        if len(due) > MAX_PER_CHECK:
+            logger.warning("memory index: %d sessions due, %d indexed now, the rest at the next checks",
+                           len(due), MAX_PER_CHECK)
+        for tenant, session_id in due[:MAX_PER_CHECK]:
+            await self.index(tenant.user, tenant.name, session_id)
 
     def _due(self, user: str, tenant: str, idle_s: float) -> list[str]:
         source = memory_source(user)

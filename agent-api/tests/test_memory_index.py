@@ -41,10 +41,10 @@ def runs(monkeypatch) -> list[str]:
     return calls
 
 
-def chat(indexer, tmp_path, tenant: str = "t"):
+def chat(indexer, tmp_path, tenant: str = "t", session_id: str = "s1"):
     """A session in which the user asked the agent to remember their editor."""
-    session = indexer.sessions.get_or_create("u", tenant, "s1")
-    log = LogBuilder(tenant=tenant).start().tool_task("in_1", "remember my editor", "noted")
+    session = indexer.sessions.get_or_create("u", tenant, session_id)
+    log = LogBuilder(session_id=session_id, tenant=tenant).start().tool_task("in_1", "remember my editor", "noted")
     log.emit("memory", {"scope": "user", "op": "write", "slug": "editor", "sha256": HASH, "derived_from": "c1"})
     store(session, log.events)
     memory = tmp_path / "users" / "u" / "memory"
@@ -172,3 +172,16 @@ async def test_turns_written_during_a_run_are_indexed_next(indexer, runs, tmp_pa
     monkeypatch.setattr(memory_index, "session_turns", read)
     await indexer.check(0)
     assert runs == ["sessions/t/s1", "sessions/t/s1"]
+
+
+@pytest.mark.asyncio
+async def test_a_backlog_is_indexed_a_few_sessions_per_check(indexer, runs, tmp_path, monkeypatch, caplog):
+    """Issue #56, review round 2, request 2: the first start indexes at most `MAX_PER_CHECK` sessions,
+    logs the size of the backlog, and the next check goes on with the rest."""
+    monkeypatch.setattr(memory_index, "MAX_PER_CHECK", 1)
+    chat(indexer, tmp_path, session_id="s1")
+    chat(indexer, tmp_path, session_id="s2")
+    await indexer.check(0)
+    assert len(runs) == 1 and "memory index: 2 sessions due, 1 indexed now" in caplog.text
+    await indexer.check(0)
+    assert sorted(runs) == ["sessions/t/s1", "sessions/t/s2"]

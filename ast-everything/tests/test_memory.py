@@ -103,6 +103,19 @@ def test_crash_before_commit_then_rerun(store, monkeypatch):
     assert store.sessions.find_one({"_id": SID})["indexed_through_turn"] == 3
 
 
+def test_a_failed_write_releases_the_lease(store, monkeypatch):
+    """Issue #56, review round 2, nit 1: a write that raises releases the lease, so the next
+    trigger runs at once instead of after `LEASE_S`."""
+    def boom(*_):
+        raise RuntimeError("store down")
+    with monkeypatch.context() as patch:
+        patch.setattr(memory, "_edges", boom)
+        with pytest.raises(RuntimeError):
+            run(store, 1, 2, 3)
+    assert store.sessions.find_one({"_id": SID})["lock_until"] is None
+    assert run(store, 1, 2, 3)["turns"] == 3
+
+
 def test_held_lease_skips(store, monkeypatch):
     """Edge case "the end event and the idle check fire together": while one run holds the
     lease, another skips the session and writes nothing."""

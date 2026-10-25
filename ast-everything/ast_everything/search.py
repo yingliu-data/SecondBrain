@@ -5,8 +5,8 @@ of an entity, and what changed in a time range.
 content (keyword and vector, fused by reciprocal rank), and stops at the
 first layer that finds something. Every layer takes the same filters:
 `scope` (the source), `node_types`, `path_prefix`, `time_range` on
-`created_at`, and `history`, without which only the latest versions are
-seen. Each layer is one indexed query; nothing is built in memory.
+`created_at`, `history`, without which only the latest versions are
+seen, and `hide`, sources an unscoped search leaves out. Each layer is one indexed query; nothing is built in memory.
 
 Every answer renders nodes in one shape for code and docs: ID, type,
 location, status (latest, superseded or removed) and, by `detail`, nothing
@@ -33,10 +33,10 @@ CHUNK_FIELDS = ("is_latest", "source", "path")
 
 def search(store: Store, query: str, *, scope: str | None = None, node_types: list[str] | None = None,
            path_prefix: str | None = None, time_range: list[str | None] | None = None, history: bool = False,
-           detail: str = "preview", limit: int = 10) -> dict:
+           detail: str = "preview", limit: int = 10, hide: list[str] | None = None) -> dict:
     """The results of the first layer that finds something; `layer` is None when none does."""
     match = node_filter(scope=scope, node_types=node_types, path_prefix=path_prefix,
-                        time_range=time_range, history=history)
+                        time_range=time_range, history=history, hide=hide)
     layers = (
         lambda: store.nodes.find({**match, "$or": [{"_id": query}, {"nid": query}]}).sort("version", -1).limit(limit),
         lambda: store.nodes.find({**match, "names": query.strip().lower()}).sort("_id").limit(limit),
@@ -51,8 +51,12 @@ def search(store: Store, query: str, *, scope: str | None = None, node_types: li
 
 
 def node_filter(*, scope: str | None = None, node_types: list[str] | None = None, path_prefix: str | None = None,
-                time_range: list[str | None] | None = None, history: bool = False) -> dict:
+                time_range: list[str | None] | None = None, history: bool = False,
+                hide: list[str] | None = None) -> dict:
+    """The filters every layer takes; `hide` names sources an unscoped search leaves out."""
     match = query_filter(source=scope, path_prefix=path_prefix, latest_only=not history)
+    if hide and not scope:
+        match["source"] = {"$nin": hide}
     if node_types:
         match["type"] = {"$in": list(node_types)}
     if time_range and any(time_range):
@@ -251,11 +255,11 @@ def _page(lines: list[str], first: int | None, page: int) -> dict:
 
 
 def by_time(store: Store, time_range: list[str | None], *, scope: str | None = None,
-            node_types: list[str] | None = None, limit: int = 50) -> list[dict]:
+            node_types: list[str] | None = None, limit: int = 50, hide: list[str] | None = None) -> list[dict]:
     """The nodes added, superseded or removed in `time_range`, newest change first: the top
     `limit` of each timestamp's indexed query, merged, hold the top `limit` overall."""
     window = between(time_range)
-    match = node_filter(scope=scope, node_types=node_types, history=True)
+    match = node_filter(scope=scope, node_types=node_types, history=True, hide=hide)
     changed: dict[str, dict] = {}
     for field in TIMESTAMPS:
         for node in store.nodes.find({**match, field: window}, {"text": 0}).sort(field, -1).limit(limit):

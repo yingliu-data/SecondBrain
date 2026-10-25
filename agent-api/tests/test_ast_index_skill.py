@@ -106,10 +106,11 @@ def test_index_a_host_folder_then_search_traverse_and_retrieve(skill, project):
     assert json.loads(call(skill, "ast_search", query="nothing-like-it"))["message"] == "no layer matched"
 
 
-def test_memory_source_is_searchable(skill, mongo, project):
+def test_memory_source_is_searchable(skill, mongo, project, monkeypatch):
     """Criterion 5 of issue #56 (plan step 5): an indexed chat session is found by ID, by name and
     by time, in every source by default and with `scope` set to the memory source; ast_traverse walks
     from the session to its turns and from one turn to the next."""
+    monkeypatch.setattr(skill_module, "get_current_user_id", lambda: "u")
     index(skill, path=str(project))
     at = datetime(2026, 10, 24, tzinfo=timezone.utc)
     index_session(mongo, "memory-u", "sessions/t/s1", "Choosing an editor",
@@ -125,6 +126,25 @@ def test_memory_source_is_searchable(skill, mongo, project):
     assert {(e["type"], e["src"], e["dst"]) for e in walked["edges"]} == {
         ("contains", session, f"{session}:turn-1"), ("contains", session, f"{session}:turn-2"),
         ("precedes", f"{session}:turn-1", f"{session}:turn-2")}
+
+
+def test_another_users_memory_is_hidden(skill, mongo, tmp_path, monkeypatch):
+    """Issue #56, review round 2, request 1: another user's agent finds none of u's turns or
+    memory files, unscoped, and a scope or an ID in `memory-u` is refused."""
+    memory = tmp_path / "memory"
+    memory.mkdir()
+    (memory / "editor.md").write_text("# Editor\n\nUses vim.\n")
+    index_session(mongo, "memory-u", "sessions/t/s1", "Choosing an editor",
+                  [Turn(1, "user", datetime(2026, 10, 24, tzinfo=timezone.utc), "Which editor?")],
+                  memory_root=memory, memory_files=["editor"])
+    monkeypatch.setattr(skill_module, "get_current_user_id", lambda: "bob")
+    assert json.loads(call(skill, "ast_search", query="s1"))["results"] == []
+    assert json.loads(call(skill, "ast_search", query="memory-u/editor.md"))["results"] == []
+    assert json.loads(call(skill, "ast_search_by_time", time_range=["2026-01-01", None]))["results"] == []
+    assert json.loads(call(skill, "ast_sources")) == {"sources": []}
+    assert "another user's memory" in call(skill, "ast_search", query="s1", scope="memory-u")
+    assert "another user's memory" in call(skill, "ast_retrieve", ids=["memory-u/editor.md"])
+    assert "another user's memory" in call(skill, "ast_traverse", start_ids=["memory-u/sessions/t/s1"])
 
 
 def test_index_one_file_under_a_given_name(skill, project):
