@@ -51,7 +51,8 @@ gateway; `flows` and `ast-everything` are used only by agent-api.
 
 `ast-everything` parses Python and Markdown files into add-only, versioned
 nodes and edges in MongoDB Atlas and searches them. agent-api offers it as
-host tools (`ast_index`, `ast_search`, `ast_traverse`, `ast_retrieve`, …,
+host tools (`ast_index`, `ast_search`, `ast_traverse`, `ast_retrieve`, …: the
+library's `ast_everything.tools`, wrapped by
 [agent-api/app/skills/ast_index/](agent-api/app/skills/ast_index/)), so the
 Atlas credentials stay in agent-api and the guest never sees them (see its README).
 With `MEMORY_INDEX` on, agent-api also indexes each closed or idle chat session (its

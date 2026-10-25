@@ -185,3 +185,23 @@ async def test_a_backlog_is_indexed_a_few_sessions_per_check(indexer, runs, tmp_
     assert len(runs) == 1 and "memory index: 2 sessions due, 1 indexed now" in caplog.text
     await indexer.check(0)
     assert sorted(runs) == ["sessions/t/s1", "sessions/t/s2"]
+
+
+@pytest.mark.asyncio
+async def test_a_failing_session_gives_its_slot_back(indexer, runs, tmp_path, monkeypatch):
+    """Review round 3, request 1: a session whose run failed comes after the other due sessions,
+    so a session that always fails does not keep the one slot of each check."""
+    monkeypatch.setattr(memory_index, "MAX_PER_CHECK", 1)
+    real = memory_index.index_session
+
+    def fails_on_s1(store, source, session, *args, **kwargs):
+        if session == "sessions/t/s1":
+            raise RuntimeError("bad session")
+        return real(store, source, session, *args, **kwargs)
+    monkeypatch.setattr(memory_index, "index_session", fails_on_s1)
+    chat(indexer, tmp_path, session_id="s1")
+    chat(indexer, tmp_path, session_id="s2")
+    monkeypatch.setattr(indexer, "_due", lambda user, tenant, idle_s: ["s1", "s2"])
+    await indexer.index("u", "t", "s1")
+    await indexer.check(0)
+    assert runs == ["sessions/t/s2"]

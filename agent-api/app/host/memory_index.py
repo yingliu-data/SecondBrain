@@ -4,8 +4,9 @@ ast-everything graph (source `memory-<user>`, `ast_everything.memory`), on the h
 A session is indexed when its Worker closes (`closed`, the Workers' `on_closed`), when its
 event log has not changed for `IDLE_S` (checked every `CHECK_EVERY_S`), and by the same
 check with no idle time at startup. A session whose log is older than its last index is
-not read. A failed run is logged and the session stays unindexed until the next check;
-the chat never waits for it. The guest tenant is not indexed. On only with `MEMORY_INDEX`.
+not read. A failed run is logged and the session stays unindexed until the next check,
+which takes it after the sessions that did not fail; the chat never waits for it. The
+guest tenant is not indexed. On only with `MEMORY_INDEX`.
 """
 from __future__ import annotations
 
@@ -46,6 +47,7 @@ class MemoryIndexer:
         self.store: Store | None = None
         self._running: set[str] = set()   # the sessions being indexed: a second trigger skips
         self._tasks: set[asyncio.Task] = set()
+        self._failed: dict[str, float] = {}   # session key: when its last run failed
 
     def _store(self) -> Store:
         if self.store is None:
@@ -69,7 +71,9 @@ class MemoryIndexer:
         self._running.add(key)
         try:
             await asyncio.to_thread(self._index, user, tenant, session_id)
+            self._failed.pop(key, None)
         except Exception as exc:  # noqa: BLE001 - the next check tries again
+            self._failed[key] = time.time()
             logger.warning("memory index of session %s failed: %s: %s", session_id, type(exc).__name__, exc)
         finally:
             self._running.discard(key)
@@ -94,9 +98,11 @@ class MemoryIndexer:
 
     async def check(self, idle_s: float) -> None:
         """Index each session of the tenants whose log is idle for `idle_s` and newer than its last
-        index, at most `MAX_PER_CHECK`."""
+        index, at most `MAX_PER_CHECK`: the sessions whose last run failed come last, the oldest
+        failure first, so they cannot hold every slot."""
         due = [(tenant, session_id) for tenant in self.tenants
                for session_id in await asyncio.to_thread(self._due, tenant.user, tenant.name, idle_s)]
+        due.sort(key=lambda item: self._failed.get(f"{item[0].user}/{item[0].name}/{item[1]}", 0.0))
         if len(due) > MAX_PER_CHECK:
             logger.warning("memory index: %d sessions due, %d indexed now, the rest at the next checks",
                            len(due), MAX_PER_CHECK)

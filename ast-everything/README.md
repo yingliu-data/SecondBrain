@@ -3,8 +3,9 @@
 A library that turns Python and Markdown files, and the agent's chat sessions, into
 AST-style nodes and edges in a MongoDB Atlas store, versioned and add-only, and
 searches them, so an agent finds code, documents and past conversations without
-reading every file. It is a member of the uv workspace;
-agent-api offers it to agents as the host tools of its `ast_index` skill
+reading every file. It is a member of the uv workspace, and it stands alone: copy the
+folder into another project and any Python agent can use its tools (see "The agent's
+tools"). agent-api offers them to its agents as the host tools of its `ast_index` skill
 ([agent-api/app/skills/ast_index/](../agent-api/app/skills/ast_index/)), which hold
 the Atlas credentials, so the guest never sees them.
 
@@ -90,8 +91,8 @@ Worker closes (idle eviction, `HARNESS_WORKER_EVICT_S`), when its log has not ch
 index (the record's `log_mtime`: the newest log write read before the turns). A check
 indexes at most 20 sessions and logs the size of a larger backlog, so the first start
 drains past sessions over the next checks. The guest tenant is not indexed. A failed run
-is a warning, and the next check tries again. Every turn goes to Atlas and is embedded
-there, billed per token; to stop, turn `MEMORY_INDEX` off and restart agent-api (the
+is a warning, and the next check tries again, after the sessions that did not fail. Every
+turn goes to Atlas and is embedded there, billed per token; to stop, turn `MEMORY_INDEX` off and restart agent-api (the
 nodes stay in the store).
 
 The agent's tools show a user only their own memory source: an unscoped search leaves
@@ -108,12 +109,30 @@ environment, and the local sandbox strips `MONGODB_*` from the guest's environme
 Indexing needs a user with `readWrite` on the database. Atlas must allow the host's IP
 (Network Access): an IP it does not allow fails with `TLSV1_ALERT_INTERNAL_ERROR`.
 
-## The agent's tools (`ast_index` skill)
+## The agent's tools
+
+[tools.py](ast_everything/tools.py) holds the tool definitions (OpenAI function format)
+and runs them, so any Python agent can offer them once the `MONGODB_*` variables are set:
+
+```python
+from ast_everything.tools import AstTools
+
+tools = AstTools()                                    # MONGODB_* from the environment or .env
+tools.definitions                                     # give these to the model
+answer = tools.call("ast_search", {"query": "setup"})  # JSON text, or "Error: ..."
+```
+
+`AstTools` also takes `repos_dir` (where git clones go; default `AST_REPOS_DIR`, else
+`data/ast-everything/repos`), `workspace` (a function that returns the folder
+`workspace_path` resolves in, or None) and `hidden` (a function that takes the store and
+returns the sources the caller may not read). `call` blocks; an async agent runs it in a
+thread. agent-api's `ast_index` skill gives the session's workspace and hides the other
+users' memory sources.
 
 - `ast_index(path | workspace_path | git_url, name)`: indexes a folder or one file on
   the host, in the session's workspace (as of the end of the last task), or a git repo
-  cloned under `AST_REPOS_DIR` (default `data/ast-everything/repos`), as the source
-  `name` (default: made from the folder or repo name). It runs in the background and
+  cloned under `repos_dir`, as the source `name` (default: made from the folder or repo
+  name; a name starting with `memory-` is refused). It runs in the background and
   returns a `job_id`; one job per source runs at a time. In the agent-api container a
   host path is visible only when mounted.
 - `ast_index_status(job_id)`: the job's state (`running`, `done`, `failed`), its counts
