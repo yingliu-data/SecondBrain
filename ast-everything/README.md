@@ -70,12 +70,14 @@ Indexing needs a user with `readWrite` on the database. Atlas must allow the hos
 
 ## The agent's tools (`ast_index` skill)
 
-- `ast_index(path | workspace_path | git_url, name)`: indexes a folder or one file on
-  the host, in the session's workspace (as of the end of the last task), or a git repo
-  cloned under `AST_REPOS_DIR` (default `data/ast-everything/repos`), as the source
-  `name` (default: made from the folder or repo name). It runs in the background and
-  returns a `job_id`; one job per source runs at a time. In the agent-api container a
-  host path is visible only when mounted.
+- `ast_index(path | workspace_path | git_url, name, wait_s)`: indexes a folder or one
+  file on the host, in the session's workspace (as of the end of the last task), or a
+  git repo cloned under `AST_REPOS_DIR` (default `data/ast-everything/repos`), as the
+  source `name` (default: made from the folder or repo name). It runs in the background
+  and returns a `job_id`; one job per source runs at a time. `wait_s` (0 to 120) waits
+  for the job in the same call and answers with its counts, at most
+  `HARNESS_HOST_TOOL_TIMEOUT_S` less 5 seconds (55 by default). In the agent-api
+  container a host path is visible only when mounted.
 - `ast_index_status(job_id)`: the job's state (`running`, `done`, `failed`), its counts
   or its error.
 - `ast_sources()`: the indexed sources with their file counts.

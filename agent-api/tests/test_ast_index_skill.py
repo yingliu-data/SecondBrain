@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -141,6 +142,26 @@ def test_index_a_git_repo_clone_then_fetch(skill, project, monkeypatch, tmp_path
     assert len(list((tmp_path / "repos").iterdir())) == 1
 
 
+def test_wait_s_answers_with_the_counts_in_the_same_call(skill, project):
+    done = json.loads(call(skill, "ast_index", path=str(project), wait_s=30))
+    assert (done["state"], done["counts"]["files"]) == ("done", 2)
+    assert "note" not in done
+
+
+def test_wait_s_is_capped_and_a_job_still_running_says_so(mongo, tmp_path, project, monkeypatch):
+    release = threading.Event()
+    monkeypatch.setattr(skill_module, "sync", lambda *a: release.wait(10) and {})
+    skill = AstIndexSkill(connect=lambda: mongo, repos_dir=tmp_path / "repos", max_wait_s=0.05)
+    try:
+        started = time.monotonic()
+        answer = json.loads(call(skill, "ast_index", path=str(project), wait_s=120))
+        assert time.monotonic() - started < 5
+        assert answer["state"] == "running" and "still indexing after 0.05s" in answer["note"]
+    finally:
+        release.set()
+    assert finished(skill, answer["job_id"])["state"] == "done"
+
+
 def test_a_failed_job_reports_its_error(skill, monkeypatch):
     monkeypatch.setattr(skill_module, "GIT_SCHEMES", (*skill_module.GIT_SCHEMES, "file"))
     status = index(skill, git_url="file:///no/such/repo")
@@ -154,6 +175,7 @@ def test_a_failed_job_reports_its_error(skill, monkeypatch):
     ({"path": "/no/such/folder"}, "no such file"),
     ({"git_url": "ftp://host/repo"}, "https or ssh"),
     ({"path": "/tmp", "name": "a/b"}, "source name"),
+    ({"path": "/tmp", "wait_s": 121}, "wait_s must be from 0 to 120"),
 ])
 def test_bad_index_input_is_refused(skill, args, message):
     answer = call(skill, "ast_index", **args)

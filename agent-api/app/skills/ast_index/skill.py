@@ -5,8 +5,10 @@ edges in MongoDB, and the search over them.
 workspace (`workspace_path`: the host copy, synced when a task ends) or a git
 repo it clones (`git_url`), and indexes it as one source. An index can outlast
 the host tool timeout, so it runs as a background job in this process and
-`ast_index_status` reports it; one job per source runs at a time, and the jobs
-are forgotten on restart (indexing again is cheap: unchanged files are skipped).
+`ast_index_status` reports it; `wait_s` waits for the job in the call itself,
+at most a little less than the host tool timeout, so a small source needs no
+status poll. One job per source runs at a time, and the jobs are forgotten on
+restart (indexing again is cheap: unchanged files are skipped).
 The read tools answer from the store through `ast_everything.search`.
 
 The MongoDB credentials are agent-api's (`ast_everything.store.settings`: the
@@ -34,13 +36,15 @@ from ast_everything.parsers import parser_for
 from ast_everything.search import by_time, retrieve, search, sources, traverse
 from ast_everything.store import Store
 
-from app.config import AST_REPOS_DIR
+from app.config import AST_REPOS_DIR, HARNESS_HOST_TOOL_TIMEOUT_S
 from app.skills.base import BaseSkill, get_current_session
 
 logger = logging.getLogger("skills.ast_index")
 
 AUTHENTICATION_FAILED = 18     # MongoDB's error code
 GIT_TIMEOUT_S = 600
+MAX_WAIT_S = 120
+WAIT_MARGIN_S = 5              # the answer must reach the guest before its host tool timeout
 GIT_SCHEMES = ("https", "ssh")
 DETAILS = ("fold", "preview", "full")
 DIRECTIONS = ("out", "in", "both")
@@ -60,6 +64,7 @@ class Job:
     error: str | None = None
     started_at: float = field(default_factory=time.time)
     finished_at: float | None = None
+    finished: threading.Event = field(default_factory=threading.Event, repr=False)
 
     def view(self) -> dict:
         out = {"job_id": self.id, "source": self.source, "target": self.target, "state": self.state}
@@ -87,31 +92,36 @@ DETAIL = {"type": "string", "enum": list(DETAILS)}
 TOOLS = [
     _function(
         "ast_index",
-        "Parse a project or documents (Python and Markdown files) into AST-style nodes and edges and "
-        "save them to MongoDB, as one source. Give exactly one of `path` (a folder or file on the server), "
-        "`workspace_path` (a folder or file in this session's workspace, as of the end of the last task) "
-        "or `git_url` (an https or ssh repo, cloned on the server). Runs in the background: returns a "
-        "job_id for ast_index_status. Indexing again only re-parses changed files; a folder sync also "
-        "marks files that are gone as removed. Atlas embeds each new class, function, document and "
-        "section version, which is billed per token.",
-        {"path": {"type": "string", "description": "an absolute path on the server"},
+        "Make a codebase or document set readable with the other ast_* tools: parse its Python and "
+        "Markdown files into files, classes, functions and doc sections, as one source. Give exactly one "
+        "of `git_url` (an https or ssh repo, cloned on the server), `path` (a folder or file on the server) "
+        "or `workspace_path` (a folder or file in this session's workspace, as of the end of the last task). "
+        "With `wait_s`, waits up to that many seconds and answers with the counts when it finishes; "
+        "otherwise, or if it is still running, check ast_index_status with the job_id. Indexing again "
+        "only re-parses changed files; a folder sync also marks files that are gone as removed. "
+        "Atlas embeds each new class, function, document and section version, which is billed per token.",
+        {"git_url": {"type": "string"},
+         "path": {"type": "string", "description": "an absolute path on the server"},
          "workspace_path": {"type": "string", "description": "a path relative to the session workspace"},
-         "git_url": {"type": "string"},
-         "name": {"type": "string", "description": "the source name (default: made from the folder or repo name)"}}),
+         "name": {"type": "string", "description": "the source name (default: made from the folder or repo name)"},
+         "wait_s": {"type": "integer", "minimum": 0, "maximum": MAX_WAIT_S,
+                    "description": "seconds to wait for the index to finish (default 0: answer at once)"}}),
     _function(
         "ast_index_status",
-        "The state of an ast_index job (running, done or failed), its counts, or its error. "
-        "Without job_id: every job of this server since it started.",
+        "Whether an ast_index job has finished: running, done (with its counts) or failed (with its "
+        "error). Without job_id: every job of this server since it started.",
         {"job_id": {"type": "string"}}),
     _function(
         "ast_sources",
-        "The indexed sources (projects and document sets in MongoDB), with their file counts.",
+        "The codebases and document sets already indexed, with their file counts; their names are the "
+        "`scope` of the other ast_* tools. Check here before indexing a project again.",
         {}),
     _function(
         "ast_search",
-        "Find nodes in the index: by exact ID (`proj/pkg/utils.py:MathUtils.double`, `proj/docs/a.md#setup`), "
-        "else by name (a file, class, function or heading), else by keyword over names, else by content "
-        "(keyword and meaning). The first layer with hits answers. `node_types`: directory, file, class, "
+        "Find the files, classes, functions and doc sections relevant to a topic in an indexed codebase. "
+        "Tries the exact ID (`proj/pkg/utils.py:MathUtils.double`, `proj/docs/a.md#setup`), then the name "
+        "(a file, class, function or heading), then keywords over names, then the content (keyword and "
+        "meaning); the first that finds something answers. `node_types`: directory, file, class, "
         "function, document, section, paragraph, list, list_item, table, code, quote, html. `history` also "
         "shows superseded and removed versions. `detail`: fold (ID, type, location, status), preview "
         "(adds the first lines), full (adds the text).",
@@ -121,16 +131,18 @@ TOOLS = [
         ["query"]),
     _function(
         "ast_traverse",
-        "The nodes within `hops` edges of `start_ids` (IDs from ast_search), and those edges. Edge types: "
-        "contains, imports, invokes, inherits, links_to, supersedes. `out` follows edges from the start, "
-        "`in` edges into it, `both` either way; at most `max_fanout` edges per node.",
+        "Follow the structure around nodes found with ast_search (`start_ids`): what they contain, import, "
+        "call or inherit (`out`), what contains, imports, calls or inherits them (`in`), or both, up to "
+        "`hops` edges away. Edge types: contains, imports, invokes, inherits, links_to, supersedes; at most "
+        "`max_fanout` edges per node.",
         {"start_ids": STR_LIST, "direction": {"type": "string", "enum": list(DIRECTIONS)},
          "hops": {"type": "integer", "minimum": 1, "maximum": 5}, "node_types": STR_LIST,
          "edge_types": STR_LIST, "max_fanout": {"type": "integer", "minimum": 1, "maximum": 100}},
         ["start_ids"]),
     _function(
         "ast_retrieve",
-        "The text of each ID with its line range: a version ID as it was, a logical ID as it is now. "
+        "Read the source text of nodes by ID (from ast_search or ast_traverse), with their line ranges: "
+        "a version ID as it was, a logical ID as it is now. "
         "A long text comes in pages of 200 lines (`page`); a superseded version names the newest one; "
         "`context_lines` adds lines around a method from its class.",
         {"ids": STR_LIST, "detail": DETAIL, "context_lines": {"type": "integer", "minimum": 0, "maximum": 100},
@@ -138,7 +150,8 @@ TOOLS = [
         ["ids"]),
     _function(
         "ast_search_by_time",
-        "What was added, changed or removed in `time_range`, newest change first, with when it changed.",
+        "What was added, changed or removed in an indexed codebase during `time_range`, newest change "
+        "first, with when it changed.",
         {"time_range": TIME_RANGE, "scope": SCOPE, "node_types": STR_LIST,
          "limit": {"type": "integer", "minimum": 1, "maximum": 100}},
         ["time_range"]),
@@ -153,9 +166,11 @@ class AstIndexSkill(BaseSkill):
     execution_side = "server"
     keywords = ["index", "ast", "parse", "mongodb", "codebase", "markdown", "search code"]
 
-    def __init__(self, connect=Store.connect, repos_dir: str | Path = AST_REPOS_DIR):
+    def __init__(self, connect=Store.connect, repos_dir: str | Path = AST_REPOS_DIR,
+                 max_wait_s: float = min(MAX_WAIT_S, max(0, HARNESS_HOST_TOOL_TIMEOUT_S - WAIT_MARGIN_S))):
         self._connect = connect
         self.repos_dir = Path(repos_dir)
+        self.max_wait_s = max_wait_s
         self._store: Store | None = None
         self._indexes_ready = False
         self._lock = threading.Lock()
@@ -170,7 +185,7 @@ class AstIndexSkill(BaseSkill):
             return f"Error: ast_index skill has no tool '{tool_name}'."
         try:
             if tool_name == "ast_index":      # resolves its input here, indexes in a thread
-                result = handler(dict(arguments or {}))
+                result = await self._index_and_wait(dict(arguments or {}))
             else:
                 result = await asyncio.to_thread(handler, dict(arguments or {}))
         except ToolError as exc:
@@ -196,6 +211,17 @@ class AstIndexSkill(BaseSkill):
         return store
 
     # ------------------------------------------------------------ indexing
+    async def _index_and_wait(self, args: dict) -> dict:
+        """ast_index, then up to `wait_s` (capped at max_wait_s) for the job to finish."""
+        wait_s = min(_int(args, "wait_s", 0, 0, MAX_WAIT_S), self.max_wait_s)
+        started = self._ast_index(args)
+        if not wait_s:
+            return started
+        job = self.jobs[started["job_id"]]
+        if await asyncio.to_thread(job.finished.wait, wait_s):
+            return job.view()
+        return {**job.view(), "note": f"still indexing after {wait_s:g}s: check ast_index_status"}
+
     def _ast_index(self, args: dict) -> dict:
         given = [key for key in ("path", "workspace_path", "git_url") if args.get(key)]
         if len(given) != 1:
@@ -234,6 +260,7 @@ class AstIndexSkill(BaseSkill):
             job.error, job.state = _store_error(exc), "failed"
         finally:
             job.finished_at = time.time()
+            job.finished.set()
 
     def _local_path(self, key: str, value: str) -> Path:
         if key == "path":
